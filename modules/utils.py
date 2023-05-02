@@ -267,10 +267,10 @@ def write_html_str(chatbot, history):
                 write_str += ('<hr style="border-top: dotted 3px #ccc;">')
         write_str += ('<hr color="red"> \n\n')
     write_str += ('<hr color="blue"> \n\n raw chat context:\n')
-    write_str += ('<code>')
+    write_str += ('<pre><code>')
     for h in history:
-        write_str += ("\n>>>" + h['content'])
-    write_str += ('</code>')
+        write_str += ("\n>>>" + h['content'] +"\n")
+    write_str += ('</code></pre>')
     return write_str
 
 def save_file(filename, system, history, chatbot, user_name):
