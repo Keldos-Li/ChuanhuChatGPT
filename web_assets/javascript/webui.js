@@ -258,6 +258,157 @@ function checkChatMoreMask() {
     }
 }
 
+var intro = null;
+function showIntro() {
+    // 检测是否已经加载了introjs
+    while (!window.introJs) {
+        setTimeout(() => { showIntro(); }, 500);
+        return;
+    }
+    intro = introJs();
+    intro.setOptions({
+        disableInteraction: true,
+        exitOnOverlayClick: false,
+        // showBullets: false,
+        // showProgress: true,
+        hidePrev: true,
+        steps: [
+            { //0
+                title: '我是教程',
+                intro: 'Hello World! 👋 I will teach you how to use Chuanhu Chat<br><a href="javascript:void(0)" onclick="introJs().exit()">教程去死吧</a>'
+            },
+            { //1
+                element: document.querySelector('#status-display #status-display'),
+                intro: 'Here shows the status of the chatbot'
+            },
+            { //2
+                element: document.querySelector('#chuanhu-menu-btn'),
+                intro: '点这个按钮打开菜单，如果菜单未打开，点继续我会帮你自动打开菜单'
+            },
+            { //3
+                element: document.querySelector('#chuanhu-setting-btn'),
+                intro: '点这个按钮打开设置，点继续我会帮你自动打开设置'
+            },
+            { //4
+                element: document.querySelector('.gradio-tabs > .gradio-tabitem > div:nth-child(1) > div.form:nth-child(1)'),
+                intro: '记得在这里输入api key'
+            },
+            { //5
+                element: document.querySelector('#model-select-dropdown'),
+                intro: '在这里切换模型'
+            },
+            { //6
+                element: document.querySelector('#new-chat-btn'),
+                intro: '这个是新建对话'
+            },
+            { //7
+                element: document.querySelector('#open-toolbox-btn'),
+                intro: '点这个按钮打开工具箱'
+            },
+            { //8
+                element: document.querySelector('#chuanhu-toolbox .tab-nav'),
+                intro: '这里切换工具的tab',
+                position: 'left'
+            },
+            { //9
+                element: document.querySelector('#upload-index-file'),
+                intro: '这里管理你的知识库文件'
+            },
+            { //10
+                element: document.querySelector('#chatbot-input-row .chatbot-input-more-btn'),
+                intro: '也可以在这上传文件',
+                position: 'right'
+            },
+            { //11
+                title: '对话',
+                element: document.querySelector('#chatbot-input-tb-row'),
+                intro: '开始对话吧这里和模型对话'
+            },]
+    })
+
+    var introOpenMenu = false;
+    var introOpenToolbox = false;
+    intro.onafterchange(function () {
+        setTimeout(() => {
+            intro.refresh();
+        }, 320);
+    });
+    intro.onbeforechange(function () {
+        if (this._currentStep === 3) {
+            tryClosePopup();
+            if (!menuOpening) {
+                menuClick();
+                introOpenMenu = true;
+            }
+        }
+        if (this._currentStep === 4) {
+            openSettingBox();
+            if (introOpenMenu) {
+                menuClick();
+                introOpenMenu = false;
+            }
+        }
+        if (this._currentStep === 0 || this._currentStep === 1 || this._currentStep === 2 || this._currentStep === 5 || this._currentStep === 6 || this._currentStep === 7 || this._currentStep ===  11) {
+            tryClosePopup();
+        }
+        if (this._currentStep === 8 || this._currentStep === 9) {
+            if (!toolboxOpening) {
+                toolboxClick();
+                introOpenToolbox = true;
+            }
+        }
+        if (this._currentStep === 10) {
+            tryClosePopup();
+            if (!chatbotArea.classList.contains('show-chat-more')) {
+                chatMoreBtnClick();
+            }
+        }
+    });
+    intro.onexit(function () {
+        console.log('exit');
+        byebyeIntro();
+    });
+    intro.oncomplete(function () {
+        console.log('end');
+        byebyeIntro();
+    });
+
+    setTimeout(() => { 
+        intro.start();
+    }, 500);
+
+    function tryClosePopup() {
+        let mask = gradioApp().querySelector('.mask-blur');
+        if (mask?.style.backgroundColor === 'rgba(0, 0, 0, 0.5)' || mask?.style.display !== 'none') {
+            closeBtnClick("box");
+        }
+        if (introOpenToolbox) {
+            toolboxClick();
+            introOpenToolbox = false;
+        }
+        if (introOpenMenu) {
+            menuClick();
+            introOpenMenu = false;
+        }
+    }
+    function byebyeIntro() {
+        localStorage.setItem('needIntro', 'false');
+    }
+}
+
+// function adjustIntroTourForMenu() {
+//     console.log('adjustIntroTourForMenu');
+//     var sideOpening = gradioApp().querySelector('.chuanhu-side-mask');
+//     if (sideOpening) {
+//         document.querySelector('.introjs-helperLayer.introjs-fixedTooltip').style.left = '12px';
+//         document.querySelector('.introjs-tooltipReferenceLayer.introjs-fixedTooltip').style.left = '0';
+//     }
+// }
+// function adjustIntroTourForToolbox() {
+//     console.log('adjustIntroTourForToolbox');
+    
+// }
+
 /*
 function setHistroyPanel() {
     const historySelectorInput = gradioApp().querySelector('#history-select-dropdown input');

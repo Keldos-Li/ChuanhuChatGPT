@@ -410,6 +410,7 @@ window.addEventListener("DOMContentLoaded", function () {
     gradioApp().addEventListener("render", initialize);
     isInIframe = (window.self !== window.top);
     historyLoaded = false;
+    showIntro();
 });
 window.addEventListener('resize', ()=>{
     // setChatbotHeight();

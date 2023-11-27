@@ -55,6 +55,7 @@ def reload_javascript():
     js = javascript_html()
     js += '<script async type="module" src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>'
     js += '<script async type="module" src="http://spin.js.org/spin.umd.js"></script><link type="text/css" href="https://spin.js.org/spin.css" rel="stylesheet" />'
+    js += '<script async type="module" src="https://cdn.jsdelivr.net/npm/intro.js@7.2.0/intro.min.js"></script><link href="https://cdn.jsdelivr.net/npm/intro.js@7.2.0/minified/introjs.min.css" rel="stylesheet" />'
     
     meta = """
         <meta name="apple-mobile-web-app-title" content="川虎 Chat">
