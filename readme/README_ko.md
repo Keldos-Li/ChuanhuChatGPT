@@ -37,6 +37,8 @@
   </p>
 </div>
 
+> 신규: 이제 GPT-5 패밀리(GPT-5 / GPT-5-mini / GPT-5-nano) 지원. 컨텍스트 40만 토큰, 최대 출력 12.8만 토큰.
+
 [![Video Title](https://github.com/GaiZhenbiao/ChuanhuChatGPT/assets/51039745/0eee1598-c2fd-41c6-bda9-7b059a3ce6e7.jpg)](https://github.com/GaiZhenbiao/ChuanhuChatGPT/assets/51039745/0eee1598-c2fd-41c6-bda9-7b059a3ce6e7?autoplay=1)
 
 ## ✨ 5.0 업데이트!
@@ -62,7 +64,7 @@
 
 |                                      API 호출 모델들                                       | 설명                    |                                             로컬 배포 모델                                              | 설명                  |
 |:-------------------------------------------------------------------------------------:|-----------------------|:-------------------------------------------------------------------------------------------------:|---------------------|
-|                       [ChatGPT(GPT-4、GPT-4o、o1)](https://chat.openai.com)                       | gpt-3.5 파인튜닝 지원       | [ChatGLM](https://github.com/THUDM/ChatGLM-6B) ([ChatGLM2](https://github.com/THUDM/ChatGLM2-6B)) |
+|                       [ChatGPT(GPT-5、GPT-4、GPT-4o、o1)](https://chat.openai.com)                       | gpt-3.5 파인튜닝 지원       | [ChatGLM](https://github.com/THUDM/ChatGLM-6B) ([ChatGLM2](https://github.com/THUDM/ChatGLM2-6B)) |
 | [Azure OpenAI](https://azure.microsoft.com/en-us/products/ai-services/openai-service) |                       |                        [LLaMA](https://github.com/facebookresearch/llama)                         | Lora 모델 지원
 |          [Google PaLM](https://developers.generativeai.google/products/palm)          | 스트리밍 미지원              |                       [StableLM](https://github.com/Stability-AI/StableLM)
 |          [iFlytek Starfire Cognition Large Model](https://xinghuo.xfyun.cn)           |                       |                             [MOSS](https://github.com/OpenLMLab/MOSS)

@@ -56,6 +56,9 @@ ONLINE_MODELS = [
     "GPT3.5 Turbo",
     "GPT-4o",
     "GPT-4o-mini",
+    "GPT-5",
+    "GPT-5-mini",
+    "GPT-5-nano",
     "GPT4 Turbo",
     "GPT3.5 Turbo Instruct",
     "GPT4",
@@ -282,6 +285,39 @@ MODEL_METADATA = {
         "multimodal": False,
         "model_type": "OpenAIVision",
         "stream": False,
+        "placeholder": {
+            "logo": "file=web_assets/model_logos/openai-black.webp",
+            "slogan": i18n("gpt_default_slogan"),
+        }
+    },
+    "GPT-5": {
+        "model_name": "gpt-5",
+        "description": "gpt5_description",
+        "token_limit": 400000,
+        "max_generation": 128000,
+        "multimodal": True,
+        "placeholder": {
+            "logo": "file=web_assets/model_logos/openai-black.webp",
+            "slogan": i18n("gpt_default_slogan"),
+        }
+    },
+    "GPT-5-mini": {
+        "model_name": "gpt-5-mini",
+        "description": "gpt5mini_description",
+        "token_limit": 400000,
+        "max_generation": 128000,
+        "multimodal": True,
+        "placeholder": {
+            "logo": "file=web_assets/model_logos/openai-black.webp",
+            "slogan": i18n("gpt_default_slogan"),
+        }
+    },
+    "GPT-5-nano": {
+        "model_name": "gpt-5-nano",
+        "description": "gpt5nano_description",
+        "token_limit": 400000,
+        "max_generation": 128000,
+        "multimodal": True,
         "placeholder": {
             "logo": "file=web_assets/model_logos/openai-black.webp",
             "slogan": i18n("gpt_default_slogan"),

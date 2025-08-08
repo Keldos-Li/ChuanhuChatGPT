@@ -12,6 +12,8 @@
 <p align="center">
     <h3>Lightweight and User-friendly Web-UI for LLMs including ChatGPT/ChatGLM/LLaMA</h3>
     <p align="center">
+          <p align="center"><b>New:</b> Now supports GPT-5 family (GPT-5, GPT-5-mini, GPT-5-nano) with 400k context and up to 128k output tokens.</p>
+
       <a href="https://github.com/GaiZhenbiao/ChuanhuChatGPT/blob/main/LICENSE">
         <img alt="Tests Passing" src="https://img.shields.io/github/license/GaiZhenbiao/ChuanhuChatGPT" />
       </a>
@@ -62,7 +64,7 @@
 
 | API Callable Models | Remarks | Locally Deployed Models | Remarks |
 | :---: | --- | :---: | --- |
-| [ChatGPT(GPT-4, GPT-4o, o1)](https://chat.openai.com) | Support fine-tune gpt-3.5 | [ChatGLM](https://github.com/THUDM/ChatGLM-6B) ([ChatGLM2](https://github.com/THUDM/ChatGLM2-6B)) ([ChatGLM3](https://huggingface.co/THUDM/chatglm3-6b)) ||
+| [ChatGPT(GPT-5, GPT-4, GPT-4o, o1)](https://chat.openai.com) | supports fine-tune gpt-3.5 | [ChatGLM](https://github.com/THUDM/ChatGLM-6B) ([ChatGLM2](https://github.com/THUDM/ChatGLM2-6B)) ([ChatGLM3](https://huggingface.co/THUDM/chatglm3-6b)) ||
 | [Azure OpenAI](https://azure.microsoft.com/en-us/products/ai-services/openai-service) |  | [LLaMA](https://github.com/facebookresearch/llama) | Support Lora models|
 | [Google Gemini Pro](https://ai.google.dev/gemini-api/docs/api-key?hl=zh-cn) |  | [StableLM](https://github.com/Stability-AI/StableLM)||
 | [iFlytek Starfire Cognition Large Model](https://xinghuo.xfyun.cn) |  | [MOSS](https://github.com/OpenLMLab/MOSS)||

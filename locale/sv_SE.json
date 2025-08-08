@@ -194,5 +194,8 @@
     "🗑️ 删除最新对话": "🗑️ Ta bort senaste dialogen",
     "🗑️ 删除最旧对话": "🗑️ Ta bort äldsta dialogen",
     "🧹 新的对话": "🧹 Ny Dialog",
+    "gpt5_description": "Den bästa modellen för kodning och agentuppgifter över domäner. 400 000 tokens kontextfönster och upp till 128 000 tokens utdata.",
+    "gpt5mini_description": "En snabbare och mer kostnadseffektiv version av GPT‑5 för väldefinierade uppgifter. 400 000 tokens kontextfönster och upp till 128 000 tokens utdata.",
+    "gpt5nano_description": "Den snabbaste och mest kostnadseffektiva versionen av GPT‑5. 400 000 tokens kontextfönster och upp till 128 000 tokens utdata.",
     "no_permission_to_update_description": "Du har inte behörighet att uppdatera. Vänligen kontakta administratören. Administratören konfigureras genom att lägga till användarnamnet i admin_list i konfigurationsfilen config.json."
 }

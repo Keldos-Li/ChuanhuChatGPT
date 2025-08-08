@@ -37,6 +37,8 @@
   </p>
 </div>
 
+> Новое: теперь поддерживается семейство GPT-5 (GPT-5, GPT-5-mini, GPT-5-nano): контекст 400k, до 128k токенов вывода.
+
 [![Video Title](https://github.com/GaiZhenbiao/ChuanhuChatGPT/assets/51039745/0eee1598-c2fd-41c6-bda9-7b059a3ce6e7.jpg)](https://github.com/GaiZhenbiao/ChuanhuChatGPT/assets/51039745/0eee1598-c2fd-41c6-bda9-7b059a3ce6e7?autoplay=1)
 
 ## ✨ Обновление 5.0!
@@ -61,7 +63,7 @@
 
 | Модель с использованием API | Примечание | Локально развернутые модели | Примечание |
 | :---: | --- | :---: | --- |
-| [ChatGPT (GPT-4、GPT-4o、o1)](https://chat.openai.com) | Поддерживает микронастройку gpt-3.5 | [ChatGLM](https://github.com/THUDM/ChatGLM-6B) ([ChatGLM2](https://github.com/THUDM/ChatGLM2-6B)) ([ChatGLM3](https://huggingface.co/THUDM/chatglm3-6b)) ||
+| [ChatGPT (GPT-5、GPT-4、GPT-4o、o1)](https://chat.openai.com) | Поддерживает микронастройку gpt-3.5 | [ChatGLM](https://github.com/THUDM/ChatGLM-6B) ([ChatGLM2](https://github.com/THUDM/ChatGLM2-6B)) ([ChatGLM3](https://huggingface.co/THUDM/chatglm3-6b)) ||
 | [Azure OpenAI](https://azure.microsoft.com/en-us/products/ai-services/openai-service) |  | [LLaMA](https://github.com/facebookresearch/llama) | Поддерживает модель Lora |
 | [Google Gemini Pro](https://ai.google.dev/gemini-api/docs/api-key?hl=zh-cn) |  | [StableLM](https://github.com/Stability-AI/StableLM)||
 | [Xunfei Xinghuo Cognitive Model](https://xinghuo.xfyun.cn) |  | [MOSS](https://github.com/OpenLMLab/MOSS)||

@@ -280,6 +280,9 @@
     "chuanhu_question_4": "Any new trends on TikTok?",
     "gpt4o_description": "OpenAI's most advanced, multimodal flagship model that’s cheaper and faster than GPT-4 Turbo.",
     "gpt4omini_description": "OpenAI's affordable and intelligent small model for fast, lightweight tasks.",
+    "gpt5_description": "The best model for coding and agentic tasks across domains. 400,000-token context window and up to 128,000 output tokens.",
+    "gpt5mini_description": "A faster, more cost-efficient version of GPT-5 for well-defined tasks. 400,000-token context window and up to 128,000 output tokens.",
+    "gpt5nano_description": "Fastest, most cost-efficient version of GPT-5. 400,000-token context window and up to 128,000 output tokens.",
     "o1_description": "The o1 series of large language models are trained with reinforcement learning to perform complex reasoning. o1 models think before they answer, producing a long internal chain of thought before responding to the user.",
     "no_permission_to_update_description": "You do not have permission to update. Please contact the administrator. The administrator's configuration method is to add the username to the admin_list in the configuration file config.json."
 }
