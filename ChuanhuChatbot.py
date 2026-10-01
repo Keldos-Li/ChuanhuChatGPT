@@ -15,6 +15,8 @@ from modules.utils import *
 from modules.config import *
 from modules import config
 from modules import extensions
+from modules import plugin_callbacks
+from modules.plugin_context import AppContext
 import gradio as gr
 import colorama
 
@@ -804,6 +806,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         outputs=[saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn],
         js='(a,b)=>{return bgSelectHistory(a,b);}'
     )
+    plugin_callbacks.invoke("app_ready", AppContext(chatbot, current_model, user_input))
 # 默认开启本地服务器，默认可以直接从IP访问，默认不创建公开分享链接
 demo.title = i18n("川虎Chat 🚀")
 
@@ -816,7 +819,7 @@ if __name__ == "__main__":
         _allowed_paths.append(config.midjourney_temp_folder)
     demo.queue().launch(
         allowed_paths=_allowed_paths,
-        blocked_paths=["config.json", "files", "models", "lora", "modules", "history"],
+        blocked_paths=["config.json", ".env.agents", ".agents-runtime", "extension_state.json", "plugin_data", "files", "models", "lora", "modules", "history"],
         server_name=server_name,
         server_port=server_port,
         share=share,

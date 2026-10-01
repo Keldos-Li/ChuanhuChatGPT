@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import importlib.util
+import hashlib
+from types import ModuleType
 import json
 import logging
 import os
@@ -10,6 +12,10 @@ import shutil
 import subprocess
 import sys
 import traceback
+import re
+import tempfile
+from threading import RLock
+from functools import wraps
 from html import escape
 
 import gradio as gr
@@ -20,6 +26,45 @@ from .presets import i18n
 
 
 EXTENSIONS_DIR = Path(shared.chuanhu_path) / "extensions"
+STATE_FILE = Path(shared.chuanhu_path) / "extension_state.json"
+_lock = RLock()
+
+
+def synchronized(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _lock:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def _read_state():
+    if not STATE_FILE.exists():
+        return {}
+    data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise ValueError("Unsupported extension_state.json format")
+    values = data.get("enabled")
+    if not isinstance(values, dict) or any(type(v) is not bool for v in values.values()):
+        raise ValueError("Invalid extension enabled state")
+    return values
+
+
+def _save_enabled(extension_id, enabled):
+    values = _read_state()
+    values[extension_id] = enabled
+    # Separate state avoids rewriting config.json (which may contain secrets
+    # and comments). Replace atomically; failed writes leave runtime unchanged.
+    fd, temporary = tempfile.mkstemp(prefix=".extension-state-", dir=STATE_FILE.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump({"version": 1, "enabled": values}, output, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, STATE_FILE)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 @dataclass
@@ -33,6 +78,8 @@ class Extension:
     metadata: dict = field(default_factory=dict)
     loaded_scripts: list[str] = field(default_factory=list)
     error: str | None = None
+    module_names: list[str] = field(default_factory=list)
+    restart_required: bool = False
 
 
 _loaded_extensions: list[Extension] = []
@@ -54,12 +101,31 @@ def _read_metadata(path: Path) -> dict:
     if not metadata_path.exists():
         return {}
     with metadata_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        metadata = json.load(f)
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata must be an object")
+    extension_id = metadata.get("id", path.name)
+    if not isinstance(extension_id, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", extension_id):
+        raise ValueError("id must be 1–64 ASCII letters, digits, underscores or hyphens; start with a letter")
+    for key in ("name", "version", "description", "author"):
+        if key in metadata and not isinstance(metadata[key], str):
+            raise ValueError(f"{key} must be a string")
+    if "enabled" in metadata and type(metadata["enabled"]) is not bool:
+        raise ValueError("enabled must be a boolean")
+    if "priority" in metadata and type(metadata["priority"]) is not int:
+        raise ValueError("priority must be an integer")
+    for key in ("name_i18n", "description_i18n"):
+        if key in metadata and (not isinstance(metadata[key], dict) or
+                                any(not isinstance(v, str) for v in metadata[key].values())):
+            raise ValueError(f"{key} must map languages to strings")
+    return metadata
 
 
 def _extension_from_path(path: Path, disabled_extensions: set[str]) -> Extension:
     metadata = _read_metadata(path)
     extension_id = metadata.get("id") or path.name
+    if not isinstance(extension_id, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", extension_id) or extension_id == "core":
+        raise ValueError("Invalid or reserved extension id")
     enabled = bool(metadata.get("enabled", True)) and extension_id not in disabled_extensions
     return Extension(
         id=extension_id,
@@ -76,16 +142,36 @@ def discover_extensions(disabled_extensions: list[str] | None = None) -> list[Ex
     disabled = set(disabled_extensions or [])
     root = extensions_dir()
     extensions = []
+    try:
+        overrides = _read_state()
+    except (OSError, ValueError) as exc:
+        # Fail closed instead of re-enabling plugins when state is corrupted.
+        logging.error("Cannot read extension state: %s", exc)
+        overrides = None
     for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
-        if child.is_dir() and not child.name.startswith("."):
+        if child.is_dir() and not child.is_symlink() and not child.name.startswith("."):
             if not (child / "metadata.json").exists() and not _script_paths(Extension(id=child.name, path=child, name=child.name)):
                 continue
             try:
-                extensions.append(_extension_from_path(child, disabled))
+                extension = _extension_from_path(child, disabled)
+                if overrides is None:
+                    extension.enabled = False
+                    extension.error = "Cannot read extension_state.json; repair it before loading plugins"
+                else:
+                    extension.enabled = overrides.get(extension.id, extension.enabled)
+                extensions.append(extension)
             except Exception as exc:
                 extension = Extension(id=child.name, path=child, name=child.name, enabled=False)
                 extension.error = i18n("读取 metadata.json 失败：") + str(exc)
                 extensions.append(extension)
+    groups = {}
+    for extension in extensions:
+        groups.setdefault(extension.id, []).append(extension)
+    for extension_id, matches in groups.items():
+        if len(matches) > 1:
+            for extension in matches:
+                extension.enabled = False
+                extension.error = f"Duplicate plugin id: {extension_id}"
     return sorted(extensions, key=lambda item: (item.priority, item.id.lower()))
 
 
@@ -101,22 +187,61 @@ def _script_paths(extension: Extension) -> list[Path]:
 
 
 def _load_script(extension: Extension, script_path: Path):
-    module_name = f"chuanhu_extension_{extension.id}_{script_path.stem}".replace("-", "_")
+    namespace = "chuanhu_extension_" + hashlib.sha256(str(extension.path.resolve()).encode()).hexdigest()
+    if namespace not in sys.modules:
+        package = ModuleType(namespace)
+        package.__path__ = [str(extension.path)]
+        package.__package__ = namespace
+        sys.modules[namespace] = package
+        extension.module_names.append(namespace)
+    if script_path.parent.name == "scripts":
+        scripts_namespace = namespace + ".scripts"
+        if scripts_namespace not in sys.modules:
+            package = ModuleType(scripts_namespace)
+            package.__path__ = [str(script_path.parent)]
+            package.__package__ = scripts_namespace
+            sys.modules[scripts_namespace] = package
+            extension.module_names.append(scripts_namespace)
+        module_name = scripts_namespace + "." + script_path.stem
+    else:
+        module_name = namespace + "." + script_path.stem
+    # Legacy bare imports remain supported when unambiguous. Never silently
+    # bind a plugin's helper to another plugin/library's cached module.
+    for local in extension.path.iterdir():
+        name = local.stem if local.suffix == ".py" else local.name
+        if local.suffix != ".py" and not (local / "__init__.py").is_file():
+            continue
+        cached = sys.modules.get(name)
+        filename = getattr(cached, "__file__", None)
+        if cached is not None and (not filename or extension.path.resolve() not in Path(filename).resolve().parents):
+            raise ImportError(f"Local module {name!r} conflicts with an existing module; use package-relative imports")
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(i18n("无法加载插件脚本：") + str(script_path))
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+    extension.module_names.append(module_name)
     previous_path = list(sys.path)
     sys.path.insert(0, str(extension.path))
     try:
         with plugin_callbacks.extension_context(extension.id):
-            spec.loader.exec_module(module)
+            # Entry scripts must reload their current source (even within one
+            # filesystem timestamp tick) and must not dirty installed Git repos
+            # with an untracked entry-script bytecode cache.
+            exec(compile(script_path.read_bytes(), str(script_path), "exec"), module.__dict__)
     finally:
         sys.path = previous_path
+        # Capture imported helpers even when an entry script fails halfway.
+        for name, imported in list(sys.modules.items()):
+            filename = getattr(imported, "__file__", None)
+            if (name.startswith(namespace + ".") or
+                    (filename and extension.path.resolve() in Path(filename).resolve().parents)):
+                if name not in extension.module_names:
+                    extension.module_names.append(name)
     extension.loaded_scripts.append(str(script_path.relative_to(extension.path)))
 
 
+@synchronized
 def load_extensions(disabled_extensions: list[str] | None = None, force: bool = False):
     global _loaded, _loaded_extensions, _configured_disabled_extensions
     if _loaded and not force:
@@ -125,6 +250,8 @@ def load_extensions(disabled_extensions: list[str] | None = None, force: bool = 
         _configured_disabled_extensions = list(disabled_extensions)
     else:
         disabled_extensions = _configured_disabled_extensions
+    for previous in _loaded_extensions:
+        _unload_extension(previous)
     plugin_callbacks.clear_callbacks()
     _loaded_extensions = discover_extensions(disabled_extensions)
     for extension in _loaded_extensions:
@@ -138,12 +265,21 @@ def load_extensions(disabled_extensions: list[str] | None = None, force: bool = 
             except Exception as exc:
                 traceback.print_exc()
                 extension.error = f"{script_path.name}: {exc}"
+                _unload_extension(extension)
                 plugin_callbacks.set_extension_enabled(extension.id, False)
                 plugin_callbacks.register_error(extension.id, extension.error)
                 break
     _loaded = True
     logging.info(i18n("已加载 {count} 个插件").format(count=len([x for x in _loaded_extensions if x.enabled and not x.error])))
     return get_loaded_extensions()
+
+
+def _unload_extension(extension):
+    plugin_callbacks.unregister_extension(extension.id)
+    for name in extension.module_names:
+        sys.modules.pop(name, None)
+    extension.module_names.clear()
+    extension.loaded_scripts.clear()
 
 
 def _collect_files(extension: Extension, relative_dirs: list[str], suffixes: tuple[str, ...]) -> list[Path]:
@@ -209,7 +345,8 @@ def _render_callback_tabs(kind: str):
             tab_classes += " extension-settings-generated-tab"
         with gr.Tab(label=title, elem_classes=tab_classes):
             try:
-                record.callback()
+                with plugin_callbacks.extension_context(record.extension_id):
+                    record.callback()
             except Exception as exc:
                 message = "".join(traceback.format_exception_only(type(exc), exc)).strip()
                 plugin_callbacks.register_error(record.extension_id, f"{record.name}: {message}")
@@ -223,6 +360,8 @@ def render_extension_tabs():
 def _extension_status(extension: Extension):
     if extension.error:
         return i18n("错误")
+    if extension.restart_required:
+        return i18n("需要重启")
     if not extension.enabled:
         return i18n("已禁用")
     return i18n("已启用")
@@ -243,6 +382,7 @@ def _git_extension_has_updates(extension: Extension):
             stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="ignore",
+            timeout=15,
         )
         result = subprocess.run(
             ["git", "-C", str(extension.path), "rev-list", "--count", "HEAD..@{u}"],
@@ -251,6 +391,7 @@ def _git_extension_has_updates(extension: Extension):
             stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="ignore",
+            timeout=15,
         )
         return int((result.stdout or "0").strip() or "0") > 0
     except Exception:
@@ -272,59 +413,86 @@ def _find_extension(extension_id: str):
     return None
 
 
+@synchronized
 def _set_extension_enabled(extension_id: str, enabled: bool):
     extension = _find_extension(extension_id)
     if extension is None:
         return i18n("未找到插件：") + extension_id
+    if extension.error and enabled:
+        return i18n("插件启用失败：") + extension.error
+    try:
+        _save_enabled(extension_id, bool(enabled))
+    except (OSError, ValueError) as exc:
+        return i18n("保存插件状态失败：") + str(exc)
+    disabled = set(_configured_disabled_extensions)
+    disabled.discard(extension_id) if enabled else disabled.add(extension_id)
+    _configured_disabled_extensions[:] = sorted(disabled)
     extension.enabled = bool(enabled)
-    if enabled and not extension.loaded_scripts and not extension.error:
+    if enabled and not extension.loaded_scripts and not extension.error and not extension.restart_required:
         for script_path in _script_paths(extension):
             try:
                 _load_script(extension, script_path)
             except Exception as exc:
                 traceback.print_exc()
                 extension.error = f"{script_path.name}: {exc}"
+                _unload_extension(extension)
                 plugin_callbacks.register_error(extension.id, extension.error)
                 break
-    plugin_callbacks.set_extension_enabled(extension.id, extension.enabled and not extension.error)
+    plugin_callbacks.set_extension_enabled(extension.id, extension.enabled and not extension.error and not extension.restart_required)
     if extension.error:
         return i18n("插件启用失败：") + extension.error
     if extension.enabled:
-        return i18n("插件已启用，前端静态资源变化需要刷新页面后生效。")
+        return i18n("插件已启用并保存；新界面和静态资源需要重启应用。")
     return i18n("插件已禁用，已注册的 Python 钩子会立即停止执行。")
 
 
+@synchronized
 def install_extension(source: str):
     source = (source or "").strip()
     if not source:
         return i18n("请输入 Git URL 或本地插件目录。")
     target_name = _safe_extension_name(source)
+    if target_name.startswith("."):
+        return i18n("插件目录名称无效。")
     target_path = extensions_dir() / target_name
     if target_path.exists():
         return i18n("目标插件目录已存在：") + str(target_path)
     try:
-        if source.startswith(("http://", "https://", "git@")) or source.endswith(".git"):
-            subprocess.run(
-                ["git", "clone", "--depth", "1", source, str(target_path)],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding="utf-8",
-                errors="ignore",
-            )
-        else:
-            source_path = Path(source).expanduser().resolve()
-            if not source_path.is_dir():
-                return i18n("本地插件目录不存在：") + str(source_path)
-            shutil.copytree(source_path, target_path)
-        load_extensions(force=True)
-        return i18n("插件已安装，请刷新页面或重启应用以加载新的前端资源。")
-    except subprocess.CalledProcessError as exc:
-        return i18n("插件安装失败：") + (exc.stderr or str(exc))
+        # Hidden staging prevents discovery of a partially copied installation.
+        with tempfile.TemporaryDirectory(prefix=".install-", dir=extensions_dir()) as staging:
+            candidate = Path(staging) / target_name
+            if source.startswith(("http://", "https://", "git@")) or source.endswith(".git"):
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", "--", source, str(candidate)],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    encoding="utf-8", errors="replace", timeout=120,
+                )
+            else:
+                source_path = Path(source).expanduser().resolve()
+                if not source_path.is_dir():
+                    raise ValueError("Local plugin directory does not exist")
+                if source_path == extensions_dir().resolve() or source_path in target_path.resolve().parents:
+                    raise ValueError("Cannot install a parent of the extension directory")
+                shutil.copytree(source_path, candidate, symlinks=True)
+            if any(p.is_symlink() for p in candidate.rglob("*")):
+                raise ValueError("Plugin installation must not contain symlinks")
+            extension = _extension_from_path(candidate, set())
+            if not (candidate / "metadata.json").is_file():
+                raise ValueError("Installed plugins must include metadata.json")
+            if any(item.id == extension.id for item in discover_extensions()):
+                raise ValueError("Duplicate plugin id: " + extension.id)
+            # Installation is not permission to execute third-party Python.
+            _save_enabled(extension.id, False)
+            candidate.rename(target_path)
+        refresh_extension_list()
+        return i18n("插件已安装并默认禁用；检查来源和代码后启用，重启以加载界面。")
+    except subprocess.CalledProcessError:
+        return i18n("插件安装失败：Git 操作失败，请检查来源与访问权限。")
     except Exception as exc:
         return i18n("插件安装失败：") + str(exc)
 
 
+@synchronized
 def update_extension(extension_id: str):
     extension = _find_extension(extension_id)
     if extension is None:
@@ -332,18 +500,24 @@ def update_extension(extension_id: str):
     if not _is_git_extension(extension):
         return i18n("该插件不是 Git 仓库，无法自动更新。")
     try:
+        status = subprocess.run(
+            ["git", "-C", str(extension.path), "status", "--porcelain"],
+            check=True, capture_output=True, text=True, timeout=15,
+        )
+        if status.stdout.strip():
+            return i18n("插件有本地修改或未跟踪文件，请先保存；更新已取消。")
         subprocess.run(
             ["git", "-C", str(extension.path), "pull", "--ff-only"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="ignore",
+            check=True, capture_output=True, text=True, timeout=120,
         )
-        load_extensions(force=True)
-        return i18n("插件已更新，请刷新页面或重启应用以加载新的前端资源。")
-    except subprocess.CalledProcessError as exc:
-        return i18n("插件更新失败：") + (exc.stderr or str(exc))
+        # Existing Gradio components retain old function objects. Suspend hooks
+        # and require restart instead of mixing two versions in one process.
+        _unload_extension(extension)
+        extension.restart_required = True
+        plugin_callbacks.set_extension_enabled(extension.id, False)
+        return i18n("插件已更新，Python 回调已暂停；请重启应用加载新版本。")
+    except subprocess.CalledProcessError:
+        return i18n("插件更新失败：请检查远程访问、跟踪分支或分支分歧；未执行强制重置。")
     except Exception as exc:
         return i18n("插件更新失败：") + str(exc)
 
@@ -358,9 +532,53 @@ def update_all_extensions():
     return "\n\n".join(messages)
 
 
+@synchronized
 def refresh_extension_list():
-    load_extensions(force=True)
-    return i18n("插件列表已刷新。")
+    global _loaded_extensions
+    previous = {item.path: item for item in _loaded_extensions}
+    found = discover_extensions(_configured_disabled_extensions)
+    for item in found:
+        old = previous.pop(item.path, None)
+        if old and old.id == item.id and not item.error:
+            item.loaded_scripts = old.loaded_scripts
+            item.module_names = old.module_names
+            item.error = old.error
+            item.restart_required = old.restart_required
+            if item.metadata != old.metadata:
+                _unload_extension(old)
+                item.loaded_scripts = []
+                item.module_names = []
+                item.restart_required = True
+        else:
+            if old:
+                _unload_extension(old)
+            item.restart_required = True
+        plugin_callbacks.set_extension_enabled(item.id, item.enabled and not item.error and not item.restart_required)
+    for removed in previous.values():
+        _unload_extension(removed)
+    _loaded_extensions = found
+    return i18n("插件列表已刷新；新插件界面需要重启应用。")
+
+
+@synchronized
+def check_extension_updates():
+    messages = []
+    for extension in get_loaded_extensions():
+        if not _is_git_extension(extension):
+            continue
+        try:
+            subprocess.run(
+                ["git", "-C", str(extension.path), "fetch", "--prune"],
+                check=True, capture_output=True, timeout=60,
+            )
+            messages.append(extension.id + ": " + i18n("有更新" if _git_extension_has_updates(extension) else "未发现更新"))
+        except (subprocess.SubprocessError, OSError):
+            messages.append(extension.id + ": " + i18n("检查失败，请检查远程访问与跟踪分支。"))
+    return "\n\n".join(messages) or i18n("没有可检查的 Git 插件。")
+
+
+def check_extension_updates_from_ui():
+    return check_extension_updates(), extension_manager_html()
 
 
 def extension_manager_html():
@@ -370,8 +588,8 @@ def extension_manager_html():
 
     rows = []
     for extension in extensions:
-        checked = "checked" if extension.enabled and not extension.error else ""
-        disabled = "disabled" if extension.error else ""
+        checked = "checked" if extension.enabled else ""
+        disabled = ""
         description = _extension_description(extension)
         version = extension.version or "-"
         status = _extension_status(extension)
@@ -391,7 +609,7 @@ def extension_manager_html():
                   {update_link}
                 </div>
                 <div class="extension-desc">{escape(description)}</div>
-                <div class="extension-meta">{escape(version)} · {escape(status)}</div>
+                <div class="extension-meta">{escape(extension.id)} · {escape(version)} · {escape(status)}</div>
                 {f'<div class="extension-error">{escape(i18n("错误：") + extension.error)}</div>' if extension.error else ''}
               </div>
               <label class="extension-native-switch" title="{escape(status)}">
@@ -410,10 +628,14 @@ def handle_extension_action(action_json: str):
     except Exception:
         return i18n("插件操作参数无效。"), extension_manager_html()
 
+    if not isinstance(action, dict) or not isinstance(action.get("id", ""), str):
+        return i18n("插件操作参数无效。"), extension_manager_html()
     extension_id = action.get("id", "")
     action_type = action.get("action", "")
     if action_type == "toggle":
-        message = _set_extension_enabled(extension_id, bool(action.get("enabled", False)))
+        if type(action.get("enabled")) is not bool:
+            return i18n("插件操作参数无效。"), extension_manager_html()
+        message = _set_extension_enabled(extension_id, action["enabled"])
     elif action_type == "update":
         message = update_extension(extension_id)
     else:
@@ -434,6 +656,7 @@ def update_all_extensions_from_ui():
 
 
 def render_extension_manager():
+    gr.Markdown(i18n("插件是受信任的 Python / JavaScript 代码，可访问进程和文件；只启用可信来源。管理操作影响所有用户。"))
     status_box = gr.Markdown("", elem_classes="extension-status")
     action_payload = gr.Textbox(value="", visible=False, elem_id="extension-action-payload")
     action_btn = gr.Button(value="", visible=False, elem_id="extension-action-btn")
@@ -451,6 +674,14 @@ def render_extension_manager():
 
     install_btn.click(install_extension_from_ui, inputs=[source], outputs=[status_box, list_html], show_progress=True)
     action_btn.click(handle_extension_action, inputs=[action_payload], outputs=[status_box, list_html], show_progress=True)
+
+    with gr.Row():
+        refresh_btn = gr.Button(i18n("刷新列表"))
+        check_btn = gr.Button(i18n("检查更新"))
+        update_btn = gr.Button(i18n("更新全部"))
+    refresh_btn.click(refresh_extension_list_from_ui, outputs=[status_box, list_html])
+    check_btn.click(check_extension_updates_from_ui, outputs=[status_box, list_html])
+    update_btn.click(update_all_extensions_from_ui, outputs=[status_box, list_html])
 
     errors = plugin_callbacks.get_errors()
     if errors:

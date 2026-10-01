@@ -28,3 +28,11 @@ class ChatErrorContext:
     error: Exception
     chat_context: ChatContext | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AppContext:
+    """Gradio components, not user data; pass them as event inputs."""
+    chatbot: Any
+    current_model: Any
+    user_input: Any

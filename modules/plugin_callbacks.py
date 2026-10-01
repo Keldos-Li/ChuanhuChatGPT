@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import logging
 import traceback
@@ -28,22 +29,28 @@ _callback_map: dict[str, list[CallbackRecord]] = {
     "after_chat": [],
     "chat_error": [],
     "after_history_saved": [],
+    "app_ready": [],
 }
 
-_current_extension_id = "core"
+_current_extension_id = ContextVar("chuanhu_extension_id", default="core")
 _errors: list[dict[str, str]] = []
 _extension_enabled: dict[str, bool] = {}
 
 
 @contextmanager
 def extension_context(extension_id: str):
-    global _current_extension_id
-    previous = _current_extension_id
-    _current_extension_id = extension_id
+    token = _current_extension_id.set(extension_id)
     try:
         yield
     finally:
-        _current_extension_id = previous
+        _current_extension_id.reset(token)
+
+
+def unregister_extension(extension_id: str):
+    """Roll back all callbacks owned by an extension (including partial imports)."""
+    for kind, records in _callback_map.items():
+        _callback_map[kind] = [r for r in records if r.extension_id != extension_id]
+    _extension_enabled.pop(extension_id, None)
 
 
 def clear_callbacks():
@@ -56,6 +63,7 @@ def clear_callbacks():
 def register_error(extension_id: str, message: str):
     logging.error("[extension:%s] %s", extension_id, message)
     _errors.append({"extension": extension_id, "message": message})
+    del _errors[:-100]
 
 
 def get_errors():
@@ -74,16 +82,52 @@ def _register(kind: str, callback: Callback):
     if kind not in _callback_map:
         raise ValueError(f"Unknown plugin callback kind: {kind}")
     record = CallbackRecord(
-        extension_id=_current_extension_id,
+        extension_id=_current_extension_id.get(),
         name=getattr(callback, "__name__", repr(callback)),
         callback=callback,
     )
     _callback_map[kind].append(record)
+    # Gradio retains event functions after a plugin is disabled. Guard direct
+    # invocations as well as lifecycle dispatch so those events stop too.
     return callback
+
+
+def guarded_callback(callback: Callback):
+    """Wrap a Gradio event during registration inside extension_context."""
+    from functools import wraps
+    from inspect import isgeneratorfunction
+    extension_id = _current_extension_id.get()
+
+    if isgeneratorfunction(callback):
+        @wraps(callback)
+        def guarded_generator(*args, **kwargs):
+            if not is_extension_enabled(extension_id):
+                raise gr.Error("Plugin is disabled; restart after enabling it.")
+            iterator = callback(*args, **kwargs)
+            try:
+                for result in iterator:
+                    if not is_extension_enabled(extension_id):
+                        raise gr.Error("Plugin was disabled; the task stopped.")
+                    yield result
+            finally:
+                iterator.close()
+        return guarded_generator
+
+    @wraps(callback)
+    def guarded(*args, **kwargs):
+        if not is_extension_enabled(extension_id):
+            raise gr.Error("Plugin is disabled; restart after enabling it.")
+        return callback(*args, **kwargs)
+    return guarded
 
 
 def on_extension_controls(callback: Callback):
     return _register("extension_controls", callback)
+
+
+def on_app_ready(callback: Callback):
+    """Bind events to core Gradio components once UI construction is complete."""
+    return _register("app_ready", callback)
 
 
 def on_toolbox_tab(callback: Callback):
@@ -138,7 +182,8 @@ def invoke(kind: str, *args, **kwargs):
     results = []
     for record in iter_callbacks(kind):
         try:
-            results.append(record.callback(*args, **kwargs))
+            with extension_context(record.extension_id):
+                results.append(record.callback(*args, **kwargs))
         except Exception as exc:
             message = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             register_error(record.extension_id, f"{record.name}: {message}")
@@ -152,7 +197,8 @@ def render_callbacks(kind: str, empty_text: str, separator: bool = False):
     rendered = False
     for record in iter_callbacks(kind):
         try:
-            record.callback()
+            with extension_context(record.extension_id):
+                record.callback()
             rendered = True
             if separator:
                 gr.Markdown("---")
