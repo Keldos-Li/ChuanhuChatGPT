@@ -1,384 +1,150 @@
-# 插件开发指南
+# 插件开发与使用
 
-这份文档面向第三方插件开发者，也面向协助开发插件的 AI。插件系统的目标是让扩展代码在不改动主程序核心文件的情况下，为侧边栏、设置页和对话流程增加轻量能力。
+插件用稳定 ID 注册能力，管理器只处理发现、安装、启停与更新。业务界面与设置在插件自己的 Tab 中；设置分组仍在 About 后，小屏隐藏分组标题。
 
-当前文档以仓库内可见的插件 API 为准：插件通过 `metadata.json` 声明基本信息，通过 Python 脚本注册回调，通过 CSS / JavaScript 静态资源增强界面。
+## 使用与迁移
 
-## 快速开始
+1. 启动后打开设置 → 插件，查看 ID、版本、启停和错误。
+2. 安装 Git URL 或本地目录会先复制到隐藏暂存目录，验证 metadata、ID 冲突和符号链接，成功后发布目录。**新安装插件默认禁用，不会执行 Python 或 install.py，不会自动安装依赖。**
+3. 检查来源和代码后启用。已加载 Python hook 可立即暂停/恢复；新增界面与静态资源需要**重启应用**。刷新列表只重新发现，不执行新代码或重建已有 UI。
+4. 点击检查更新才执行 fetch；渲染列表本身不联网。Git 更新拒绝有修改或未跟踪文件的仓库，只允许 fast-forward，绝不 hard reset。更新成功后暂停该插件 hook，重启应用加载新版本。
 
-一个最小插件目录如下：
+启停保存在项目根目录 `extension_state.json`，不会改写包含密钥与注释的 `config.json`。启动优先级：持久启停覆盖 → `config.json.disabled_extensions` → metadata.enabled。该文件被 Git 忽略，写入采用原子替换，写失败不会改变运行态。损坏时所有插件停止加载并显示错误；先备份并修复状态文件，避免误删后意外启用插件。
+
+旧 `disabled_extensions` 仍然可用。旧模块内全局 STATE 属于所有用户共享的进程状态；不要把录制开关、用户文本、运行结果或 session ID 放进去。自动笔记已改为当前模型会话独立开启；切换模型重新开启，文件保存到私有 `plugin_data/auto_notes/<随机会话目录>/`，不会迁移/删除旧插件 data 下的历史文件。
+
+## 信任边界
+
+Python / JavaScript 插件是**受信任代码，不是沙箱**，能够访问应用进程、文件、网络与凭据。参数校验和错误隔离不改变这一点。管理操作是全局操作，请仅向可信管理员开放应用；当前管理器没有单独的按用户授权模型。不要将无认证的应用公开给不可信用户。
+
+插件不得默认上传用户数据，不得硬编码密钥。存储私有数据使用 `plugin_data/`，不要放在允许浏览器读取的 `extensions/` 静态资源目录。主程序禁止浏览器下载 `config.json`、`.env.agents`、`.agents-runtime`、`extension_state.json` 和 `plugin_data`。需要下载的公开/会话产物通过 Gradio File 返回临时文件。
+
+## 可运行模板
+
+复制 `templates/extension` 到 `extensions/my_extension`，修改 ID/名称，然后启用并重启。模板按钮会整理当前输入空白，不会发送消息、访问网络或存储对话。无需额外依赖。
 
 ```text
-extensions/
-└── my_extension/
-    ├── metadata.json
-    └── scripts/
-        └── main.py
+extensions/my_extension/
+├── metadata.json
+├── extension.py       # 可选根级入口
+├── scripts/main.py    # scripts/*.py 入口按文件名排序
+├── style.css          # 可选插件专属样式
+├── stylesheet/*.css
+└── javascript/*.js    # 或 .mjs
 ```
 
-`metadata.json`：
+metadata 必须是标准 JSON 对象。ID 为 1–64 位 ASCII 字母/数字/下划线/短横线，首位为字母，`core` 保留；未提供 ID 时使用符合相同规则的目录名。重复 ID 的所有候选均拒绝加载，避免显示名或目录顺序决定行为。`name/version/description/author` 必须为字符串，`enabled` 为 boolean，`priority` 为 integer；翻译表必须为语言→字符串。目录按 priority、ID 排序。
 
 ```json
 {
   "id": "my_extension",
-  "name": "我的插件",
-  "version": "0.1.0",
-  "description": "演示如何注册一个最小插件。",
-  "enabled": true,
+  "name": "我的文本工具",
+  "name_i18n": {"en_US": "My text tool"},
+  "description": "显式整理当前输入。",
+  "description_i18n": {"en_US": "Explicitly tidy the current input."},
+  "version": "1.0.0",
+  "enabled": false,
   "priority": 100
 }
 ```
 
-`scripts/main.py`：
+没有 setup(context) / entry 字段分派机制：入口执行顶层装饰器注册。metadata 中额外字段只是插件自己的描述数据，不会让加载器执行新入口、解析依赖或运行安装脚本。
+
+## 绑定当前会话组件
 
 ```python
-from modules.plugin_callbacks import on_before_chat
-from modules.plugin_context import ChatContext
+import gradio as gr
+from modules.plugin_callbacks import on_toolbox_tab, on_app_ready, guarded_callback
 
+@on_toolbox_tab
+def render_controls():
+    button = gr.Button("整理输入")
 
-@on_before_chat
-def add_marker(context: ChatContext):
-    if isinstance(context.user_input, str):
-        context.user_input = f"[来自插件] {context.user_input}"
+    @on_app_ready
+    def bind(app):
+        button.click(
+            guarded_callback(lambda text: (text or "").strip()),
+            inputs=app.user_input, outputs=app.user_input,
+        )
 ```
 
-插件脚本被加载时会执行模块顶层代码。使用装饰器注册回调即可，不需要手动调用加载器。
+`on_app_ready` 在完整界面构建后执行一次，收到不可变 `AppContext(chatbot, current_model, user_input)`。这些是 **Gradio 组件句柄**；只有事件执行时通过 inputs 取得当前浏览器的值，不要在构建时读取/缓存用户内容。事件的返回值通过 outputs 更新对应组件。
 
-## 目录结构
+`guarded_callback` 在插件归属上下文内创建，禁用后阻止新事件执行；生成器在下次产出时停止并关闭资源。它无法强制中断正在执行的阻塞代码，也不能取消已经提交到远端的任务。Agent 的停止按钮会显式发出远程取消事件。
 
-推荐结构：
+设置 Tab 用 `on_settings_tab`，内容由插件渲染；不要把业务选项塞入管理器。使用 `gr.State` 或当前模型对象保存本会话的配置。当前自动笔记展示了后者，会话导出展示了直接绑定当前聊天组件，Agent 展示了按 owner 隔离并锁定的任务状态。
 
-```text
-extensions/<extension_id>/
-├── metadata.json
-├── extension.py              # 可选：根级插件脚本
-├── scripts/                  # 可选：多个 Python 脚本
-│   ├── main.py
-│   └── other.py
-├── style.css                 # 可选：根级样式文件，会自动加载
-├── stylesheet/               # 可选：多个 CSS 文件
-│   └── panel.css
-└── javascript/               # 可选：多个 JS / MJS 文件
-    └── main.js
+## 对话 hook
+
+| 注册函数 | 时间点 |
+| --- | --- |
+| on_before_chat | 对话开始，可修改 user_input |
+| on_after_prepare | 输入预处理之后 |
+| on_before_model_call | 调用已有模型之前 |
+| on_after_chat | 完整回答之后 |
+| on_chat_error | 对话异常 |
+| on_after_history_saved | 历史保存之后 |
+
+聊天 hook 接收 `ChatContext` 并就地修改，返回值不会作为回复自动消费。字段包括 model、user_input、chatbot、files、use_websearch、reply_language、prepared_input、assistant_reply、status_text、history_file_path，以及本次调用专属 metadata。异常 hook 接收 `ChatErrorContext(model, error, chat_context)`。不要把密钥或共享运行态写到 metadata。
+
+```python
+from modules.plugin_callbacks import on_after_chat
+
+@on_after_chat
+def annotate(context):
+    if isinstance(context.assistant_reply, str):
+        context.metadata["my_extension"] = {"characters": len(context.assistant_reply)}
 ```
 
-当前加载约定：
+回调归属用 ContextVar 隔离。入口失败会回滚该插件所有已注册回调及加载的模块；单个 hook 异常记录为插件错误，其他插件继续执行。错误日志最多保留最近 100 条。模块顶层只做轻量注册，不启动长任务或读取秘密。
 
-- 插件根目录位于 `extensions/<extension_id>/`。
-- 加载器会读取每个插件目录下的 `metadata.json`。
-- Python 脚本支持根级 `extension.py`，以及 `scripts/*.py`。
-- 根级 `style.css` 会自动收集，`stylesheet/*.css` 也会自动收集。
-- `javascript/*.js` 和 `javascript/*.mjs` 会自动收集。
-- 插件按 `priority` 从小到大加载；相同优先级下按插件 ID 排序。
-- 插件可以向侧边栏工具箱注册自己的功能 Tab，也可以向设置页注册自己的设置 Tab。
+## helper 模块
 
-建议把主要逻辑放在 `scripts/main.py`，把界面样式放在 `style.css`，把少量前端增强放在 `javascript/main.js`。不要依赖插件之间的加载顺序，除非你明确控制了 `priority` 且能接受耦合。
+插件按独立 Python 包命名空间加载，推荐相对导入：
 
-## metadata.json
-
-推荐字段：
-
-```json
-{
-  "id": "prompt_tools",
-  "name": "提示词工具箱",
-  "name_i18n": {
-    "en_US": "Prompt toolbox"
-  },
-  "version": "0.1.0",
-  "description": "演示侧边栏功能 Tab，点选模板后把提示词插入当前输入框。",
-  "description_i18n": {
-    "en_US": "Demonstrates a toolbox tab that inserts selected prompt templates into the current input box."
-  },
-  "author": "ChuanhuChatGPT",
-  "enabled": true,
-  "priority": 100,
-  "tags": ["prompt", "productivity"]
-}
+```python
+# extension.py → extensions/my_extension/helper.py
+from .helper import transform
+# scripts/main.py → 同一 helper.py
+from ..helper import transform
 ```
 
-字段说明：
+根级 `extension.py` 和 `scripts/*.py` 都会执行，不要重复注册同一功能。不要将可导入 helper 也放成独立 scripts/*.py 入口。旧 `import helper` 仅在没有同名缓存模块时兼容；发现与其他插件/库冲突会拒绝加载并提示改用相对导入。回滚会清理插件内 helper；已经产生的线程、文件、环境修改与其他对象引用不能撤销。更新与新 UI 一律重启，`load_extensions(force=True)` 只供启动/开发验证，不是公开热重载保证。插件自己的 Git 仓库应忽略 `__pycache__/` 和业务数据。
 
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `id` | string | 推荐 | 插件 ID。未提供时通常会使用目录名。建议只使用小写字母、数字、下划线或短横线。 |
-| `name` | string | 推荐 | 展示给用户的插件名称。 |
-| `name_i18n` | object | 可选 | 插件自己提供的名称翻译表，例如 `{"en_US": "Prompt toolbox"}`。 |
-| `version` | string | 推荐 | 插件版本，例如 `0.1.0`。 |
-| `description` | string | 推荐 | 一句话说明插件用途。 |
-| `description_i18n` | object | 可选 | 插件自己提供的描述翻译表。 |
-| `author` | string | 可选 | 作者或组织。 |
-| `enabled` | boolean | 可选 | 是否默认启用。默认通常视为启用。 |
-| `priority` | number | 可选 | 加载优先级，数字越小越早加载。 |
-| `tags` | array | 可选 | 便于后续管理和检索的标签。 |
+## 翻译、CSS 与 JavaScript
 
-`metadata.json` 必须是合法 JSON。不要写注释，不要使用尾随逗号。
+名称与描述翻译放 metadata，界面文案翻译放插件内。不要追加到核心 locale。CSS / JS 只放插件目录，CSS 使用独有前缀；本次没有更改核心全局 CSS 或插件设置分组 JS。
 
-## 前端资源自动加载
-
-插件可以提供 CSS 和 JavaScript 资源：
-
-- `style.css`
-- `stylesheet/*.css`
-- `javascript/*.js`
-- `javascript/*.mjs`
-
-这些资源由核心加载器收集并注入页面，适合做以下事情：
-
-- 为插件自己的 Gradio 组件补充样式。
-- 为插件区域增加少量交互增强。
-- 给插件生成的 DOM 添加无侵入的视觉提示。
-
-建议：
-
-- CSS 选择器尽量加插件专属前缀，例如 `.prompt-prefix-demo ...`，避免影响主界面和其他插件。
-- JavaScript 不要假设页面内部 DOM 结构长期稳定。
-- 前端脚本应当可重复执行且无副作用；如果需要绑定事件，先检查是否已经绑定。
-- 不要在前端脚本里保存敏感数据。
-
-### 前端脚本钩子
-
-插件前端脚本可以使用 `window.ChuanhuApp`，避免自己重复监听 `DOMContentLoaded` 或直接穿透 Gradio 的 Shadow DOM：
+前端使用已有 `window.ChuanhuApp`：root/gradioApp、onReady、onRender、onMutation、userInput、setInputValue。事件绑定必须幂等：
 
 ```js
 (function () {
   function bind() {
-    const root = window.ChuanhuApp.root();
-    root.querySelectorAll("[data-my-extension-button]").forEach((button) => {
+    window.ChuanhuApp.root().querySelectorAll("[data-my-tool]").forEach((button) => {
       if (button.dataset.bound) return;
       button.dataset.bound = "true";
       button.addEventListener("click", () => {
         const input = window.ChuanhuApp.userInput();
-        if (!input) return;
-        window.ChuanhuApp.setInputValue(input, "插入到输入框的内容\n\n" + input.value);
+        if (input) window.ChuanhuApp.setInputValue(input, input.value.trim());
       });
     });
   }
-
   window.ChuanhuApp.onReady(bind);
   window.ChuanhuApp.onMutation(bind);
 })();
 ```
 
-可用接口：
+## 内置实例与测试
 
-| 接口 | 说明 |
-| --- | --- |
-| `root()` / `gradioApp()` | 返回当前 Gradio 根节点，兼容 Shadow DOM。 |
-| `onReady(callback)` | 主界面初始化完成后执行；如果已经初始化，会立即执行。 |
-| `onRender(callback)` | Gradio render 后执行；适合读取主界面已缓存的 DOM。 |
-| `onMutation(callback)` | Gradio 根节点内容变化时执行；适合给动态生成的插件 DOM 绑定事件。 |
-| `userInput()` | 返回主输入框的 `textarea/input`。 |
-| `setInputValue(input, value)` | 设置输入框值并派发 `input/change` 事件。 |
+- prompt_tools：点击常用提示词按钮，显式插入当前输入；沿用插件自己的 CSS / JS 与翻译。
+- auto_notes：默认不记录，每个模型会话独立配置和私有输出目录。
+- conversation_export：显式导出当前浏览器聊天文本为 Markdown/JSON；不读取全局历史、模型配置或附件。
+- text_batch：离线读取用户选择的 UTF-8 .txt/.md，提取标题、待办与计数；逐文件进度/部分下载，支持取消。每文件 2 MiB，最多 30 个。
+- openai_agents：默认禁用的真实 Agent UI，独立官方 SDK/凭据、多步沙箱任务、继续、停止、恢复与产物下载。详见 [Agents 使用指南](agents.md)。
 
-## 侧边栏功能 Tab
-
-插件可以向侧边栏工具箱注册自己的 Tab，用于放置对当前聊天流程影响较大的开关、输入框或按钮。通过 `on_toolbox_tab` 注册：
-
-```python
-import gradio as gr
-
-from modules.plugin_callbacks import on_toolbox_tab
-
-STATE = {"enabled": True}
-TEXT = {
-    "zh_CN": {"enable": "启用我的插件"},
-    "en_US": {"enable": "Enable my extension"},
-}
-
-
-def tr(key, language="zh_CN"):
-    return TEXT.get(language, TEXT["zh_CN"]).get(key, key)
-
-
-def set_enabled(value):
-    STATE["enabled"] = bool(value)
-
-
-@on_toolbox_tab
-def render_controls():
-    with gr.Group(elem_classes="my-extension-controls"):
-        enabled = gr.Checkbox(label=tr("enable"), value=STATE["enabled"])
-    enabled.change(set_enabled, inputs=enabled)
+```sh
+python -m pytest -q tests
+python tests/ui_smoke.py
 ```
 
-核心会自动用插件名称创建 Tab，回调只负责渲染 Tab 内部内容。示例里通过 Gradio 组件事件把值写入插件模块内的 `STATE`，后续对话 hook 再读取这个状态。
-
-## 设置页设置 Tab
-
-插件可以向设置页注册自己的设置 Tab，用于放置不需要频繁修改的选项。通过 `on_settings_tab` 注册：
-
-```python
-import gradio as gr
-
-from modules.plugin_callbacks import on_settings_tab
-
-CONFIG = {"footer": "由插件追加"}
-TEXT = {
-    "zh_CN": {"footer": "追加文本"},
-    "en_US": {"footer": "Footer text"},
-}
-
-
-def tr(key, language="zh_CN"):
-    return TEXT.get(language, TEXT["zh_CN"]).get(key, key)
-
-
-def set_footer(value):
-    CONFIG["footer"] = value or ""
-
-
-@on_settings_tab
-def render_settings():
-    with gr.Group(elem_classes="my-extension-settings"):
-        footer = gr.Textbox(label=tr("footer"), value=CONFIG["footer"])
-    footer.change(set_footer, inputs=footer)
-```
-
-核心会自动用插件名称创建设置 Tab。设置页 UI 和侧边栏 UI 的写法一致，区别主要是放置位置和使用场景。
-
-## 插件与插件设置
-
-设置页里的“插件”标签页只用于管理插件生命周期，不承载插件自己的业务设置。当前内置能力包括：
-
-- 查看已发现插件的名称、ID、版本、状态、路径和错误信息。
-- 使用开关启用或禁用插件。运行时禁用会立即停止该插件已注册的 Python hooks。
-- 从 Git URL 或本地目录安装插件。
-- 刷新插件列表。
-- 对 Git 仓库形式安装的插件执行更新。
-
-插件自己的设置项由 `on_settings_tab` 注册，并显示为设置页里的插件专属 Tab。这一点参考 SD WebUI 的分工：Extensions 页面负责安装、启用、更新等管理；扩展自己的配置通过 settings/options 机制进入全局设置区域，而不是混在 Extensions 管理页里。
-
-注意：
-
-- 新安装插件或更新插件后，Python hooks 会尝试重新加载；CSS / JavaScript 等前端静态资源仍建议刷新页面或重启应用后生效。
-- 启用 / 禁用开关当前是运行时状态；如需默认禁用某插件，可在 `config.json` 中配置 `disabled_extensions`。
-- 插件安装和更新会执行本地文件复制或 `git clone` / `git pull`。只安装可信来源的插件。
-
-## 对话生命周期 Hooks
-
-当前插件 API 包含这些对话 hook：
-
-| Hook | 注册函数 | 典型用途 |
-| --- | --- | --- |
-| 对话开始前 | `on_before_chat` | 修改用户输入、记录元数据、根据插件设置调整上下文。 |
-| 输入准备后 | `on_after_prepare` | 查看或调整 RAG / 联网搜索处理后的输入、展示附加内容。 |
-| 模型调用前 | `on_before_model_call` | 在模型请求前观察最终上下文，或做轻量参数调整。 |
-| 模型完整回答后 | `on_after_chat` | 修改最终回复、追加说明、写入插件处理结果。 |
-| 对话异常时 | `on_chat_error` | 记录插件自己的错误状态或做降级提示。 |
-| 历史保存后 | `on_after_history_saved` | 同步导出、写日志、通知外部系统。 |
-
-导入方式：
-
-```python
-from modules.plugin_callbacks import on_before_chat, on_after_chat
-from modules.plugin_context import ChatContext
-```
-
-推荐把 hook 写成接收一个 `ChatContext` 参数，并就地修改上下文对象：
-
-```python
-@on_before_chat
-def before_chat(context: ChatContext):
-    context.metadata["my_extension_enabled"] = True
-
-
-@on_after_chat
-def after_chat(context: ChatContext):
-    if context.assistant_reply:
-        context.assistant_reply += "\n\n由插件处理。"
-```
-
-不要依赖 hook 的返回值，除非核心 API 明确说明某个返回值会被消费。
-
-## ChatContext 字段
-
-`ChatContext` 表示一次对话流程中传递给插件的上下文。当前字段如下：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `model` | `Any` | 当前模型或模型配置对象。 |
-| `user_input` | `Any` | 用户原始输入或当前输入。插件修改输入时应先判断类型。 |
-| `chatbot` | `list` | 当前聊天记录 / UI 消息列表。 |
-| `use_websearch` | `bool` | 当前是否启用联网搜索。 |
-| `files` | `list | None` | 当前消息关联文件。 |
-| `reply_language` | `str` | 回复语言，默认 `中文`。 |
-| `limited_context` | `bool` | 是否使用有限上下文。 |
-| `fake_input` | `str` | 展示或替代输入相关字段，按核心流程解释使用。 |
-| `display_append` | `str` | 用于追加展示内容的字段，按核心流程解释使用。 |
-| `prepared_input` | `Any` | 预处理后的输入。 |
-| `assistant_reply` | `str | None` | 模型完整回复。`after_chat` 常用。 |
-| `status_text` | `str` | 当前状态文本。 |
-| `history_file_path` | `str | None` | 历史记录文件路径。 |
-| `metadata` | `dict[str, Any]` | 插件之间或插件内部传递轻量元数据的字典。 |
-
-使用建议：
-
-- 修改 `user_input`、`assistant_reply` 前先判断类型。
-- 插件自定义数据放在 `metadata` 里，并使用唯一 key，例如 `metadata["prompt_tools"]`。
-- 不要把大文件、模型对象副本或不可序列化的大对象塞进 `metadata`。
-- 不确定字段语义时，优先只读，不要写入。
-
-## 错误处理
-
-插件脚本加载失败或回调执行异常时，核心会记录插件错误，并尽量不影响其他插件继续运行。插件自身仍应主动处理可预期错误：
-
-```python
-@on_after_chat
-def after_chat(context: ChatContext):
-    try:
-        if isinstance(context.assistant_reply, str):
-            context.assistant_reply += "\n\n插件追加内容。"
-    except Exception as exc:
-        context.metadata["my_extension_error"] = str(exc)
-```
-
-建议：
-
-- 对用户输入、文件列表、模型返回值做类型检查。
-- 网络请求、文件读写、第三方库调用必须捕获异常。
-- 错误信息尽量写入 `metadata` 或日志，不要把 Python traceback 原样展示给普通用户。
-- 插件失败时应降级为“不处理”，避免阻断主对话。
-
-## 推荐实践
-
-开发原则：
-
-- 只在自己的插件目录内放置文件，不修改主程序核心文件。
-- 插件 ID、CSS class、metadata key 使用统一前缀。
-- hook 逻辑保持短小，耗时任务应谨慎处理，避免拖慢聊天响应。
-- 不要在模块顶层执行耗时操作；模块顶层只注册回调和初始化轻量默认值。
-- 使用 `gr.Group`、`gr.Accordion` 等容器组织插件 UI，避免界面过散。
-- 默认配置应安全、可撤销、容易理解。
-
-协作原则：
-
-- 示例和文档应说明依赖的核心 API，不要暗示未确认的能力已经存在。
-- 对尚未实现的能力，只描述当前边界，不要写成已经支持。
-- 修改插件时只改插件目录和对应文档，避免顺手改核心模块。
-- 示例插件应小而完整：一个插件演示一个主要能力。
-
-安全原则：
-
-- 不要在插件中硬编码 API Key、访问令牌或用户隐私数据。
-- 不要默认上传用户输入、聊天记录或文件。
-- 如需访问外部网络，应提供清晰开关和说明。
-- 对插入 HTML / Markdown 的内容进行最小化处理，避免意外注入。
-
-## 示例插件
-
-仓库内提供两个默认插件，它们既可以直接使用，也可以作为开发参考：
-
-- `extensions/prompt_tools`：提示词工具箱。它在侧边栏提供润色、翻译、总结、解释代码、提取待办、起草邮件等常用模板按钮，点击后把提示词插入当前输入框，不在发送阶段隐式改写内容。
-- `extensions/auto_notes`：自动笔记。它在侧边栏提供记录开关、标题和标签，在设置页提供保存文件名和完整回答选项，并通过 `after_chat` 把问答追加到 Markdown 笔记。
-
-这两个插件主要依赖：
-
-```python
-from modules.plugin_callbacks import (
-    on_toolbox_tab,
-    on_settings_tab,
-    on_after_chat,
-)
-from modules.plugin_context import ChatContext
-```
+UI smoke 使用真实 Gradio 服务和客户端，但所有 Agent 事件为本地合成，不读取专用密钥、不调用 OpenAI。依赖安装与已验证范围见 [验证记录](validation.md)。

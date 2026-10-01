@@ -2,15 +2,21 @@
   "id": "auto_notes",
   "name": "自动笔记",
   "name_i18n": {
-    "en_US": "Auto notes"
+    "zh_CN": "自动笔记",
+    "en_US": "Automatic notes"
   },
-  "version": "0.1.0",
-  "description": "把启用期间的问答自动追加到 Markdown 笔记，适合沉淀会议纪要、学习记录和调试日志。",
+  "version": "1.0.0",
+  "description": "当前模型会话显式开启后，将问答写入服务器私有目录；默认不记录。",
   "description_i18n": {
-    "en_US": "Append Q&A during enabled sessions to a Markdown note, useful for meeting notes, study logs, and debugging records."
+    "zh_CN": "当前模型会话显式开启后，将问答写入服务器私有目录；默认不记录。",
+    "en_US": "Opt-in notes for the current model session, stored privately on the server."
   },
   "author": "ChuanhuChatGPT",
   "enabled": true,
   "priority": 110,
-  "tags": ["notes", "archive", "after_chat"]
+  "tags": [
+    "notes",
+    "archive",
+    "after_chat"
+  ]
 }
