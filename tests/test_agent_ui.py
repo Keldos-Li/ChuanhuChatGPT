@@ -96,3 +96,76 @@ def test_callback_owner_validation_is_gradio_injected(env,monkeypatch):
     with pytest.raises(gr.Error):
         asyncio.run(app.process_api(index,[None,'gpt-6-sol','high'],state=state,request=gr.Request(username='bob',session_hash='ui-test')))
     app.close()
+
+
+def test_reconnect_waiting_permission_exposes_same_main_stop(env,monkeypatch):
+    from modules.model_capabilities import CapabilityUI
+    model=select(env);model._state={'session_id':'sess_test','turn_id':'turn_one','generation':'g','outcome':'incomplete'}
+    model._session_settings=model._current_settings()
+    calls=[]
+    def worker(command):
+        calls.append(command['action'])
+        if command['action']=='recover':
+            yield {'type':'progress','session_id':'sess_test','turn_id':'turn_one','outcome':'requires_action','required_actions':[{'request_id':'req','turn_id':'turn_one','request':{'type':'browser_origin_access','origin':'https://example.com'}}]}
+            yield {'type':'result','session_id':'sess_test','turn_id':'turn_one','outcome':'cancelled','required_actions':[]}
+        elif command['action']=='cancel':yield {'type':'result','outcome':'cancel_requested'}
+        elif command['action']=='download':yield {'type':'result','artifacts':[]}
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    with gr.Blocks(analytics_enabled=False) as app:
+        current=gr.State();chat=gr.Chatbot();status=gr.Markdown();main_send=gr.Button();main_stop=gr.Button(visible=False);selector=gr.Dropdown();marker=gr.HTML()
+        caps=CapabilityUI([],selector,marker,main_send,main_stop);caps.wire(current,chat)
+        panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components();panel.wire(current,chat,status,caps)
+        main_stop.click(env.wrappers['interrupt'],[current],[status],queue=False)
+    state=SessionState(app);state[current._id]=model
+    indices={fn.fn.__name__:i for i,fn in enumerate(app.fns) if fn.fn}
+    async def exercise():
+        req=gr.Request(session_hash='ui')
+        result=await app.process_api(indices['reconnect'],[None],state=state,request=req)
+        assert result['data'][2+caps.outputs.index(main_stop)]['visible']
+        result=await app.process_api(indices['reconnect'],[None],state=state,request=req,iterator=result['iterator'])
+        assert result['data'][2+caps.outputs.index(main_stop)]['visible'] and model._pending_actions
+        await app.process_api(indices['interrupt'],[None],state=state,request=req)
+        assert 'cancel' in calls
+        results=[]
+        while result['is_generating']:
+            result=await app.process_api(indices['reconnect'],[None],state=state,request=req,iterator=result['iterator'])
+            results.append(result)
+        updates=[entry['data'][2+caps.outputs.index(main_stop)] for entry in results if isinstance(entry['data'][2+caps.outputs.index(main_stop)],dict)]
+        assert any(update.get('visible') is False for update in updates)
+    try:asyncio.run(exercise())
+    finally:app.close()
+
+
+def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypatch):
+    from pathlib import Path
+    import tempfile
+    from modules.model_capabilities import CapabilityUI
+    model=select(env)
+    path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'one.txt';path.write_text('1')
+    def worker(command):
+        if command['action']=='run':yield {'type':'result','session_id':'sess_test','turn_id':'turn_one','outcome':'completed','text':''}
+        elif command['action']=='download':
+            records=[{'id':'a','name':'one.txt','type':'text/plain','size':1,'status':'preparing'},{'id':'b','name':'two.txt','type':'text/plain','size':2,'status':'preparing'}]
+            yield {'type':'progress','artifacts':records}
+            records=[dict(records[0],status='ready',path=str(path)),records[1]]
+            yield {'type':'progress','artifacts':records}
+            yield {'type':'result','artifacts':[records[0],dict(records[1],status='failed',error='unavailable')]}
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    with gr.Blocks(analytics_enabled=False) as app:
+        current=gr.State();prompt=gr.Textbox();chat=gr.Chatbot();status=gr.Markdown();send_button=gr.Button();stop=gr.Button();selector=gr.Dropdown();marker=gr.HTML()
+        caps=CapabilityUI([],selector,marker,send_button,stop);caps.wire(current,chat)
+        panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components()
+        send_button.click(panel.wrap_predict(env.wrappers['predict'],caps),[current,prompt,chat],[chat,status,*panel.outputs,*caps.outputs])
+    state=SessionState(app);state[current._id]=model
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='predict_with_ui')
+    async def exercise():
+        req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'files',[]],state=state,request=req);rows=[]
+        while True:
+            update=result['data'][2+panel.outputs.index(panel.artifacts.list)]
+            if isinstance(update,dict) and isinstance(update.get('value'),dict):rows.append(update['value']['data'])
+            if not result['is_generating']:break
+            result=await app.process_api(index,[None,'files',[]],state=state,request=req,iterator=result['iterator'])
+        assert any(len(r)==2 and all(row[3]=='准备中' for row in r) for r in rows)
+        assert any(len(r)==2 and r[0][3]=='可下载' and r[1][3]=='准备中' for r in rows)
+    try:asyncio.run(exercise())
+    finally:app.close()

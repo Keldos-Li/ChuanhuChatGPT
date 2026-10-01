@@ -39,6 +39,10 @@ def _get_model(
         if model_type == ModelType.OpenAIAgents:
             from .OpenAIAgents import OpenAIAgentsClient, browser_owner
             owner = browser_owner(request) if request is not None else None
+            if request is not None:
+                user_name = request.username or ''
+                if original_model is not None and original_model.user_name != user_name:
+                    raise gr.Error('原聊天不属于当前登录用户')
             if getattr(original_model, "is_hosted_agent", False) and original_model._selection_name == model_name:
                 model = original_model
             else:

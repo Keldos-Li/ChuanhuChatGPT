@@ -1,6 +1,6 @@
 // Dedicated login fields are transient and never inserted into the chat.
 window.chuanhuAgentLoginOption = function () {
-    const root = document.querySelector('#agent-browser-form');
+    const root = (typeof gradioApp === 'function' ? gradioApp() : document).querySelector('#agent-browser-form');
     const option = root?.querySelector('#agent-login-option');
     if (!option) return;
     const allowed = JSON.parse(option.selectedOptions[0].dataset.fields);

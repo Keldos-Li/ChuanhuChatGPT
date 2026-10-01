@@ -401,3 +401,50 @@ def test_recovery_does_not_apply_previous_stop_to_a_new_turn(env):
     model._cancel_requested=True;model._cancel_sent=True
     model._accept({'session_id':'sess_test','turn_id':'new_turn','outcome':'in_progress','required_actions':[]},'g',restoring=True)
     assert not model._cancel_requested and not model._cancel_sent and model._state['turn_id']=='new_turn'
+
+
+def test_agent_factory_uses_verified_identity_not_hidden_user_field(env):
+    model=env.factory.change_model('OpenAI Agent',None,'ordinary-key',None,None,'prompt','forged',None,request('browser','alice'))[0]
+    assert model.user_name=='alice'
+
+
+def test_agent_history_path_cannot_escape_owner_directory(env,tmp_path):
+    model=select(env)
+    file=tmp_path/'other-user.json';file.write_text(json.dumps({'history':[]}))
+    with pytest.raises(gr.Error):model.load_chat_history(str(file))
+
+
+@pytest.mark.parametrize('assistant_messages',[0,2,4])
+def test_first_question_title_uses_user_turn_not_message_count(env,assistant_messages):
+    model=select(env);model._state={'outcome':'completed'};model._first_prompt='明确问题'
+    model.history=[{'role':'user','content':'cloud input'}]+[{'role':'assistant','content':f'part {i}'} for i in range(assistant_messages)]
+    model.chatbot=model._display=[]
+    model.auto_save(model.chatbot)
+    model.auto_name_chat_history(env.locale('naming.by_first_question'),'ignored',False)
+    assert model.history_file_path=='明确问题.json' and model._auto_named
+    previous=model.history_file_path
+    model.auto_name_chat_history(env.locale('naming.by_first_question'),'ignored',False)
+    assert model.history_file_path==previous
+
+
+def test_imported_history_system_is_not_promoted_to_agent_instructions(env):
+    model=select(env);before=model.system_prompt
+    file=env.history_dir/'unsafe.json';file.write_text(json.dumps({'system':'UNTRUSTED AUTHORITY','history':[{'role':'user','content':'quote'}]}))
+    model.load_chat_history('unsafe.json')
+    assert model.system_prompt==before
+
+
+def test_inflight_stop_blocks_new_turn_even_when_old_turn_finishes(env,monkeypatch):
+    complete(env,monkeypatch);one=select(env);send(env,one)
+    two=select(env);two._state=deepcopy(one._state);two._session_settings=deepcopy(one._session_settings)
+    started=threading.Event();release=threading.Event()
+    one._state['outcome']='in_progress';generation=one._state['generation']
+    def worker(command):
+        assert command['action']=='cancel';started.set();assert release.wait(3)
+        yield {'type':'result','outcome':'cancel_requested'}
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    thread=threading.Thread(target=lambda:one._cancel(generation));thread.start();assert started.wait(3)
+    one._state['outcome']='completed'
+    with pytest.raises(gr.Error):list(two.predict('new task',[]))
+    release.set();thread.join(3)
+    assert one._state['outcome']=='completed' and not thread.is_alive()

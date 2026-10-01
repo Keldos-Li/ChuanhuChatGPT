@@ -139,8 +139,10 @@ def auto_name_chat_history(current_model, name_chat_method, user_question, singl
     return current_model.auto_name_chat_history(name_chat_method, user_question, single_turn_checkbox)
 
 
-def export_markdown(current_model, *args):
-    return current_model.export_markdown(*args)
+def export_markdown(current_model, filename, chatbot, request: gr.Request = None):
+    if getattr(current_model, 'is_hosted_agent', False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.export_markdown(filename, chatbot)
 
 
 def upload_chat_history(current_model, new_history_file_content=None, request: gr.Request = None):
@@ -801,7 +803,9 @@ def cancel_outputing():
     shared.state.interrupt()
 
 
-def transfer_input(inputs, current_model=None):
+def transfer_input(inputs, current_model=None, request: gr.Request = None):
+    if getattr(current_model, 'is_hosted_agent', False) and request is not None:
+        current_model.bind_owner(request)
     # 一次性返回，降低延迟
     textbox = reset_textbox()
     outputing = start_outputing()

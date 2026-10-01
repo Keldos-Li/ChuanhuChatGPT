@@ -505,9 +505,9 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         ('sampling', presence_penalty_slider, None), ('sampling', frequency_penalty_slider, None),
         ('sampling', logit_bias_txt, None), ('sampling', user_identifier_txt, None),
         ('billing', usageTxt, None), ('reply_language', language_select_dropdown, None),
-    ], model_select_dropdown, capability_marker)
+    ], model_select_dropdown, capability_marker, submitBtn, cancelBtn)
     capability_ui.wire(current_model, chatbot)
-    agent_panel.wire(current_model, chatbot, status_display)
+    agent_panel.wire(current_model, chatbot, status_display, capability_ui)
 
     # https://github.com/gradio-app/gradio/pull/3296
 
@@ -530,7 +530,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     demo.load(create_greeting, inputs=None, outputs=[
               user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load").then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
     chatgpt_predict_args = dict(
-        fn=predict,
+        fn=agent_panel.wrap_predict(predict, capability_ui),
         inputs=[
             current_model,
             user_question,
@@ -539,7 +539,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             index_files,
             language_select_dropdown,
         ],
-        outputs=[chatbot, status_display],
+        outputs=[chatbot, status_display, *agent_panel.outputs, *capability_ui.outputs],
         show_progress=True,
         concurrency_limit=CONCURRENT_COUNT
     )
@@ -552,8 +552,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     end_outputing_args = dict(
-        fn=lambda model: (*end_outputing(), *capability_ui.values(model)), inputs=[current_model],
-        outputs=[submitBtn, cancelBtn, *capability_ui.outputs]
+        fn=capability_ui.values, inputs=[current_model], outputs=capability_ui.outputs
     )
 
     reset_textbox_args = dict(
@@ -676,7 +675,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
 
     # Template
     systemPromptTxt.change(set_system_prompt, [
-                           current_model, systemPromptTxt], None)
+                           current_model, systemPromptTxt], None).then(agent_panel.values, [current_model], agent_panel.outputs)
     templateRefreshBtn.click(get_template_dropdown, None, [
                              templateFileSelectDropdown])
     templateFileSelectDropdown.input(

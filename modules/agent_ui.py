@@ -114,7 +114,7 @@ class AgentPanel:
 
     def settings_components(self):
         with gr.Accordion('Agent 工具与能力', open=False, visible=False, elem_id='agent-tool-settings') as self.settings_group:
-            gr.Markdown('设置保存后用于新会话。云端执行环境联网和网页搜索分别控制。MCP 只开放明确配置的服务器和工具，凭据使用服务器环境变量引用。')
+            gr.Markdown('模型是否可用及推理组合由当前 API 地址和账号权限校验。设置保存后用于新会话。云端执行环境联网和网页搜索分别控制。MCP 只开放明确配置的服务器和工具，凭据使用服务器环境变量引用。')
             self.settings_status = gr.Markdown()
             self.network = gr.Checkbox(label='云端执行环境联网', value=True)
             self.code = gr.Checkbox(label='代码与文件执行', value=True)
@@ -163,7 +163,13 @@ class AgentPanel:
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
                 *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))]
 
-    def wire(self, current_model, chatbot, status_display):
+    def wrap_predict(self, predict, capability_ui):
+        def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
+            for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request):
+                yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+        return predict_with_ui
+
+    def wire(self, current_model, chatbot, status_display, capability_ui=None):
         def apply(model, name, effort, request: gr.Request):
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort)
@@ -187,8 +193,15 @@ class AgentPanel:
         def reconnect(model, request: gr.Request):
             if _agent(model):
                 model.bind_owner(request)
-                yield from model.reconnect()
-        self.reconnect.click(reconnect, [current_model], [chatbot, status_display])
+                for chat, status in model.reconnect():
+                    if capability_ui is None: yield chat, status
+                    else: yield chat, status, *capability_ui.values(model), *self.values(model, request=request, include_config=False)
+                # Generator cleanup clears the observer's running state only
+                # after its last yield; update the one main Stop/Send pair now.
+                if capability_ui is not None:
+                    yield gr.update(), model._status(), *capability_ui.values(model), *self.values(model, request=request, include_config=False)
+        reconnect_outputs = [chatbot, status_display] + (capability_ui.outputs + self.outputs if capability_ui is not None else [])
+        self.reconnect.click(reconnect, [current_model], reconnect_outputs)
         def retry_file(model, identifier, request: gr.Request):
             model.bind_owner(request)
             return model.retry_artifact(identifier)
@@ -218,7 +231,7 @@ class AgentPanel:
             return '', message, *self.values(model)
         self.login_submit.click(login, [current_model, self.request_id, self.payload], [self.payload, status_display, *self.outputs], queue=False,
             js='''(model, id, unused) => {
-                const root = document.querySelector('#agent-browser-form');
+                const root = (typeof gradioApp === 'function' ? gradioApp() : document).querySelector('#agent-browser-form');
                 if (!root || root.dataset.requestId !== id) return [model, id, '{}'];
                 const option = root.querySelector('#agent-login-option');
                 const allowed = option ? JSON.parse(option.selectedOptions[0].dataset.fields) : null;

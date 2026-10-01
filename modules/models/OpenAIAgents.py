@@ -16,7 +16,7 @@ from modules.model_capabilities import AGENT_CAPABILITIES, require_capability
 from modules.agent_settings import load_settings, save_settings
 from optional.agents.tools import validate_settings, tool_availability
 from modules.presets import i18n
-from .base_model import BaseLLMModel
+from .base_model import BaseLLMModel, HISTORY_DIR
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'not_started'}
 STATUS = {'starting': '正在连接', 'in_progress': '正在运行', 'requires_action': '等待授权或登录',
@@ -26,6 +26,7 @@ STATUS = {'starting': '正在连接', 'in_progress': '正在运行', 'requires_a
 _bindings = {}  # Backward-compatible test hook; authority lives in BindingStore.
 _bindings_lock = RLock()
 _session_locks = {}
+_cancel_sessions = set()
 
 
 def browser_owner(request):
@@ -83,6 +84,8 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._notice = ''
         self._unavailable = False
         self._fork_previous = None
+        self._auto_named = False
+        self._first_prompt = None
         self.metadata = {}
         self._tool_settings = load_settings(shared.chuanhu_path, owner) if owner else validate_settings({})
 
@@ -90,6 +93,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         owner = browser_owner(request)
         with self._lock:
             if self._owner is not None and self._owner != owner: raise gr.Error('此会话不属于当前登录用户')
+            if self.user_name != (request.username or ''): raise gr.Error('聊天存储身份与当前登录用户不一致')
             if self._owner is None: self._tool_settings = load_settings(shared.chuanhu_path, owner)
             self._owner = owner
 
@@ -127,7 +131,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         state = {key: deepcopy(value) for key, value in self._state.items() if key not in ('required_actions', 'settings', 'items')}
         record = {'state': state, 'conversation_id': self._conversation_id, 'artifacts': deepcopy(self._artifacts),
                   'settings': deepcopy(self._session_settings), 'connection_ref': self._connection_reference(),
-                  'items': deepcopy(self._cloud_items)}
+                  'items': deepcopy(self._cloud_items), 'auto_named': self._auto_named, 'first_prompt': self._first_prompt}
         self._store().put(self._owner, self.history_file_path, record)
 
     def adopt_local_history(self, original):
@@ -152,6 +156,8 @@ class OpenAIAgentsClient(BaseLLMModel):
                 self._needs_sync = True
                 self._connection_mismatch = False
             self._conversation_id = binding['conversation_id']
+            self._auto_named = binding.get('auto_named', True)
+            self._first_prompt = binding.get('first_prompt')
             self._artifacts = binding.get('artifacts', [])
             for artifact in self._artifacts:
                 if artifact.get('status') == 'ready' and not Path(artifact.get('path', '')).is_file():
@@ -170,6 +176,8 @@ class OpenAIAgentsClient(BaseLLMModel):
 
     def _fresh(self):
         self._fork_previous = None
+        self._auto_named = False
+        self._first_prompt = None
         self._state = {'outcome': 'not_started'}
         self._conversation_id = uuid4().hex
         self._artifacts, self._cloud_items, self._pending_actions = [], [], []
@@ -225,7 +233,7 @@ class OpenAIAgentsClient(BaseLLMModel):
 
     def new_session_from_history(self):
         with self._lock:
-            if self._running or (not self._unavailable and (self._state.get('outcome') not in TERMINAL or self._needs_sync)):
+            if self._running or getattr(self, '_pending_send', None) or (not self._unavailable and (self._state.get('outcome') not in TERMINAL or self._needs_sync)):
                 raise gr.Error('请先停止或确认当前任务状态，再创建独立会话')
             self.auto_save(self.chatbot)
             backup = {name: deepcopy(getattr(self, name)) for name in
@@ -242,16 +250,22 @@ class OpenAIAgentsClient(BaseLLMModel):
             if self._cancel_sent or not self._state.get('session_id') or not self._state.get('turn_id'): return
             self._cancel_sent = True
             command = {'action': 'cancel', 'session_id': self._state['session_id'], 'turn_id': self._state['turn_id']}
-        for message in self._worker(command):
-            with self._lock:
-                if self._state.get('generation') != generation: return
-                if message.get('type') == 'error':
-                    self._cancel_sent = False
-                    self._notice = '尚未确认停止：' + message.get('message', '连接失败')
-                elif message.get('type') == 'result':
-                    self._state['outcome'] = message.get('outcome', 'cancel_requested')
-                    self._notice = message.get('message', '已请求停止，等待云端确认')
-                self._remember()
+        cancel_key = (self._owner, command['session_id'])
+        with _bindings_lock: _cancel_sessions.add(cancel_key)
+        try:
+            for message in self._worker(command):
+                with self._lock:
+                    if self._state.get('generation') != generation: return
+                    if message.get('type') == 'error':
+                        self._cancel_sent = False
+                        self._notice = '尚未确认停止：' + message.get('message', '连接失败')
+                    elif message.get('type') == 'result':
+                        if self._state.get('outcome') not in TERMINAL:
+                            self._state['outcome'] = message.get('outcome', 'cancel_requested')
+                        self._notice = message.get('message', '已请求停止，等待云端确认')
+                    self._remember()
+        finally:
+            with _bindings_lock: _cancel_sessions.discard(cancel_key)
 
     def interrupt(self):
         with self._lock:
@@ -315,31 +329,34 @@ class OpenAIAgentsClient(BaseLLMModel):
         return True
 
     def _download(self, generation, artifact_ids=None):
-        records = None
+        first = True
         for message in self._worker({'action': 'download', 'session_id': self._state['session_id'], 'artifact_ids': artifact_ids}):
             if message.get('type') == 'error':
                 self._notice = '回答已保留，文件获取失败，可重试：' + message.get('message', '')
+                yield deepcopy(self._display), self._status()
                 return
-            if message.get('type') == 'result': records = message.get('artifacts', [])
-        if records is None: return
-        root = Path(tempfile.gettempdir()).resolve()
-        for record in records:
-            if record.get('status') != 'ready': continue
-            path = Path(record.get('path', ''))
-            if path.is_symlink() or not path.is_file() or root not in path.resolve().parents or not any(parent.name.startswith('chuanhu-agent-artifacts-') for parent in path.parents):
-                record.update(status='failed', error='文件缓存校验失败，请重新获取')
-                record.pop('path', None)
-        with self._lock:
-            if self._state.get('generation') != generation or self._retired: return
-            previous = {record['id']: record for record in self._artifacts}
-            if artifact_ids is None: previous = {}
-            previous.update((record['id'], record) for record in records)
-            self._artifacts = list(previous.values())
-            self._remember()
+            if 'artifacts' not in message: continue
+            records = message['artifacts']
+            root = Path(tempfile.gettempdir()).resolve()
+            for record in records:
+                if record.get('status') != 'ready': continue
+                path = Path(record.get('path', ''))
+                if path.is_symlink() or not path.is_file() or root not in path.resolve().parents or not any(parent.name.startswith('chuanhu-agent-artifacts-') for parent in path.parents):
+                    record.update(status='failed', error='文件缓存校验失败，请重新获取')
+                    record.pop('path', None)
+            with self._lock:
+                if self._state.get('generation') != generation or self._retired: return
+                previous = {record['id']: record for record in self._artifacts}
+                if first and artifact_ids is None: previous = {}
+                previous.update((record['id'], record) for record in records)
+                self._artifacts = list(previous.values())
+                self._remember()
+                first = False
+            yield deepcopy(self._display), self._status()
 
     def retry_artifact(self, artifact_id):
         if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
-        self._download(self._state.get('generation'), [artifact_id])
+        for _ in self._download(self._state.get('generation'), [artifact_id]): pass
         return self._status()
 
     def predict(self, inputs, chatbot, use_websearch=False, files=None, reply_language=None, should_check_token_count=True):
@@ -354,7 +371,7 @@ class OpenAIAgentsClient(BaseLLMModel):
             self._assert_idle()
             reservation = (self._owner, self._state.get('session_id') or self._key()[1])
             with _bindings_lock:
-                if reservation in _session_locks:
+                if reservation in _session_locks or reservation in _cancel_sessions:
                     raise gr.Error('另一窗口正在提交此会话，请等待该任务结束或重新连接')
                 _session_locks[reservation] = self
             settings = self._current_settings()
@@ -364,6 +381,7 @@ class OpenAIAgentsClient(BaseLLMModel):
                 settings = deepcopy(self._session_settings)
             previous = (deepcopy(self._state), deepcopy(self.history), deepcopy(self._display), self._answer_index, self._answer_row)
             reference = _text_history(self.history) if not self._state.get('session_id') else None
+            if not self._state.get('session_id'): self._first_prompt = inputs
             generation = uuid4().hex
             self._state = dict(self._state, generation=generation, turn_id=None, outcome='starting', baseline_turn_ids=None, submission_started=False)
             self._display = [list(row) for row in chatbot or []] + [[inputs, '']]
@@ -395,7 +413,7 @@ class OpenAIAgentsClient(BaseLLMModel):
                 if self._cancel_requested: self._cancel(generation)
                 yield deepcopy(self._display), self._status(detail)
             if self._state.get('outcome') in ('completed', 'cancelled', 'failed') and self._state.get('session_id'):
-                self._download(generation)
+                yield from self._download(generation)
                 yield deepcopy(self._display), self._status()
         finally:
             with self._lock:
@@ -452,7 +470,7 @@ class OpenAIAgentsClient(BaseLLMModel):
                 if self._cancel_requested: self._cancel(generation)
                 yield deepcopy(self._display), self._status()
             if self._state.get('outcome') in TERMINAL and self._state.get('session_id'):
-                self._download(generation)
+                yield from self._download(generation)
                 yield deepcopy(self._display), self._status()
         finally:
             with self._lock:
@@ -491,7 +509,15 @@ class OpenAIAgentsClient(BaseLLMModel):
         with self._lock:
             self._assert_idle()
             self._remember()
+            chosen = new_history_file_path or self.history_file_path
+            if chosen:
+                root = (Path(HISTORY_DIR) / self.user_name).resolve()
+                candidate = Path(chosen) if Path(chosen).is_absolute() else root / chosen
+                if candidate.resolve().parent != root:
+                    raise gr.Error('只能读取当前登录用户的聊天历史')
+            explicit_instructions = self.system_prompt
             result = list(super().load_chat_history(new_history_file_path))
+            self.system_prompt = explicit_instructions  # Imported history is reference data, never authority.
             self.metadata = {}
             self.stream = True
             self.history = _text_history(self.history)
@@ -528,6 +554,7 @@ class OpenAIAgentsClient(BaseLLMModel):
             self._assert_idle()
             old = self.history_file_path
             result = super().rename_chat_history(filename)
+            self._auto_named = True
             self._store().rename(self._owner, old, self.history_file_path)
             self._remember()
             return result
@@ -542,19 +569,19 @@ class OpenAIAgentsClient(BaseLLMModel):
     def delete_first_conversation(self): raise gr.Error('Agent 云端历史不支持本地回退')
     def delete_last_conversation(self, chatbot): raise gr.Error('Agent 云端历史不支持本地回退')
     def auto_name_chat_history(self, name_chat_method, user_question, single_turn_checkbox):
-        if self._state.get('outcome') not in TERMINAL or self._needs_sync or len(self.history) != 2 or single_turn_checkbox:
+        first_turn = len([item for item in self.history if item.get('role') == 'user']) == 1
+        if self._state.get('outcome') not in TERMINAL or self._needs_sync or not first_turn or self._auto_named or single_turn_checkbox:
             return gr.update()
-        if name_chat_method == i18n('naming.by_first_question'):
-            return super().auto_name_chat_history(name_chat_method, user_question, single_turn_checkbox)
-        if name_chat_method != i18n('naming.by_model_summary'):
-            return gr.update()
+        question = self._first_prompt or next(item['content'] for item in self.history if item['role'] == 'user')
         title = ''
-        for message in self._worker({'action': 'title', 'model': self.model_name, 'history': _text_history(self.history)}):
-            if message.get('type') == 'result': title = message.get('title', '')
-        if not title.strip():
-            self._notice = '模型标题未生成，已使用首问命名'
-            return super().auto_name_chat_history(name_chat_method, user_question, single_turn_checkbox)
+        if name_chat_method == i18n('naming.by_model_summary'):
+            for message in self._worker({'action': 'title', 'model': self.model_name, 'history': _text_history(self.history)}):
+                if message.get('type') == 'result': title = message.get('title', '')
+            if not title.strip(): self._notice = '模型标题未生成，已使用首问命名'
+        elif name_chat_method != i18n('naming.by_first_question'):
+            return gr.update()
+        title = title.strip() or question[:16]
         title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title).strip().strip('.')
-        return self.rename_chat_history((title or self.history[0]['content'][:16]) + '.json')
+        return self.rename_chat_history((title or 'Agent 聊天') + '.json')
     def handle_file_upload(self, *args): raise gr.Error('当前 Agent 不支持输入附件')
     def summarize_index(self, *args): raise gr.Error('当前 Agent 不支持本地知识库入口')

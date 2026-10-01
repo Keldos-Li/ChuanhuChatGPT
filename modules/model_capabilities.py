@@ -76,9 +76,10 @@ def consume_submission(model, inputs):
 
 
 class CapabilityUI:
-    def __init__(self, bindings, selector, marker):
+    def __init__(self, bindings, selector, marker, submit=None, cancel=None):
         self.bindings, self.selector, self.marker = bindings, selector, marker
-        self.outputs = [component for _,component,_ in bindings] + [selector,marker]
+        self.submit, self.cancel = submit, cancel
+        self.outputs = [component for _,component,_ in bindings] + [selector,marker] + ([submit,cancel] if submit is not None and cancel is not None else [])
 
     def values(self, model):
         caps = capabilities(model)
@@ -93,6 +94,10 @@ class CapabilityUI:
         payload=dict(asdict(caps), busy=is_busy(model))
         results.extend([gr.update(interactive=not is_busy(model)),
             '<span data-model-capabilities="'+html.escape(json.dumps(payload),quote=True)+'"></span>'])
+        if self.submit is not None and self.cancel is not None:
+            remote_running = getattr(model, '_state', {}).get('outcome') in ('starting','in_progress','requires_action','cancel_requested','incomplete','uncertain')
+            running = is_busy(model) or remote_running
+            results.extend([gr.update(visible=not running), gr.update(visible=running)])
         return results
 
     def wire(self, current_model, chatbot):

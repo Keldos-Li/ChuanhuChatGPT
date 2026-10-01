@@ -415,36 +415,36 @@ def update_settings(client, session_id, model, reasoning):
     except Exception as error: raise _error(error) from None
 
 
-def download_artifacts(client, session_id, *, artifact_ids=None):
-    """Every published output, with individual failures and opaque local names."""
+def download_artifacts(client, session_id, *, artifact_ids=None, on_progress=None):
+    """Publish a full preparing list, then independent ready/failed records."""
     try: artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100))
     except Exception as error: raise _error(error) from None
+    artifacts = [artifact for artifact in artifacts if artifact_ids is None or artifact.get('id') in artifact_ids]
     output_dir = Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))
     records = []
     for artifact in artifacts:
-        if artifact_ids is not None and artifact.get('id') not in artifact_ids: continue
         name = Path(str(artifact.get('path') or artifact.get('filename') or 'artifact')).name
         name = re.sub(r'[\x00-\x1f/\\]', '_', name).lstrip('.') or 'artifact'
-        # Each artifact gets its own subdirectory; same filenames stay distinct.
+        records.append({'id': artifact['id'], 'session_id': session_id, 'turn_id': artifact.get('turn_id'), 'name': name,
+                        'type': artifact.get('mime_type') or mimetypes.guess_type(name)[0] or 'application/octet-stream',
+                        'size': artifact.get('size_bytes'), 'status': 'preparing'})
+    if on_progress: on_progress(deepcopy(records))
+    for artifact, record in zip(artifacts, records):
         folder = output_dir / uuid4().hex
         folder.mkdir(mode=0o700)
-        path = folder / name
-        record = {'id': artifact['id'], 'session_id': session_id, 'turn_id': artifact.get('turn_id'), 'name': name,
-                  'type': artifact.get('mime_type') or mimetypes.guess_type(name)[0] or 'application/octet-stream',
-                  'size': artifact.get('size_bytes'), 'status': 'preparing'}
+        path = folder / record['name']
         try:
             with client.beta.agents.sessions.artifacts.with_streaming_response.content(artifact['id'], session_id=session_id) as response:
                 with path.open('wb') as output:
                     for chunk in response.iter_bytes(): output.write(chunk)
-            received = path.stat().st_size
-            expected = artifact.get('size_bytes')
+            received, expected = path.stat().st_size, artifact.get('size_bytes')
             if isinstance(expected, int) and expected >= 0 and received != expected:
                 raise AgentError('文件下载长度与已发布文件不一致，可能未完整传输；请单独重试该文件')
             record.update(path=str(path), size=received, status='ready')
         except Exception as error:
             if path.exists(): path.unlink()
             record.update(status='failed', error=str(_error(error)))
-        records.append(record)
+        if on_progress: on_progress(deepcopy(records))
     return records
 
 
