@@ -31,6 +31,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
+from ..model_capabilities import require_capability
 from .. import shared
 from ..config import retrieve_proxy, auth_list
 from ..index_func import *
@@ -829,39 +830,48 @@ class BaseLLMModel:
         self.interrupted = False
 
     def set_token_upper_limit(self, new_upper_limit):
+        require_capability(self, 'token_limits')
         self.token_upper_limit = new_upper_limit
         self.auto_save()
 
     def set_temperature(self, new_temperature):
+        require_capability(self, 'sampling')
         self.temperature = new_temperature
         self.auto_save()
 
     def set_top_p(self, new_top_p):
+        require_capability(self, 'sampling')
         self.top_p = new_top_p
         self.auto_save()
 
     def set_n_choices(self, new_n_choices):
+        require_capability(self, 'sampling')
         self.n_choices = new_n_choices
         self.auto_save()
 
     def set_stop_sequence(self, new_stop_sequence: str):
+        require_capability(self, 'sampling')
         new_stop_sequence = new_stop_sequence.split(",")
         self.stop_sequence = new_stop_sequence
         self.auto_save()
 
     def set_max_tokens(self, new_max_tokens):
+        require_capability(self, 'token_limits')
         self.max_generation_token = new_max_tokens
         self.auto_save()
 
     def set_presence_penalty(self, new_presence_penalty):
+        require_capability(self, 'sampling')
         self.presence_penalty = new_presence_penalty
         self.auto_save()
 
     def set_frequency_penalty(self, new_frequency_penalty):
+        require_capability(self, 'sampling')
         self.frequency_penalty = new_frequency_penalty
         self.auto_save()
 
     def set_logit_bias(self, logit_bias):
+        require_capability(self, 'sampling')
         self.logit_bias = logit_bias
         self.auto_save()
 
@@ -879,6 +889,7 @@ class BaseLLMModel:
         return bias_map
 
     def set_user_identifier(self, new_user_identifier):
+        require_capability(self, 'sampling')
         self.user_identifier = new_user_identifier
         self.auto_save()
 
@@ -896,14 +907,18 @@ class BaseLLMModel:
             return gr.update(), gr.update()
 
     def set_single_turn(self, new_single_turn):
+        require_capability(self, 'single_turn')
         self.single_turn = new_single_turn
         self.auto_save()
 
     def set_streaming(self, new_streaming):
+        require_capability(self, 'output_mode')
         self.stream = new_streaming
         self.auto_save()
 
     def reset(self, remain_system_prompt=False):
+        if getattr(self, '_pending_send', None):
+            raise gr.Error('当前输入已排队，请等待完成或先停止')
         self.history = []
         self.all_token_counts = []
         self.interrupted = False
@@ -1026,6 +1041,8 @@ class BaseLLMModel:
         save_file(filename, self)
 
     def upload_chat_history(self, new_history_file_content=None):
+        if getattr(self, '_pending_send', None):
+            raise gr.Error('当前输入已排队，请等待完成或先停止')
         logging.debug(f"{self.user_name} 加载对话历史中……")
         if new_history_file_content is not None:
             if isinstance(new_history_file_content, bytes):
@@ -1054,6 +1071,8 @@ class BaseLLMModel:
         return *self.load_chat_history(), init_history_list(self.user_name)
 
     def load_chat_history(self, new_history_file_path=None):
+        if getattr(self, '_pending_send', None):
+            raise gr.Error('当前输入已排队，请等待完成或先停止')
         logging.debug(f"{self.user_name} 加载对话历史中……")
         if new_history_file_path is not None:
             self.history_file_path = new_history_file_path
@@ -1163,6 +1182,8 @@ class BaseLLMModel:
             )
 
     def delete_chat_history(self, filename):
+        if getattr(self, '_pending_send', None):
+            raise gr.Error('当前输入已排队，请等待完成或先停止')
         if filename == "CANCELED":
             return gr.update(), gr.update(), gr.update()
         if filename == "":

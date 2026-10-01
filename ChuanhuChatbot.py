@@ -7,6 +7,7 @@ logging.basicConfig(
 
 from modules.models.models import get_model, change_model
 from modules.agent_ui import AgentPanel
+from modules.model_capabilities import CapabilityUI
 from modules.train_func import *
 from modules.repo import *
 from modules.webui import *
@@ -254,7 +255,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                                                 # container=False,
                                             )
                         gr.Markdown("---", elem_classes="hr-line")
-                        with gr.Accordion(label=i18n("ui.toolbox.knowledge.title"), open=True, elem_id="gr-kb-accordion"):
+                        with gr.Accordion(label=i18n("ui.toolbox.knowledge.title"), open=True, elem_id="gr-kb-accordion") as knowledge_group:
                             use_websearch_checkbox = gr.Checkbox(label=i18n("ui.toolbox.knowledge.use_web_search"), value=False, elem_classes="switch-checkbox", elem_id="gr-websearch-cb", visible=False)
                             index_files = gr.Files(label=i18n("ui.toolbox.knowledge.upload"), type="filepath", file_types=[".pdf", ".docx", ".pptx", ".epub", ".xlsx", ".txt", "text", "image"], elem_id="upload-index-file")
                             two_column = gr.Checkbox(label=i18n("ui.toolbox.knowledge.two_column_pdf"), value=advance_docs["pdf"].get("two_column", False))
@@ -262,7 +263,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                             # TODO: 公式ocr
                             # formula_ocr = gr.Checkbox(label=i18n("ui.toolbox.knowledge.formula_ocr"), value=advance_docs["pdf"].get("formula_ocr", False))
 
-                    with gr.Tab(label=i18n("ui.toolbox.tab.parameters")):
+                    with gr.Tab(label=i18n("ui.toolbox.tab.parameters")) as parameter_tab:
                         gr.Markdown(i18n("ui.toolbox.parameters.warning"),
                                     elem_id="advanced-warning")
                         with gr.Accordion(i18n("ui.toolbox.parameters.title"), open=True):
@@ -492,6 +493,20 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                 historySelectBtn = gr.Button(
                     visible=False, elem_classes="invisible-btn", elem_id="history-select-btn")  # Not used
 
+    capability_marker = gr.HTML('', elem_id='model-capability-state')
+    capability_ui = CapabilityUI([
+        ('input_attachments', index_files, []), ('knowledge', knowledge_group, None),
+        ('external_websearch', use_websearch_checkbox, False), ('single_turn', single_turn_checkbox, False),
+        ('output_mode', use_streaming_checkbox, True), ('regenerate', retryBtn, None),
+        ('history_rollback', delFirstBtn, None), ('history_delete', delLastBtn, None),
+        ('parameters', parameter_tab, None), ('sampling', temperature_slider, None), ('sampling', top_p_slider, None),
+        ('sampling', n_choices_slider, None), ('sampling', stop_sequence_txt, None),
+        ('token_limits', max_context_length_slider, None), ('token_limits', max_generation_slider, None),
+        ('sampling', presence_penalty_slider, None), ('sampling', frequency_penalty_slider, None),
+        ('sampling', logit_bias_txt, None), ('sampling', user_identifier_txt, None),
+        ('billing', usageTxt, None), ('reply_language', language_select_dropdown, None),
+    ], model_select_dropdown, capability_marker)
+    capability_ui.wire(current_model, chatbot)
     agent_panel.wire(current_model, chatbot, status_display)
 
     # https://github.com/gradio-app/gradio/pull/3296
@@ -513,7 +528,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             loaded_stuff = [gr.update(), gr.update(), gr.Chatbot(label=MODELS[DEFAULT_MODEL]), current_model.single_turn, current_model.temperature, current_model.top_p, current_model.n_choices, current_model.stop_sequence, current_model.token_upper_limit, current_model.max_generation_token, current_model.presence_penalty, current_model.frequency_penalty, current_model.logit_bias, current_model.user_identifier, current_model.stream, gr.DownloadButton(), gr.DownloadButton()]
         return user_info, user_name, current_model, toggle_like_btn_visibility(DEFAULT_MODEL), *loaded_stuff, init_history_list(user_name, prepend=current_model.history_file_path.rstrip(".json"))
     demo.load(create_greeting, inputs=None, outputs=[
-              user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load").then(agent_panel.values, [current_model], agent_panel.outputs)
+              user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load").then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
     chatgpt_predict_args = dict(
         fn=predict,
         inputs=[
@@ -537,7 +552,8 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     end_outputing_args = dict(
-        fn=end_outputing, inputs=[], outputs=[submitBtn, cancelBtn]
+        fn=lambda model: (*end_outputing(), *capability_ui.values(model)), inputs=[current_model],
+        outputs=[submitBtn, cancelBtn, *capability_ui.outputs]
     )
 
     reset_textbox_args = dict(
@@ -545,7 +561,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     transfer_input_args = dict(
-        fn=transfer_input, inputs=[user_input], outputs=[
+        fn=transfer_input, inputs=[user_input, current_model], outputs=[
             user_question, user_input, submitBtn, cancelBtn], show_progress=True
     )
 
@@ -646,11 +662,11 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     keyTxt.change(set_key, [current_model, keyTxt], [
                   user_api_key, status_display], api_name="set_key").then(**get_usage_args)
     keyTxt.submit(**get_usage_args)
-    single_turn_checkbox.change(
+    single_turn_checkbox.input(
         set_single_turn, [current_model, single_turn_checkbox], None, show_progress=False)
-    use_streaming_checkbox.change(set_streaming, [current_model, use_streaming_checkbox], None, show_progress=False)
+    use_streaming_checkbox.input(set_streaming, [current_model, use_streaming_checkbox], None, show_progress=False)
     model_select_dropdown.input(change_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
-                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model").then(agent_panel.values, [current_model], agent_panel.outputs)
+                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model").then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
     model_select_dropdown.change(toggle_like_btn_visibility, [model_select_dropdown], [
                                  like_dislike_area], show_progress=False)
     # model_select_dropdown.change(

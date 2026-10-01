@@ -37,7 +37,7 @@ function setUploader() {
 var grUploader;
 var chatbotUploader;
 var handleClick = function() {
-    grUploader.click();
+    if (window.chuanhuSupports?.('input_attachments') !== false) grUploader?.click();
 
 };
 function transUpload() {
@@ -63,10 +63,12 @@ function setCheckboxes() {
     grOnlineSearchCB = gradioApp().querySelector("#gr-websearch-cb > label> input");
     
     chatbotSingleSessionCB.addEventListener('change', (e) => {
+        if (window.chuanhuSupports?.('single_turn') === false) return;
         grSingleSessionCB.checked = chatbotSingleSessionCB.checked;
         gradioApp().querySelector('#change-single-session-btn').click();
     });
     chatbotOnlineSearchCB.addEventListener('change', (e) => {
+        if (window.chuanhuSupports?.('external_websearch') === false) return;
         grOnlineSearchCB.checked = chatbotOnlineSearchCB.checked;
         gradioApp().querySelector('#change-online-search-btn').click();
     });

@@ -12,6 +12,7 @@ import gradio as gr
 from modules import shared
 from modules.agent_transport import worker_messages, connection_for_model
 from modules.agent_store import BindingStore, owner_identity
+from modules.model_capabilities import AGENT_CAPABILITIES, require_capability
 from modules.agent_settings import load_settings, save_settings
 from optional.agents.tools import validate_settings, tool_availability
 from modules.presets import i18n
@@ -57,6 +58,7 @@ def _rows(history):
 
 class OpenAIAgentsClient(BaseLLMModel):
     is_hosted_agent = True
+    ui_capabilities = AGENT_CAPABILITIES
 
     def __init__(self, model_name, user_name='', owner=None, api_key=None):
         super().__init__(model_name=model_name, user=user_name, config={'stream': True})
@@ -136,6 +138,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._restore_binding()
 
     def _restore_binding(self):
+        self._fork_previous = None
         binding = None if self._importing or not self._owner else self._store().get(self._owner, self.history_file_path)
         self._pending_actions = []
         if binding:
@@ -166,6 +169,7 @@ class OpenAIAgentsClient(BaseLLMModel):
             if self.history: self._notice = '将根据这份历史创建新的 Agent 会话：带入全部可用文字；不继承旧工具状态、沙盒文件和任务'
 
     def _fresh(self):
+        self._fork_previous = None
         self._state = {'outcome': 'not_started'}
         self._conversation_id = uuid4().hex
         self._artifacts, self._cloud_items, self._pending_actions = [], [], []
@@ -173,7 +177,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._needs_sync = self._connection_mismatch = self._unavailable = False
 
     def _assert_idle(self):
-        if self._running or self._state.get('outcome') not in TERMINAL or self._needs_sync:
+        if self._running or getattr(self, '_pending_send', None) or self._state.get('outcome') not in TERMINAL or self._needs_sync:
             raise gr.Error('当前任务仍在运行或状态尚待确认，请先停止或重新连接')
 
     def prepare_model_switch(self):
@@ -186,7 +190,8 @@ class OpenAIAgentsClient(BaseLLMModel):
             self._assert_idle()
             self._connection_key = new_key
         return gr.update(value=new_key), '已更新连接密钥；下次连接时使用'
-    def set_streaming(self, streaming): self.stream = True
+    def set_streaming(self, streaming):
+        require_capability(self, 'output_mode')
     def _status(self, detail=''):
         return ' · '.join(part for part in (STATUS.get(self._state.get('outcome'), '暂时无法确认状态'), detail or self._notice) if part)
 
@@ -223,10 +228,11 @@ class OpenAIAgentsClient(BaseLLMModel):
             if self._running or (not self._unavailable and (self._state.get('outcome') not in TERMINAL or self._needs_sync)):
                 raise gr.Error('请先停止或确认当前任务状态，再创建独立会话')
             self.auto_save(self.chatbot)
-            self._fork_previous = {name: deepcopy(getattr(self, name)) for name in
+            backup = {name: deepcopy(getattr(self, name)) for name in
                 ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id')}
             self.new_auto_history_filename()
             self._fresh()
+            self._fork_previous = backup
             self._notice = '已保留原聊天。下一条消息将携带现有文字引用创建新会话；旧工具状态和文件不继承'
         return deepcopy(self.chatbot), self._status()
 

@@ -9,6 +9,7 @@ function setPasteUploader() {
     let paste_files = [];
     if (input) {
         input.addEventListener("paste", async function (e) {
+            if (window.chuanhuSupports?.("input_attachments") === false) return;
             const clipboardData = e.clipboardData || window.clipboardData;
             const items = clipboardData.items;
             if (items) {
@@ -38,6 +39,7 @@ function setDragUploader() {
         const leaveEvents = ["dragleave", "dragend", "drop"];
 
         const onDrag = function (e) {
+            if (window.chuanhuSupports?.('input_attachments') === false) { e.preventDefault(); return; }
             e.preventDefault();
             e.stopPropagation();
             if (!chatbotArea.classList.contains("with-file")) {
@@ -73,6 +75,7 @@ function setDragUploader() {
 }
 
 async function upload_files(files) {
+    if (window.chuanhuSupports?.('input_attachments') === false) return;
     const uploadInputElement = gradioApp().querySelector("#upload-index-file > .center.flex input[type=file]");
     let totalSizeMb = 0
     if (files && files.length > 0) {

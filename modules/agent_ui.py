@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 import gradio as gr
 from optional.agents.tools import FUNCTIONS, tool_availability
+from modules.model_capabilities import capabilities
 
 MODEL_EFFORTS = {
     'gpt-6-astra': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
@@ -32,7 +33,7 @@ class ArtifactPanel:
 
     @staticmethod
     def values(model):
-        records = getattr(model, '_artifacts', []) if _agent(model) else []
+        records = getattr(model, '_artifacts', []) if capabilities(model).output_artifacts else []
         rows, paths = [], []
         labels = {'preparing': '准备中', 'ready': '可下载', 'failed': '下载失败'}
         for record in records:
@@ -62,7 +63,8 @@ def describe_settings(model):
     return '\n\n'.join(lines)
 
 
-def browser_form(model, request_id=None):
+def browser_form(model, request_id=None, request: gr.Request = None):
+    if _agent(model) and request is not None: model.bind_owner(request)
     if not _agent(model): return '', gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
     cards = model._pending_actions
     card = next((card for card in cards if card['request_id'] == request_id), cards[0] if cards else None)
@@ -141,8 +143,9 @@ class AgentPanel:
                 *self.artifacts.outputs, *self.config_inputs, self.availability]
 
     @staticmethod
-    def values(model, include_config=True):
+    def values(model, request: gr.Request = None, include_config=True):
         enabled = _agent(model)
+        if enabled and request is not None: model.bind_owner(request)
         if not enabled:
             return [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
@@ -227,4 +230,6 @@ class AgentPanel:
             }''')
         # A model output updates progress, file readiness and pending forms without
         # another message or a queued request behind the running generator.
-        chatbot.change(lambda model: self.values(model, include_config=False), [current_model], self.outputs, queue=False, show_progress=False)
+        def live_values(model, request: gr.Request):
+            return self.values(model, request=request, include_config=False)
+        chatbot.change(live_values, [current_model], self.outputs, queue=False, show_progress=False)

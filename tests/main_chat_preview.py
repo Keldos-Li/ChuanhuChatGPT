@@ -17,6 +17,7 @@ os.environ['MPLCONFIGDIR']=tempfile.mkdtemp(prefix='chuanhu-mpl-')
 import gradio as gr
 from offline_models import OfflineLocale, install
 from modules.agent_ui import AgentPanel
+from modules.model_capabilities import CapabilityUI
 
 
 def build(language='zh_CN'):
@@ -59,7 +60,7 @@ def build(language='zh_CN'):
         layout.append(node)
     namespace={name:getattr(presets,name) for name in dir(presets) if not name.startswith('__')}
     namespace.update(env.wrappers)
-    namespace.update(AgentPanel=AgentPanel,gr=gr,change_model=env.factory.change_model,CONCURRENT_COUNT=2,
+    namespace.update(AgentPanel=AgentPanel,CapabilityUI=CapabilityUI,gr=gr,change_model=env.factory.change_model,CONCURRENT_COUNT=2,
         config=SimpleNamespace(user_avatar=None,bot_avatar=None,http_proxy='',api_host='api.openai.com'),
         my_api_key='',HIDE_MY_KEY=True,multi_api_key=False,check_update=False,show_api_billing=False,
         hide_history_when_not_logged_in=False,advance_docs={'pdf':{}},chat_name_method_index=0,latex_delimiters_set=[],

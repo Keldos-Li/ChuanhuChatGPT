@@ -20,6 +20,7 @@ from types import ModuleType, SimpleNamespace
 from threading import RLock
 from uuid import uuid4
 import gradio as gr
+from modules.model_capabilities import capabilities, require_capability, model_lock, reserve_submission, consume_submission
 
 
 class OfflineLocale:
@@ -72,7 +73,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     shared.API_HOST = 'api.openai.com'
     shared.state = SimpleNamespace(multi_api_key=False)
     sys.modules['modules.shared'] = shared
-    helpers = dict(vars(presets), gr=gr, os=os, json=json, logging=logging, time=time,
+    helpers = dict(vars(presets), capabilities=capabilities, require_capability=require_capability, model_lock=model_lock, reserve_submission=reserve_submission, consume_submission=consume_submission, gr=gr, os=os, json=json, logging=logging, time=time,
                    traceback=traceback, Enum=Enum, shared=shared, RLock=RLock, deepcopy=deepcopy,
                    HISTORY_DIR=str(history_dir), GRADIO_CACHE=str(history_dir/'cache'),
                    get_first_history_name=lambda user='':uuid4().hex+'.json',

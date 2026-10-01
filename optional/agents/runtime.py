@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import re
 import tempfile
+import time
 from threading import Thread
 from uuid import uuid4
 
@@ -64,6 +65,8 @@ class TurnState:
     settings: dict | None = None
     sync_complete: bool | None = None
     history_authoritative: bool = False
+    snapshot_partial_ids: set = field(default_factory=set)
+    last_partial_refresh: float = 0
 
     @property
     def text(self):
@@ -276,7 +279,24 @@ def _process_events(client, events, state, settings, on_progress):
     handled = set()
     for event in events:
         event = as_dict(event)
+        kind, item_id = event.get('type'), event.get('item_id')
+        if kind == 'agent.session.turn.output_text.delta' and item_id in state.snapshot_partial_ids:
+            # Deltas carry no text offset. A delta already included in the GET
+            # snapshot cannot safely be appended again (or suffix-deduplicated).
+            # Refresh these pre-existing incomplete items from saved state;
+            # coalesce reads while their complete .done event is still pending.
+            if time.monotonic() - state.last_partial_refresh >= 0.25:
+                latest = all_records(client.beta.agents.sessions.items.list(state.session_id, limit=100, order='asc'))
+                for item in latest:
+                    if item.get('id') in state.snapshot_partial_ids and item.get('id') not in state.final_items:
+                        state.items[item['id']] = deepcopy(item)
+                state.last_partial_refresh = time.monotonic()
+            state.sync_complete = None
+            if on_progress: on_progress(state)
+            continue
         state.accept(event)
+        if kind in ('agent.session.turn.output_text.done', 'agent.session.turn.item.done'):
+            state.snapshot_partial_ids.discard(item_id or (event.get('item') or {}).get('id'))
         if event.get('type') == 'agent.session.requires_action':
             session = as_dict(client.beta.agents.sessions.retrieve(state.session_id))
             state.required_actions = pending_action_cards(session, state.turn_id)
@@ -300,8 +320,8 @@ def _reconcile_terminal(client, state):
             state.sync_complete = False
             return
         merged = OrderedDict((item['id'], item) for item in saved['items'])
-        for identifier in state.final_items:
-            if identifier in state.items: merged[identifier] = state.items[identifier]
+        for identifier, item in state.items.items():
+            if identifier in state.final_items: merged[identifier] = item
         saved['items'] = list(merged.values())
         if saved['items']: _seed(state, saved)
         else: state.sync_complete = False
@@ -365,6 +385,7 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
             events = BufferedEvents(stream)
             saved = inspect_saved(client, session_id, turn_id, baseline_turn_ids, submission_started)
             _seed(state, saved)
+            state.snapshot_partial_ids = {identifier for identifier,item in state.items.items() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('status') not in TERMINAL}
             if on_progress: on_progress(state)
             if state.outcome in TERMINAL: return state
             # Only current required_actions are actionable, not historical items.

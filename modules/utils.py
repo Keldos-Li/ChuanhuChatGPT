@@ -26,6 +26,7 @@ import pandas as pd
 import colorama
 
 from modules.presets import *
+from modules.model_capabilities import capabilities, require_capability, model_lock, reserve_submission, consume_submission
 from . import shared
 from modules.config import retrieve_proxy, hide_history_when_not_logged_in, admin_list
 
@@ -41,15 +42,25 @@ if TYPE_CHECKING:
 def predict(current_model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False):
         current_model.bind_owner(request)
-    iterator = current_model.predict(inputs, chatbot, use_websearch, files, reply_language)
+    iterator = None
     try:
+        with model_lock(current_model):
+            inputs = consume_submission(current_model, inputs)
+            if files: require_capability(current_model, 'input_attachments')
+            if use_websearch: require_capability(current_model, 'external_websearch')
+            iterator = current_model.predict(inputs, chatbot, use_websearch, files, reply_language)
+            first = next(iterator)
+        yield first
         yield from iterator
+    except StopIteration:
+        return
     finally:
-        if hasattr(iterator, "close"):
+        if iterator is not None and hasattr(iterator, 'close'):
             iterator.close()
 
 
 def billing_info(current_model):
+    if not capabilities(current_model).billing: return ''
     return current_model.billing_info()
 
 
@@ -74,6 +85,10 @@ def delete_chat_history(current_model, filename, request: gr.Request = None):
 def interrupt(current_model, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
+    with model_lock(current_model):
+        if getattr(current_model, '_pending_send', None):
+            current_model._pending_send = None
+            return '本次输入尚未提交，已取消'
     return current_model.interrupt() or i18n("msg.status.stop_requested")
 
 
@@ -86,6 +101,7 @@ def reset(current_model, remain_system_prompt=False, request: gr.Request = None)
 def retry(current_model, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
+    require_capability(current_model, 'regenerate')
     iter = current_model.retry(chatbot, use_websearch, files, reply_language)
     for i in iter:
         yield i
@@ -94,12 +110,14 @@ def retry(current_model, chatbot, use_websearch=False, files=None, reply_languag
 def delete_first_conversation(current_model, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
+    require_capability(current_model, 'history_rollback')
     return current_model.delete_first_conversation()
 
 
 def delete_last_conversation(current_model, chatbot, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
+    require_capability(current_model, 'history_delete')
     return current_model.delete_last_conversation(chatbot)
 
 
@@ -115,16 +133,20 @@ def rename_chat_history(current_model, filename, request: gr.Request = None):
     return current_model.rename_chat_history(filename)
 
 
-def auto_name_chat_history(current_model, *args):
-    return current_model.auto_name_chat_history(*args)
+def auto_name_chat_history(current_model, name_chat_method, user_question, single_turn_checkbox, request: gr.Request = None):
+    if getattr(current_model, 'is_hosted_agent', False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.auto_name_chat_history(name_chat_method, user_question, single_turn_checkbox)
 
 
 def export_markdown(current_model, *args):
     return current_model.export_markdown(*args)
 
 
-def upload_chat_history(current_model, *args):
-    return current_model.upload_chat_history(*args)
+def upload_chat_history(current_model, new_history_file_content=None, request: gr.Request = None):
+    if getattr(current_model, 'is_hosted_agent', False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.upload_chat_history(new_history_file_content)
 
 
 def set_token_upper_limit(current_model, *args):
@@ -175,10 +197,12 @@ def set_streaming(current_model, *args):
 
 
 def handle_file_upload(current_model, *args):
+    require_capability(current_model, 'input_attachments')
     return current_model.handle_file_upload(*args)
 
 
 def handle_summarize_index(current_model, *args):
+    require_capability(current_model, 'knowledge')
     return current_model.summarize_index(*args)
 
 
@@ -777,12 +801,12 @@ def cancel_outputing():
     shared.state.interrupt()
 
 
-def transfer_input(inputs):
+def transfer_input(inputs, current_model=None):
     # 一次性返回，降低延迟
     textbox = reset_textbox()
     outputing = start_outputing()
     return (
-        inputs,
+        reserve_submission(current_model, inputs) if current_model is not None else inputs,
         gr.update(value=""),
         gr.Button(visible=False),
         gr.Button(visible=True),

@@ -227,7 +227,7 @@ function addLatestMessageButtons(botElement) {
 
     var gradioRetryBtn = gradioApp().querySelector('#gr-retry-btn');
     regenerateButton.addEventListener('click', () => {
-        gradioRetryBtn.click();
+        if (window.chuanhuSupports?.('regenerate') !== false) gradioRetryBtn.click();
     });
 
     var deleteButton = document.createElement('button');
@@ -238,10 +238,12 @@ function addLatestMessageButtons(botElement) {
 
     var gradioDelLastBtn = gradioApp().querySelector('#gr-dellast-btn');
     deleteButton.addEventListener('click', () => {
-        gradioDelLastBtn.click();
+        if (window.chuanhuSupports?.('history_delete') !== false) gradioDelLastBtn.click();
     });
 
+    regenerateButton.hidden = window.chuanhuSupports?.('regenerate') === false;
     messageBtnRowLeading.appendChild(regenerateButton);
+    deleteButton.hidden = window.chuanhuSupports?.('history_delete') === false;
     messageBtnRowLeading.appendChild(deleteButton);
 
     // trailing
