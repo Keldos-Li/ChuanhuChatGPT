@@ -169,3 +169,29 @@ def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypat
         assert any(len(r)==2 and r[0][3]=='可下载' and r[1][3]=='准备中' for r in rows)
     try:asyncio.run(exercise())
     finally:app.close()
+
+
+def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypatch):
+    from modules.model_capabilities import CapabilityUI
+    complete(env,monkeypatch);model=select(env)
+    with gr.Blocks(analytics_enabled=False) as app:
+        current=gr.State();chat=gr.Chatbot();status=gr.Markdown();selector=gr.Dropdown();marker=gr.HTML()
+        caps=CapabilityUI([],selector,marker);caps.wire(current,chat)
+        panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components()
+    updates=list(panel.wrap_predict(env.wrappers['predict'],caps)(model,'hello',[],request=gr.Request(session_hash='ui')))
+    final=updates[-1]
+    for component in (panel.model,panel.reasoning,panel.apply_model):
+        assert final[2+panel.outputs.index(component)]['interactive'] is True
+    assert not model._running
+    app.close()
+
+
+def test_prompt_change_reports_new_session_requirement_in_visible_status(env,monkeypatch):
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    with gr.Blocks(analytics_enabled=False) as app:
+        current=gr.State();prompt=gr.Textbox();status=gr.Markdown()
+        prompt.change(env.wrappers['set_system_prompt'],[current,prompt],[status])
+    state=SessionState(app);state[current._id]=model
+    result=asyncio.run(app.process_api(0,[None,'new instructions'],state=state,request=gr.Request(session_hash='ui')))
+    assert '变更需要新会话' in result['data'][0] and '仍使用原设置' in result['data'][0]
+    app.close()

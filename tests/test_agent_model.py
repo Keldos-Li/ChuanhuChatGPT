@@ -458,3 +458,15 @@ def test_failed_fork_keeps_original_title_state(env,monkeypatch):
     send(env,model,'different question')
     model.auto_name_chat_history(env.locale('naming.by_first_question'),'different question',False)
     assert model.history_file_path==old and model._first_prompt=='original question' and model._auto_named
+
+
+def test_explicit_network_chat_command_requires_fork_and_keeps_session(env,monkeypatch):
+    calls,_=complete(env,monkeypatch);model=select(env);send(env,model)
+    before=len(calls);send(env,model,'请关闭联网')
+    assert len(calls)==before and model._state['session_id']=='sess_test'
+    assert model._pending_network is False and model._session_settings['tools']['network'] is True
+    assert '请选择' in model._notice
+    model.new_session_from_history();send(env,model,'continue task')
+    command=[c for c in calls if c['action']=='run'][-1]
+    assert command['session_id'] is None and command['tool_settings']['network'] is False
+    assert command['tool_settings']['web_search'] is True

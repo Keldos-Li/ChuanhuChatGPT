@@ -50,6 +50,8 @@ def describe_settings(model):
     configured = model._tool_settings
     current = (model._session_settings or {}).get('tools')
     lines = [model._notice] if model._notice else []
+    if model._pending_network is not None:
+        lines.append('待确认的新会话联网设置：' + ('开启' if model._pending_network else '关闭') + '；点击按新配置新建并继续后生效')
     def summary(settings):
         enabled = [label for label, state, _ in tool_availability(settings) if state == '已启用']
         return ('云端执行环境联网：' + ('开' if settings['network'] else '关') + '；内置网页搜索：'
@@ -167,6 +169,7 @@ class AgentPanel:
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
             for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request):
                 yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+            yield gr.update(), gr.update(), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
         return predict_with_ui
 
     def wire(self, current_model, chatbot, status_display, capability_ui=None):
@@ -204,8 +207,9 @@ class AgentPanel:
         self.reconnect.click(reconnect, [current_model], reconnect_outputs)
         def retry_file(model, identifier, request: gr.Request):
             model.bind_owner(request)
-            return model.retry_artifact(identifier)
-        self.artifacts.retry.click(retry_file, [current_model, self.artifacts.retry_id], [status_display]).then(self.values, [current_model], self.outputs)
+            for _, status in model.retry_artifact(identifier):
+                yield status, *self.values(model, request=request, include_config=False)
+        self.artifacts.retry.click(retry_file, [current_model, self.artifacts.retry_id], [status_display, *self.outputs])
         self.request_id.input(browser_form, [current_model, self.request_id], [self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit])
         def origin(model, identifier, decision):
             card = next((card for card in model._pending_actions if card['request_id'] == identifier), None)

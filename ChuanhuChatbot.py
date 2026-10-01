@@ -675,7 +675,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
 
     # Template
     systemPromptTxt.change(set_system_prompt, [
-                           current_model, systemPromptTxt], None).then(agent_panel.values, [current_model], agent_panel.outputs)
+                           current_model, systemPromptTxt], [status_display]).then(agent_panel.values, [current_model], agent_panel.outputs)
     templateRefreshBtn.click(get_template_dropdown, None, [
                              templateFileSelectDropdown])
     templateFileSelectDropdown.input(

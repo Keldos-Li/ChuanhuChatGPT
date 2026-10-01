@@ -73,13 +73,19 @@ def set_key(current_model, new_key, request: gr.Request = None):
 def load_chat_history(current_model, new_history_file_path=None, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
-    return current_model.load_chat_history(new_history_file_path)
+    with model_lock(current_model):
+        if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        return current_model.load_chat_history(new_history_file_path)
 
 
 def delete_chat_history(current_model, filename, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
-    return current_model.delete_chat_history(filename)
+    with model_lock(current_model):
+        if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        return current_model.delete_chat_history(filename)
 
 
 def interrupt(current_model, request: gr.Request = None):
@@ -95,7 +101,10 @@ def interrupt(current_model, request: gr.Request = None):
 def reset(current_model, remain_system_prompt=False, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
-    return current_model.reset(remain_system_prompt)
+    with model_lock(current_model):
+        if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        return current_model.reset(remain_system_prompt)
 
 
 def retry(current_model, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
@@ -111,26 +120,40 @@ def delete_first_conversation(current_model, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
     require_capability(current_model, 'history_rollback')
-    return current_model.delete_first_conversation()
+    with model_lock(current_model):
+        if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        return current_model.delete_first_conversation()
 
 
 def delete_last_conversation(current_model, chatbot, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
     require_capability(current_model, 'history_delete')
-    return current_model.delete_last_conversation(chatbot)
+    with model_lock(current_model):
+        if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        return current_model.delete_last_conversation(chatbot)
 
 
 def set_system_prompt(current_model, new_system_prompt, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
-    return current_model.set_system_prompt(new_system_prompt)
+    current_model.set_system_prompt(new_system_prompt)
+    if getattr(current_model, 'is_hosted_agent', False):
+        if current_model._session_settings and new_system_prompt != current_model._session_settings.get('instructions'):
+            return '系统提示词变更需要新会话；当前会话仍使用原设置。可继续原会话，或在工具与能力中按新配置新建并继续'
+        return '系统提示词将用于新建的 Agent 会话' if not current_model._session_settings else gr.update()
+    return gr.update()
 
 
 def rename_chat_history(current_model, filename, request: gr.Request = None):
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
-    return current_model.rename_chat_history(filename)
+    with model_lock(current_model):
+        if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        return current_model.rename_chat_history(filename)
 
 
 def auto_name_chat_history(current_model, name_chat_method, user_question, single_turn_checkbox, request: gr.Request = None):
@@ -148,7 +171,10 @@ def export_markdown(current_model, filename, chatbot, request: gr.Request = None
 def upload_chat_history(current_model, new_history_file_content=None, request: gr.Request = None):
     if getattr(current_model, 'is_hosted_agent', False) and request is not None:
         current_model.bind_owner(request)
-    return current_model.upload_chat_history(new_history_file_content)
+    with model_lock(current_model):
+        if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        return current_model.upload_chat_history(new_history_file_content)
 
 
 def set_token_upper_limit(current_model, *args):

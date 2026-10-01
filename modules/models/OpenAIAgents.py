@@ -26,7 +26,7 @@ STATUS = {'starting': '正在连接', 'in_progress': '正在运行', 'requires_a
 _bindings = {}  # Backward-compatible test hook; authority lives in BindingStore.
 _bindings_lock = RLock()
 _session_locks = {}
-_cancel_sessions = set()
+_cancel_sessions = {}
 
 
 def browser_owner(request):
@@ -87,6 +87,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._fork_previous = None
         self._auto_named = False
         self._first_prompt = None
+        self._pending_network = None
         self.metadata = {}
         self._tool_settings = load_settings(shared.chuanhu_path, owner) if owner else validate_settings({})
 
@@ -179,6 +180,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._fork_previous = None
         self._auto_named = False
         self._first_prompt = None
+        self._pending_network = None
         self._state = {'outcome': 'not_started'}
         self._conversation_id = uuid4().hex
         self._artifacts, self._cloud_items, self._pending_actions = [], [], []
@@ -236,6 +238,8 @@ class OpenAIAgentsClient(BaseLLMModel):
         with self._lock:
             if self._running or getattr(self, '_pending_send', None) or (not self._unavailable and (self._state.get('outcome') not in TERMINAL or self._needs_sync)):
                 raise gr.Error('请先停止或确认当前任务状态，再创建独立会话')
+            if self._pending_network is not None:
+                self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=self._pending_network))
             self.auto_save(self.chatbot)
             backup = {name: deepcopy(getattr(self, name)) for name in
                 ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch')}
@@ -252,7 +256,7 @@ class OpenAIAgentsClient(BaseLLMModel):
             self._cancel_sent = True
             command = {'action': 'cancel', 'session_id': self._state['session_id'], 'turn_id': self._state['turn_id']}
         cancel_key = (self._owner, command['session_id'])
-        with _bindings_lock: _cancel_sessions.add(cancel_key)
+        with _bindings_lock: _cancel_sessions[cancel_key] = _cancel_sessions.get(cancel_key, 0) + 1
         try:
             for message in self._worker(command):
                 with self._lock:
@@ -266,7 +270,10 @@ class OpenAIAgentsClient(BaseLLMModel):
                         self._notice = message.get('message', '已请求停止，等待云端确认')
                     self._remember()
         finally:
-            with _bindings_lock: _cancel_sessions.discard(cancel_key)
+            with _bindings_lock:
+                remaining = _cancel_sessions.get(cancel_key, 0) - 1
+                if remaining > 0: _cancel_sessions[cancel_key] = remaining
+                else: _cancel_sessions.pop(cancel_key, None)
 
     def interrupt(self):
         with self._lock:
@@ -357,8 +364,7 @@ class OpenAIAgentsClient(BaseLLMModel):
 
     def retry_artifact(self, artifact_id):
         if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
-        for _ in self._download(self._state.get('generation'), [artifact_id]): pass
-        return self._status()
+        yield from self._download(self._state.get('generation'), [artifact_id])
 
     def predict(self, inputs, chatbot, use_websearch=False, files=None, reply_language=None, should_check_token_count=True):
         if not self._owner: raise gr.Error('需要在当前登录会话中发送')
@@ -370,6 +376,23 @@ class OpenAIAgentsClient(BaseLLMModel):
         with self._lock:
             if self._retired or (self._display and display_signature(chatbot) != display_signature(self._display)): raise gr.Error('聊天内容已变化，请在当前聊天中重新发送')
             self._assert_idle()
+            network_commands = {'开网': True, '开启联网': True, '允许联网': True, '打开联网': True,
+                                '关网': False, '关闭联网': False, '禁用联网': False, '关闭云端联网': False}
+            normalized = inputs.strip().strip('。！!').removeprefix('请')
+            if normalized in network_commands:
+                desired = network_commands[normalized]
+                effective = (self._session_settings or {}).get('tools', self._tool_settings)['network']
+                word = '开启' if desired else '关闭'
+                if self._state.get('session_id') and effective != desired:
+                    self._pending_network = desired
+                    self._notice = f'现有会话无法直接{word}云端执行环境联网。请选择“按新配置新建并继续”确认；只携带文字历史，原会话保持原设置。内置网页搜索单独配置'
+                elif not self._state.get('session_id'):
+                    self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=desired))
+                    self._notice = f'新会话的云端执行环境联网已设为{word}；请输入任务。内置网页搜索单独配置'
+                else:
+                    self._notice = f'当前会话的云端执行环境联网已经{word}；内置网页搜索单独配置'
+                yield deepcopy(self._display), self._status()
+                return
             reservation = (self._owner, self._state.get('session_id') or self._key()[1])
             with _bindings_lock:
                 if reservation in _session_locks or reservation in _cancel_sessions:

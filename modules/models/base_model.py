@@ -917,8 +917,8 @@ class BaseLLMModel:
         self.auto_save()
 
     def reset(self, remain_system_prompt=False):
-        if getattr(self, '_pending_send', None):
-            raise gr.Error('当前输入已排队，请等待完成或先停止')
+        if getattr(self, '_pending_send', None) or self._chat_running:
+            raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
         self.history = []
         self.all_token_counts = []
         self.interrupted = False
@@ -1041,8 +1041,8 @@ class BaseLLMModel:
         save_file(filename, self)
 
     def upload_chat_history(self, new_history_file_content=None):
-        if getattr(self, '_pending_send', None):
-            raise gr.Error('当前输入已排队，请等待完成或先停止')
+        if getattr(self, '_pending_send', None) or self._chat_running:
+            raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
         logging.debug(f"{self.user_name} 加载对话历史中……")
         if new_history_file_content is not None:
             if isinstance(new_history_file_content, bytes):
@@ -1071,8 +1071,8 @@ class BaseLLMModel:
         return *self.load_chat_history(), init_history_list(self.user_name)
 
     def load_chat_history(self, new_history_file_path=None):
-        if getattr(self, '_pending_send', None):
-            raise gr.Error('当前输入已排队，请等待完成或先停止')
+        if getattr(self, '_pending_send', None) or self._chat_running:
+            raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
         logging.debug(f"{self.user_name} 加载对话历史中……")
         if new_history_file_path is not None:
             self.history_file_path = new_history_file_path
@@ -1182,8 +1182,8 @@ class BaseLLMModel:
             )
 
     def delete_chat_history(self, filename):
-        if getattr(self, '_pending_send', None):
-            raise gr.Error('当前输入已排队，请等待完成或先停止')
+        if getattr(self, '_pending_send', None) or self._chat_running:
+            raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
         if filename == "CANCELED":
             return gr.update(), gr.update(), gr.update()
         if filename == "":
