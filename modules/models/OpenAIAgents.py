@@ -83,6 +83,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._pending_actions = []
         self._notice = ''
         self._unavailable = False
+        self._connection_mismatch = False
         self._fork_previous = None
         self._auto_named = False
         self._first_prompt = None
@@ -237,7 +238,7 @@ class OpenAIAgentsClient(BaseLLMModel):
                 raise gr.Error('请先停止或确认当前任务状态，再创建独立会话')
             self.auto_save(self.chatbot)
             backup = {name: deepcopy(getattr(self, name)) for name in
-                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id')}
+                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch')}
             self.new_auto_history_filename()
             self._fresh()
             self._fork_previous = backup

@@ -448,3 +448,13 @@ def test_inflight_stop_blocks_new_turn_even_when_old_turn_finishes(env,monkeypat
     with pytest.raises(gr.Error):list(two.predict('new task',[]))
     release.set();thread.join(3)
     assert one._state['outcome']=='completed' and not thread.is_alive()
+
+
+def test_failed_fork_keeps_original_title_state(env,monkeypatch):
+    complete(env,monkeypatch);model=select(env);send(env,model,'original question')
+    model.rename_chat_history('User chosen title.json');old=model.history_file_path
+    model.new_session_from_history()
+    monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([{'type':'error','outcome':'not_started','message':'rejected'}]))
+    send(env,model,'different question')
+    model.auto_name_chat_history(env.locale('naming.by_first_question'),'different question',False)
+    assert model.history_file_path==old and model._first_prompt=='original question' and model._auto_named
