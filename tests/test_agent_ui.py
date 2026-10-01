@@ -195,3 +195,39 @@ def test_prompt_change_reports_new_session_requirement_in_visible_status(env,mon
     result=asyncio.run(app.process_api(0,[None,'new instructions'],state=state,request=gr.Request(session_hash='ui')))
     assert '变更需要新会话' in result['data'][0] and '仍使用原设置' in result['data'][0]
     app.close()
+
+
+@pytest.mark.parametrize('final_status',['ready','failed'])
+def test_single_file_retry_streams_preparing_and_result_without_losing_other_files(env,monkeypatch,final_status):
+    from pathlib import Path
+    import tempfile
+    model=select(env);model._state={'session_id':'sess_test','turn_id':'turn_one','generation':'g','outcome':'completed'}
+    path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'retry.txt';path.write_text('x')
+    existing={'id':'other','name':'other.txt','status':'ready','path':str(path),'size':1,'type':'text/plain'}
+    model._artifacts=[existing,{'id':'retry','name':'retry.txt','status':'failed','error':'unavailable','type':'text/plain'}]
+    calls=[]
+    def worker(command):
+        calls.append(command)
+        assert command['action']=='download' and command['artifact_ids']==['retry']
+        record={'id':'retry','name':'retry.txt','status':'preparing','type':'text/plain','size':1}
+        yield {'type':'progress','artifacts':[record]}
+        final=dict(record,status=final_status)
+        if final_status=='ready':final['path']=str(path)
+        else:final['error']='still unavailable'
+        yield {'type':'result','artifacts':[final]}
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    app,panel,state=panel_app(model)
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='retry_file')
+    async def exercise():
+        req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'retry'],state=state,request=req);statuses=[]
+        while True:
+            update=result['data'][1+panel.outputs.index(panel.artifacts.list)]
+            if isinstance(update,dict) and isinstance(update.get('value'),dict):
+                rows=update['value']['data'];assert rows[0][0]=='other.txt' and rows[0][3]=='可下载';statuses.append(rows[1][3])
+            if not result['is_generating']:break
+            result=await app.process_api(index,[None,'retry'],state=state,request=req,iterator=result['iterator'])
+        assert '准备中' in statuses
+        assert any(status.startswith('可下载' if final_status=='ready' else '下载失败') for status in statuses)
+    try:asyncio.run(exercise())
+    finally:app.close()
+    assert len(calls)==1 and model._state['session_id']=='sess_test'

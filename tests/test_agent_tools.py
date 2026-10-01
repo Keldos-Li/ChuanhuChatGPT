@@ -200,3 +200,13 @@ def test_concurrent_function_recovery_atomic_claim():
     two=threading.Thread(target=run);two.start();two.join(3);finish.set();one.join(3)
     assert count==['execute'] and len(calls)==1
     assert len(failures)==1 and isinstance(failures[0],tools.ToolConfigurationError)
+
+
+def test_binding_survives_new_python_process_and_is_owner_scoped(tmp_path):
+    import subprocess,sys
+    owner=owner_identity('alice');store=BindingStore(tmp_path)
+    store.put(owner,'saved.json',{'state':{'session_id':'sess_persisted','turn_id':'turn_saved'},'settings':{'model':'model'}})
+    script="from modules.agent_store import BindingStore,owner_identity; import json,sys; s=BindingStore(sys.argv[1]); print(json.dumps([s.get(owner_identity('alice'),'saved.json'),s.get(owner_identity('bob'),'saved.json')]))"
+    output=subprocess.check_output([sys.executable,'-c',script,str(tmp_path)],cwd=Path(__file__).resolve().parents[1],text=True)
+    alice,bob=json.loads(output)
+    assert alice['state']['session_id']=='sess_persisted' and bob is None
