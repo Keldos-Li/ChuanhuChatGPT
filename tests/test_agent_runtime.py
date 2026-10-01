@@ -460,3 +460,29 @@ def test_all_artifacts_download_with_duplicate_names_and_individual_failure(tmp_
     import shutil
     for folder in {str(Path(item['path']).parents[1]) for item in result if item['status'] == 'ready'}:
         shutil.rmtree(folder)
+
+
+def test_artifact_listing_failure_does_not_block_text_restore():
+    client=FakeClient();client.saved_items=[message('u','question',role='user'),message('a','complete answer')]
+    def fail(*a,**k):raise OSError('artifact-only failure')
+    client.beta.agents.sessions.artifacts.list=fail
+    result=runtime.recover_stream(client,'sess_test','t1')
+    assert result.text=='complete answer' and result.outcome=='completed'
+
+
+def test_incomplete_artifact_is_individual_failure():
+    client=FakeClient();client.saved_artifacts=[{'id':'art_one','path':'file.txt','turn_id':'t1','size_bytes':100}]
+    class Content:
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def iter_bytes(self):yield b'short'
+    client.beta.agents.sessions.artifacts.with_streaming_response=SimpleNamespace(content=lambda *a,**k:Content())
+    result=runtime.download_artifacts(client,'sess_test')
+    assert result[0]['status']=='failed' and 'path' not in result[0]
+    assert '长度' in result[0]['error']
+
+
+def test_effective_settings_snapshot_excludes_mcp_secrets():
+    snapshot=runtime._public_settings({'agent':{'model':'model','tools':[{'type':'mcp','server_label':'explicit','allowed_tools':['read'],'transport':{'authorization':'secret','headers':{'X-Key':'secret'}}}]},'environment':{'type':'openai_hosted','env':{'SECRET':'secret'},'network':{'access':'enabled'}}})
+    assert 'secret' not in repr(snapshot).lower()
+    assert snapshot['agent']['tools'][0]['allowed_tools']==['read']

@@ -338,3 +338,66 @@ def test_ordinary_retry_reserves_before_rewind_and_close_restores_history(env,mo
     ordinary.get_answer_stream_iter=lambda:iter(['ordinary regenerated'])
     list(ordinary.retry(deepcopy(ordinary.chatbot)))
     assert len(ordinary.history)==2 and ordinary.history[-1]['content']=='ordinary regenerated'
+
+
+def test_failed_explicit_fork_returns_original_session(env,monkeypatch):
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    original=(model.history_file_path,deepcopy(model.chatbot),model._state['session_id'])
+    model.save_agent_tools(dict(model._tool_settings,network=False));model.new_session_from_history()
+    monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([dict(type='error',outcome='not_started',message='unsupported API')]))
+    send(env,model,'new attempted request')
+    assert (model.history_file_path,model.chatbot,model._state['session_id'])==original
+    assert model._tool_settings['network'] is False and '已回到原会话' in model._notice
+    assert len(list(env.history_dir.glob('*.json')))==2
+
+
+def test_cross_browser_double_send_reservation(env,monkeypatch):
+    complete(env,monkeypatch);one=select(env);send(env,one)
+    two=select(env,browser='two');two.history_file_path=one.history_file_path;two._state=deepcopy(one._state)
+    two.history=deepcopy(one.history);two.chatbot=deepcopy(one.chatbot);two._display=deepcopy(one._display);two._session_settings=deepcopy(one._session_settings)
+    generator=one.predict('pending',one.chatbot);next(generator)
+    with pytest.raises(gr.Error):list(two.predict('duplicate',two.chatbot))
+    generator.close()
+
+
+def test_summary_title_keeps_binding_and_uses_existing_choice(env,monkeypatch):
+    calls,_=complete(env,monkeypatch);model=select(env);send(env,model)
+    old_worker=env.agents.worker_messages
+    def worker(command):
+        if command['action']=='title':yield dict(type='result',title='简洁标题')
+        else:yield from old_worker(command)
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    model.auto_name_chat_history(env.locale('naming.by_model_summary'),'hello',False)
+    assert model.history_file_path=='简洁标题.json'
+    assert model._store().get(model._owner,model.history_file_path)['state']['session_id']=='sess_test'
+
+
+def test_terminal_history_sync_failure_preserves_answer_and_blocks_send(env,monkeypatch):
+    def worker(command):
+        if command['action']=='run':yield dict(type='result',session_id='sess_test',turn_id='turn_one',outcome='completed',text='answer',sync_complete=False,items=[])
+        elif command['action']=='download':yield dict(type='result',artifacts=[])
+    monkeypatch.setattr(env.agents,'worker_messages',worker);model=select(env);send(env,model)
+    assert model._needs_sync and model.chatbot[-1][1]=='answer' and '尚未完整同步' in model._notice
+    with pytest.raises(gr.Error):model._assert_idle()
+
+
+def test_recovered_live_delta_updates_before_item_done(env):
+    from optional.agents.runtime import TurnState,_seed
+    model=select(env);model._state={'generation':'g','session_id':'sess_test','turn_id':'t1','outcome':'in_progress'}
+    model._session_settings=model._current_settings()
+    state=TurnState('sess_test','t1')
+    _seed(state,{'turn_id':'t1','outcome':'in_progress','items':[
+        {'id':'u','type':'message','role':'user','turn_id':'t1','status':'completed','content':[{'type':'input_text','text':'question'}]},
+        {'id':'a','type':'message','role':'assistant','turn_id':'t1','status':'in_progress','content':[{'type':'output_text','text':'first '}]}],
+        'required_actions':[],'settings':{}})
+    model._accept(state.snapshot(),'g',restoring=True)
+    state.accept({'type':'agent.session.turn.output_text.delta','session_id':'sess_test','turn_id':'t1','item_id':'a','output_index':0,'content_index':0,'delta':'new text'})
+    model._accept(state.snapshot(),'g',restoring=True)
+    assert model.history[-1]['content']=='first new text' and state.sync_complete is None
+
+
+def test_recovery_does_not_apply_previous_stop_to_a_new_turn(env):
+    model=select(env);model._state={'generation':'g','session_id':'sess_test','turn_id':'old_turn','outcome':'cancelled'}
+    model._cancel_requested=True;model._cancel_sent=True
+    model._accept({'session_id':'sess_test','turn_id':'new_turn','outcome':'in_progress','required_actions':[]},'g',restoring=True)
+    assert not model._cancel_requested and not model._cancel_sent and model._state['turn_id']=='new_turn'

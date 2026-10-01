@@ -296,47 +296,85 @@ def handle_function_actions(client, state, session, settings, handled):
         if action.get('type') != 'function_call' or action.get('turn_id') != state.turn_id: continue
         call_id, name = action.get('call_id'), action.get('name')
         if call_id in handled: continue
+        if not isinstance(call_id, str) or not call_id:
+            raise ToolConfigurationError('函数调用标识无效')
         entry = FUNCTIONS.get(name)
         if name not in settings['functions'] or entry is None or not entry.authorized():
             raise ToolConfigurationError('函数未启用、不可执行或授权已失效：' + str(name))
         arguments = action.get('arguments')
         try:
             if isinstance(arguments, str): arguments = json.loads(arguments)
-            jsonschema.validate(arguments, entry.schema['parameters'])
-        except (ValueError, jsonschema.ValidationError, jsonschema.SchemaError):
-            result = {'success': False, 'error': '函数参数不符合已注册的输入格式'}
-        else:
-            folder = _control_folder(state.session_id, state.turn_id)
-            control = folder / (hashlib.sha256(call_id.encode()).hexdigest() + '.json')
-            if (folder / 'cancel').exists():
-                raise ToolConfigurationError('当前轮已请求停止，不再启动新的应用函数')
-            stop, finished = Event(), Event()
-            _write_control(control, {'call_id': call_id, 'status': 'running'})
-            def watch_cancel():
-                while not finished.wait(0.05):
-                    if (folder / 'cancel').exists():
-                        stop.set()
-                        _write_control(control, {'call_id': call_id, 'status': 'cancel_requested'})
-                        if entry.cancel:
-                            try: entry.cancel()
-                            except Exception: pass
-                        return
-            monitor = Thread(target=watch_cancel, daemon=True)
-            monitor.start()
-            with _lock: _running[(state.session_id, state.turn_id, call_id)] = (stop, entry.cancel)
+        except ValueError:
+            arguments = None
+        digest = hashlib.sha256(json.dumps({'name': name, 'arguments': arguments}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        folder = _control_folder(state.session_id, state.turn_id)
+        identifier = hashlib.sha256(call_id.encode()).hexdigest()
+        control, claim, saved_result = folder / (identifier + '.json'), folder / (identifier + '.claim'), folder / (identifier + '.result')
+        if (folder / 'cancel').exists():
+            raise ToolConfigurationError('当前轮已请求停止，不再启动或恢复应用函数')
+        try:
+            descriptor = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
             try:
-                output = entry.execute(arguments, stop)
-                if stop.is_set(): result = {'success': False, 'error': '当前任务已请求停止'}
-                else: result = {'success': True, 'output': json.dumps(output, ensure_ascii=False)}
-            except Exception: result = {'success': False, 'error': '应用函数执行失败；未自动重试'}
-            finally:
-                finished.set()
-                monitor.join()
-                _write_control(control, {'call_id': call_id, 'status': 'stopped' if stop.is_set() else 'completed'})
-                with _lock: _running.pop((state.session_id, state.turn_id, call_id), None)
-        # Never retry a function side effect or an uncertain result submission.
+                previous = json.loads(claim.read_text())
+                if previous.get('digest') != digest:
+                    raise ToolConfigurationError('同一函数调用标识的参数已变化，未重复执行')
+                cached = json.loads(saved_result.read_text())
+            except (OSError, ValueError):
+                raise ToolConfigurationError('该函数已经启动，执行结果尚待确认；不会重新执行可能产生副作用的操作') from None
+            if cached.get('digest') != digest:
+                raise ToolConfigurationError('函数结果与当前请求不一致，未重复执行')
+            result = cached['result']
+            # A recorded accepted submission must not be replayed from an older
+            # required_action snapshot. The next session read decides progress.
+            if cached.get('submission') == 'accepted':
+                handled.add(call_id)
+                continue
+        else:
+            with os.fdopen(descriptor, 'w') as claim_file:
+                json.dump({'call_id': call_id, 'digest': digest}, claim_file)
+                claim_file.flush()
+                os.fsync(claim_file.fileno())
+            try:
+                jsonschema.validate(arguments, entry.schema['parameters'])
+            except (jsonschema.ValidationError, jsonschema.SchemaError):
+                result = {'success': False, 'error': '函数参数不符合已注册的输入格式'}
+                _write_control(control, {'call_id': call_id, 'status': 'completed'})
+            else:
+                stop, finished = Event(), Event()
+                _write_control(control, {'call_id': call_id, 'status': 'running'})
+                def watch_cancel():
+                    while not finished.wait(0.05):
+                        if (folder / 'cancel').exists():
+                            stop.set()
+                            _write_control(control, {'call_id': call_id, 'status': 'cancel_requested'})
+                            if entry.cancel:
+                                try: entry.cancel()
+                                except Exception: pass
+                            return
+                monitor = Thread(target=watch_cancel, daemon=True)
+                monitor.start()
+                with _lock: _running[(state.session_id, state.turn_id, call_id)] = (stop, entry.cancel)
+                try:
+                    output = entry.execute(arguments, stop)
+                    if stop.is_set(): result = {'success': False, 'error': '当前任务已请求停止'}
+                    else: result = {'success': True, 'output': json.dumps(output, ensure_ascii=False)}
+                except Exception: result = {'success': False, 'error': '应用函数执行失败；未自动重试'}
+                finally:
+                    finished.set()
+                    monitor.join()
+                    _write_control(control, {'call_id': call_id, 'status': 'stopped' if stop.is_set() else 'completed'})
+                    with _lock: _running.pop((state.session_id, state.turn_id, call_id), None)
+            # Persist before the first result transmission. A lost acknowledgement
+            # can reuse this result, never invoke the function a second time.
+            _write_control(saved_result, {'digest': digest, 'result': result, 'submission': 'pending'})
         handled.add(call_id)
-        client.beta.agents.sessions.events.create(state.session_id, events=[{'type': 'agent.session.input.tool_result', 'turn_id': state.turn_id, 'call_id': call_id, **result}])
+        try:
+            client.beta.agents.sessions.events.create(state.session_id, events=[{'type': 'agent.session.input.tool_result', 'turn_id': state.turn_id, 'call_id': call_id, **result}])
+        except Exception:
+            _write_control(saved_result, {'digest': digest, 'result': result, 'submission': 'uncertain'})
+            raise
+        _write_control(saved_result, {'digest': digest, 'result': result, 'submission': 'accepted'})
 
 
 def cancel_application_tasks(session_id, turn_id):

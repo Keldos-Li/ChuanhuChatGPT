@@ -76,7 +76,7 @@ def build(language='zh_CN'):
     gr.blocks.BlockContext.__init__=scope[wrapper.name](gr.blocks.BlockContext.__init__)
     # Exact actual event-chain source, no substitute dropdown or chat callbacks.
     event_prefixes=('cancelBtn.click(', 'user_input.submit(', 'submitBtn.click(',
-                    'retryBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(', 'agent_panel.wire(')
+                    'retryBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(')
     events=[node for node in block.body
             if (isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id.endswith('_args') for target in node.targets))
             or (isinstance(node,ast.Expr) and ast.unparse(node).startswith(event_prefixes))]

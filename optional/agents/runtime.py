@@ -62,7 +62,8 @@ class TurnState:
     final_items: set = field(default_factory=set)
     required_actions: list = field(default_factory=list)
     settings: dict | None = None
-    sync_complete: bool = False
+    sync_complete: bool | None = None
+    history_authoritative: bool = False
 
     @property
     def text(self):
@@ -75,7 +76,7 @@ class TurnState:
                 'text': self.text, 'progress': self.progress, 'baseline_turn_ids': sorted(self.ignored_turn_ids),
                 'submission_started': self.submission_started, 'items': list(self.items.values()),
                 'required_actions': deepcopy(self.required_actions), 'settings': deepcopy(self.settings),
-                'sync_complete': self.sync_complete}
+                'sync_complete': self.sync_complete, 'history_authoritative': self.history_authoritative}
 
     def accept(self, event):
         event = as_dict(event)
@@ -100,6 +101,7 @@ class TurnState:
             raise AgentError('云端会话或执行环境失败，已保留现有结果；请重新连接查看详情', self)
         if turn_id and self.turn_id and turn_id != self.turn_id: return
         self.progress = kind
+        self.sync_complete = None  # This event is not a new history reconciliation.
         if kind in ('agent.session.turn.item.added', 'agent.session.turn.item.done', 'agent.session.turn.item.updated'):
             item = event.get('item')
             if isinstance(item, dict) and isinstance(item.get('id'), str):
@@ -113,8 +115,15 @@ class TurnState:
             if not isinstance(item, str) or type(output_index) is not int or type(content_index) is not int: return
             if item in self.final_items: return
             part = (item, output_index, content_index)
-            if kind.endswith('.delta'): self.parts[part] = self.parts.get(part, '') + event.get('delta', '')
+            item_record = self.items.get(item)
+            content = item_record.get('content', []) if item_record else []
+            prefix = content[content_index].get('text', '') if content_index < len(content) else ''
+            if kind.endswith('.delta'): self.parts[part] = self.parts.get(part, prefix) + event.get('delta', '')
             else: self.parts[part] = event.get('text', '')
+            if self.history_authoritative:
+                item_record = self.items.setdefault(item, {'id': item, 'type': 'message', 'role': 'assistant', 'turn_id': turn_id, 'status': 'in_progress', 'content': []})
+                while len(item_record['content']) <= content_index: item_record['content'].append({'type': 'output_text', 'text': ''})
+                item_record['content'][content_index] = {'type': 'output_text', 'text': self.parts[part]}
         if kind in ('agent.session.turn.completed', 'agent.session.turn.failed', 'agent.session.turn.cancelled'):
             self.outcome = kind.rsplit('.', 1)[-1]
             self.required_actions = []
@@ -185,6 +194,19 @@ def _no_retry(client):
     return client.with_options(max_retries=0) if hasattr(client, 'with_options') else client
 
 
+def _public_settings(session):
+    """Expose effective configuration, never returned MCP credentials or env."""
+    agent = session.get('agent') or {}
+    allowed_tool_keys = {'type', 'name', 'server_label', 'allowed_tools', 'mode', 'allowed_domains',
+                         'enabled', 'include_screenshots', 'defer_loading', 'context_size'}
+    public_agent = {key: deepcopy(agent[key]) for key in ('model', 'reasoning', 'instructions') if key in agent}
+    if 'tools' in agent:
+        public_agent['tools'] = [{key: deepcopy(value) for key, value in tool.items() if key in allowed_tool_keys} for tool in agent['tools'] or []]
+    environment = session.get('environment') or {}
+    public_environment = {key: deepcopy(environment[key]) for key in ('id', 'type', 'network', 'desktop') if key in environment}
+    return {'agent': public_agent, 'environment': public_environment}
+
+
 def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, submission_started=False):
     try:
         session = as_dict(client.beta.agents.sessions.retrieve(session_id))
@@ -205,15 +227,19 @@ def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, subm
         items = all_records(client.beta.agents.sessions.items.list(session_id, limit=100, order='asc'))
         # Item IDs are authoritative; later server copies replace stale duplicates.
         unique = OrderedDict((item['id'], item) for item in items if isinstance(item.get('id'), str))
-        artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100))
+        artifact_error = None
+        try:
+            artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100))
+        except Exception as error:
+            artifacts, artifact_error = [], str(_error(error))
         outcome = turn.get('status') if turn else 'incomplete'
         if session.get('status') == 'failed': outcome = 'failed'
         cards = pending_action_cards(session, turn_id)
         if cards and outcome not in TERMINAL: outcome = 'requires_action'
         return {'session_id': session_id, 'session_status': session.get('status'), 'turn_id': turn_id,
                 'outcome': outcome, 'text': '\n'.join(message_text(item) for item in unique.values() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('turn_id') == turn_id),
-                'items': list(unique.values()), 'artifacts': artifacts, 'required_actions': cards,
-                'settings': {'agent': session.get('agent'), 'environment': session.get('environment')}, 'sync_complete': True}
+                'items': list(unique.values()), 'artifacts': artifacts, 'artifact_error': artifact_error, 'required_actions': cards,
+                'settings': _public_settings(session), 'sync_complete': True}
     except Exception as error: raise _error(error) from None
 
 
@@ -243,6 +269,7 @@ def _seed(state, saved):
     state.final_items = {key for key, item in state.items.items() if item.get('status') in TERMINAL}
     state.required_actions, state.settings = saved['required_actions'], saved['settings']
     state.sync_complete = True
+    state.history_authoritative = True
 
 
 def _process_events(client, events, state, settings, on_progress):
@@ -262,6 +289,24 @@ def _process_events(client, events, state, settings, on_progress):
         if on_progress: on_progress(state)
         if state.outcome in TERMINAL: return state
     raise AgentError('连接已中断，云端任务状态尚待确认；已保留结果，请重新连接，不要重复发送', state)
+
+
+def _reconcile_terminal(client, state):
+    try:
+        saved = inspect_saved(client, state.session_id, state.turn_id)
+        # Stream terminal events are also cloud facts. A lagging read must not
+        # downgrade them or erase newer finalized output.
+        if saved['turn_id'] != state.turn_id or saved['outcome'] != state.outcome:
+            state.sync_complete = False
+            return
+        merged = OrderedDict((item['id'], item) for item in saved['items'])
+        for identifier in state.final_items:
+            if identifier in state.items: merged[identifier] = state.items[identifier]
+        saved['items'] = list(merged.values())
+        if saved['items']: _seed(state, saved)
+        else: state.sync_complete = False
+    except AgentError:
+        state.sync_complete = False
 
 
 def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, run_id=None, deadline_seconds=None,
@@ -303,10 +348,7 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
             _process_events(client, events, state, settings, on_progress)
         # Retrieve full item identities after terminal output. A snapshot failure
         # preserves the completed result but marks history as not yet reconciled.
-        try:
-            saved = inspect_saved(client, state.session_id, state.turn_id)
-            if saved['items']: _seed(state, saved)
-        except AgentError: state.sync_complete = False
+        _reconcile_terminal(client, state)
         return state
     except Exception as error:
         if not state.submission_started: state.outcome = 'not_started'
@@ -330,7 +372,9 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
             state.required_actions = pending_action_cards(session, state.turn_id)
             handle_function_actions(_no_retry(client), state, session, tool_settings or {}, set())
             if on_progress: on_progress(state)
-            return _process_events(client, events, state, tool_settings, on_progress)
+            _process_events(client, events, state, tool_settings, on_progress)
+            _reconcile_terminal(client, state)
+            return state
     except Exception as error: raise _error(error, state) from None
 
 
@@ -371,7 +415,11 @@ def download_artifacts(client, session_id, *, artifact_ids=None):
             with client.beta.agents.sessions.artifacts.with_streaming_response.content(artifact['id'], session_id=session_id) as response:
                 with path.open('wb') as output:
                     for chunk in response.iter_bytes(): output.write(chunk)
-            record.update(path=str(path), size=path.stat().st_size, status='ready')
+            received = path.stat().st_size
+            expected = artifact.get('size_bytes')
+            if isinstance(expected, int) and expected >= 0 and received != expected:
+                raise AgentError('文件下载长度与已发布文件不一致，可能未完整传输；请单独重试该文件')
+            record.update(path=str(path), size=received, status='ready')
         except Exception as error:
             if path.exists(): path.unlink()
             record.update(status='failed', error=str(_error(error)))

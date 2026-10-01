@@ -53,46 +53,66 @@ def billing_info(current_model):
     return current_model.billing_info()
 
 
-def set_key(current_model, *args):
-    return current_model.set_key(*args)
+def set_key(current_model, new_key, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.set_key(new_key)
 
 
-def load_chat_history(current_model, *args):
-    return current_model.load_chat_history(*args)
+def load_chat_history(current_model, new_history_file_path=None, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.load_chat_history(new_history_file_path)
 
 
-def delete_chat_history(current_model, *args):
-    return current_model.delete_chat_history(*args)
+def delete_chat_history(current_model, filename, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.delete_chat_history(filename)
 
 
-def interrupt(current_model, *args):
-    return current_model.interrupt(*args) or i18n("msg.status.stop_requested")
+def interrupt(current_model, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.interrupt() or i18n("msg.status.stop_requested")
 
 
-def reset(current_model, *args):
-    return current_model.reset(*args)
+def reset(current_model, remain_system_prompt=False, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.reset(remain_system_prompt)
 
 
-def retry(current_model, *args):
-    iter = current_model.retry(*args)
+def retry(current_model, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    iter = current_model.retry(chatbot, use_websearch, files, reply_language)
     for i in iter:
         yield i
 
 
-def delete_first_conversation(current_model, *args):
-    return current_model.delete_first_conversation(*args)
+def delete_first_conversation(current_model, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.delete_first_conversation()
 
 
-def delete_last_conversation(current_model, *args):
-    return current_model.delete_last_conversation(*args)
+def delete_last_conversation(current_model, chatbot, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.delete_last_conversation(chatbot)
 
 
-def set_system_prompt(current_model, *args):
-    return current_model.set_system_prompt(*args)
+def set_system_prompt(current_model, new_system_prompt, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.set_system_prompt(new_system_prompt)
 
 
-def rename_chat_history(current_model, *args):
-    return current_model.rename_chat_history(*args)
+def rename_chat_history(current_model, filename, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False) and request is not None:
+        current_model.bind_owner(request)
+    return current_model.rename_chat_history(filename)
 
 
 def auto_name_chat_history(current_model, *args):

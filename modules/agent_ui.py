@@ -161,13 +161,15 @@ class AgentPanel:
                 *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))]
 
     def wire(self, current_model, chatbot, status_display):
-        def apply(model, name, effort):
+        def apply(model, name, effort, request: gr.Request):
+            model.bind_owner(request)
             try: message = model.set_agent_model(name, effort)
             except Exception as error: message = str(error)
             return message, *self.values(model)
         self.model.input(lambda name: gr.update(choices=MODEL_EFFORTS.get(name, ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']), value='default'), [self.model], [self.reasoning])
         self.apply_model.click(apply, [current_model, self.model, self.reasoning], [status_display, *self.outputs], queue=False)
-        def save(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp):
+        def save(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, request: gr.Request):
+            model.bind_owner(request)
             try:
                 value = {'network': network, 'code_execution': code, 'web_search': search, 'search_mode': mode, 'search_domains': [s.strip() for s in domains.splitlines() if s.strip()],
                          'computer_use': browser, 'include_screenshots': screenshots, 'tool_search': discovery, 'programmatic_tool_calling': programmatic, 'functions': functions, 'mcp_servers': json.loads(mcp)}
@@ -175,11 +177,19 @@ class AgentPanel:
             except Exception as error: message = str(error) if not isinstance(error, json.JSONDecodeError) else 'MCP 配置不是有效 JSON'
             return message, *self.values(model)
         self.save.click(save, [current_model, *self.config_inputs], [status_display, *self.outputs], queue=False)
-        self.fork.click(lambda model: model.new_session_from_history(), [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs)
-        def reconnect(model):
-            if _agent(model): yield from model.reconnect()
+        def fork(model, request: gr.Request):
+            model.bind_owner(request)
+            return model.new_session_from_history()
+        self.fork.click(fork, [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs)
+        def reconnect(model, request: gr.Request):
+            if _agent(model):
+                model.bind_owner(request)
+                yield from model.reconnect()
         self.reconnect.click(reconnect, [current_model], [chatbot, status_display])
-        self.artifacts.retry.click(lambda model, identifier: model.retry_artifact(identifier), [current_model, self.artifacts.retry_id], [status_display]).then(self.values, [current_model], self.outputs)
+        def retry_file(model, identifier, request: gr.Request):
+            model.bind_owner(request)
+            return model.retry_artifact(identifier)
+        self.artifacts.retry.click(retry_file, [current_model, self.artifacts.retry_id], [status_display]).then(self.values, [current_model], self.outputs)
         self.request_id.input(browser_form, [current_model, self.request_id], [self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit])
         def origin(model, identifier, decision):
             card = next((card for card in model._pending_actions if card['request_id'] == identifier), None)
@@ -187,9 +197,15 @@ class AgentPanel:
             request_type = card['request']['type']
             response = {'type': request_type, 'action': 'cancel'} if request_type == 'browser_authentication' else {'type': request_type, 'decision': decision}
             return model.respond_browser(identifier, response), *self.values(model)
+        def origin_callback(decision):
+            def respond(model, identifier, request: gr.Request):
+                model.bind_owner(request)
+                return origin(model, identifier, decision)
+            return respond
         for button, decision in ((self.approve, 'approve'), (self.deny, 'deny'), (self.cancel_request, 'cancel')):
-            button.click(lambda model, identifier, decision=decision: origin(model, identifier, decision), [current_model, self.request_id], [status_display, *self.outputs], queue=False)
-        def login(model, identifier, payload):
+            button.click(origin_callback(decision), [current_model, self.request_id], [status_display, *self.outputs], queue=False)
+        def login(model, identifier, payload, request: gr.Request):
+            model.bind_owner(request)
             try:
                 response = json.loads(payload)
                 message = model.respond_browser(identifier, response)

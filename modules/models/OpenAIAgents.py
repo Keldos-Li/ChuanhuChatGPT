@@ -80,6 +80,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._pending_actions = []
         self._notice = ''
         self._unavailable = False
+        self._fork_previous = None
         self.metadata = {}
         self._tool_settings = load_settings(shared.chuanhu_path, owner) if owner else validate_settings({})
 
@@ -108,7 +109,12 @@ class OpenAIAgentsClient(BaseLLMModel):
         except AgentConnectionError as error:
             yield {'type': 'error', 'outcome': 'not_started', 'message': str(error)}
             return
-        yield from worker_messages(dict(command, connection=connection))
+        wire = dict(command, connection=connection)
+        try:
+            yield from worker_messages(wire)
+        finally:
+            wire.pop('response', None)
+            wire.pop('connection', None)
 
     def _key(self): return self._owner, str(self.history_file_path).removesuffix('.json')
     def _store(self): return BindingStore(shared.chuanhu_path)
@@ -217,6 +223,8 @@ class OpenAIAgentsClient(BaseLLMModel):
             if self._running or (not self._unavailable and (self._state.get('outcome') not in TERMINAL or self._needs_sync)):
                 raise gr.Error('请先停止或确认当前任务状态，再创建独立会话')
             self.auto_save(self.chatbot)
+            self._fork_previous = {name: deepcopy(getattr(self, name)) for name in
+                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id')}
             self.new_auto_history_filename()
             self._fresh()
             self._notice = '已保留原聊天。下一条消息将携带现有文字引用创建新会话；旧工具状态和文件不继承'
@@ -279,12 +287,15 @@ class OpenAIAgentsClient(BaseLLMModel):
             if key in message and message[key] is not None: self._state[key] = message[key]
         outcome = message.get('outcome')
         if outcome and (not self._cancel_requested or outcome in TERMINAL): self._state['outcome'] = outcome
-        if message.get('sync_complete') and isinstance(message.get('items'), list):
+        if (message.get('sync_complete') or message.get('history_authoritative')) and isinstance(message.get('items'), list):
             self._sync_items(message['items'])
-            self._needs_sync = False
+            if message.get('sync_complete'): self._needs_sync = False
         elif self._answer_index is not None and 'text' in message:
             self.history[self._answer_index]['content'] = str(message['text'])
             self._display[self._answer_row][1] = self.history[self._answer_index]['content']
+        if message.get('sync_complete') is False:
+            self._needs_sync = True
+            self._notice = '当前轮已结束，但云端历史尚未完整同步；回答已保留，请重新连接后继续'
         if 'required_actions' in message:
             self._pending_actions = [] if self._cancel_requested else deepcopy(message['required_actions'])
         if self._state.get('outcome') in TERMINAL: self._pending_actions = []
@@ -392,7 +403,18 @@ class OpenAIAgentsClient(BaseLLMModel):
                         if _session_locks.get(reservation) is self: _session_locks.pop(reservation, None)
                     self.chatbot = deepcopy(self._display)
                     self._remember()
-                    if started: self.auto_save(self.chatbot)
+                    if started:
+                        self.auto_save(self.chatbot)
+                        if self._fork_previous and self._state.get('outcome') == 'not_started' and not self._state.get('session_id'):
+                            # Keep the failed attempt as a separate local record,
+                            # and return control to the original preserved session.
+                            for name, value in self._fork_previous.items(): setattr(self, name, value)
+                            self._fork_previous = None
+                            self._notice = '新会话未创建，已回到原会话；本次未发送内容另存于本地历史，新配置仍已保存'
+                        elif self._state.get('session_id'):
+                            self._fork_previous = None
+        if self._notice.startswith('新会话未创建'):
+            yield deepcopy(self._display), self._status()
 
     def reconnect(self):
         with self._lock:

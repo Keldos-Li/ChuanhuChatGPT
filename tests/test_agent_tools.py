@@ -167,3 +167,36 @@ def test_binding_rejects_secret_material(tmp_path):
     store=BindingStore(tmp_path)
     with pytest.raises(ValueError):store.put(owner_identity('alice'),'file',{'settings':{'authorization':'secret'}})
     assert store.get(owner_identity('alice'),'file') is None
+
+
+def test_function_result_submission_disconnect_never_executes_twice(monkeypatch):
+    count=[]
+    tools.register_function('once_only','Known side effect',{'type':'object'},lambda args,stop:count.append('executed') or {'ok':True})
+    action={'type':'function_call','turn_id':'turn_one','call_id':'once','name':'once_only','arguments':{}}
+    client,calls=client_for(action)
+    def fail(*a,**k):raise OSError('lost acknowledgement')
+    client.beta.agents.sessions.events.create=fail
+    state=SimpleNamespace(session_id='sess_one',turn_id='turn_one')
+    with pytest.raises(OSError):tools.handle_function_actions(client,state,{'required_actions':[action]},{'functions':['once_only']},set())
+    client,calls=client_for(action)
+    tools.handle_function_actions(client,state,{'required_actions':[action]},{'functions':['once_only']},set())
+    assert count==['executed'] and len(calls)==1
+    tools.handle_function_actions(client,state,{'required_actions':[action]},{'functions':['once_only']},set())
+    assert count==['executed'] and len(calls)==1
+
+
+def test_concurrent_function_recovery_atomic_claim():
+    import threading
+    started=threading.Event();finish=threading.Event();count=[];failures=[]
+    def execute(args,stop):
+        count.append('execute');started.set();assert finish.wait(3);return {'ok':True}
+    tools.register_function('claim_once','Known effect',{'type':'object'},execute)
+    action={'type':'function_call','turn_id':'turn_one','call_id':'concurrent','name':'claim_once','arguments':{}}
+    client,calls=client_for(action);state=SimpleNamespace(session_id='sess_one',turn_id='turn_one')
+    def run():
+        try:tools.handle_function_actions(client,state,{'required_actions':[action]},{'functions':['claim_once']},set())
+        except Exception as error:failures.append(error)
+    one=threading.Thread(target=run);one.start();assert started.wait(3)
+    two=threading.Thread(target=run);two.start();two.join(3);finish.set();one.join(3)
+    assert count==['execute'] and len(calls)==1
+    assert len(failures)==1 and isinstance(failures[0],tools.ToolConfigurationError)
