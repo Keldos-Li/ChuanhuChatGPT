@@ -242,28 +242,10 @@
             "description": "o1 系列的大型语言模型通过强化学习训练，能够执行复杂的推理任务。o1 模型在回答之前会进行思考，产生一长串内部思维链，然后再回应用户。"
         },
         "openai_agent": {
-            "description": "官方托管 Agent：在主聊天框执行多步任务；发送仅包含本次输入与明确设置的 Agent Prompt，不自动发送旧聊天或本机文件。使用专用密钥与隔离 SDK；官方托管代码执行会计费。重试只读对账，停止请求远程取消。产物显示为回答后的文件。",
-            "slogan": "在主聊天框向官方 Agent 发送任务；代码与文件在托管沙箱执行。",
-            "selection_notice": "Agent 使用专用密钥；主发送授权官方托管代码执行并产生费用。旧聊天仅保留展示，不自动发送。",
-            "runtime_missing": "尚未安装隔离 Agents 环境，请查看 docs/agents.md。",
-            "invalid_response": "运行器响应无效，未重发任务；请重试对账。",
-            "timeout": "本地等待超时，远端不会自动停止；请停止并重试对账。",
-            "browser_required": "Agent 需要有效的当前浏览器会话。",
-            "wrong_owner": "此 Agent 模型不属于当前浏览器。",
-            "reconcile_first": "Agent 任务尚未确认结束；先停止或点击重新生成进行只读对账。",
-            "billing": "Agent 发送会产生官方 API 费用；额度查询不发送请求。",
-            "dedicated_key": "Agent 只使用 CHUANHU_AGENT_API_KEY，不使用普通聊天密钥。",
-            "status": "Agent：{outcome} {detail}",
-            "already_finished": "当前任务已结束。",
-            "cancel_pending": "已请求远程停止，等待目标任务确认；标识未到时保留停止意图。",
-            "invalid_artifacts": "产物路径或大小不合法，下载已拒绝。",
-            "text_only": "Agent 当前仅接受 1–20000 字符的文本任务。",
-            "no_local_tools": "Agent 不读取当前知识库、附件或网页搜索；请关闭在线搜索并清空附件后发送文本任务。",
-            "stale_input": "旧输入已忽略，当前对话保持不变。",
-            "settings_locked": "当前 Agent session 的模型和 Prompt 已固定；新建对话后可修改。",
-            "unsent": "发送前已停止，未提交新的任务。",
-            "retry_readonly": "已只读对账，没有重新发送或回滚远程任务。",
-            "no_rewind": "删除本地问答不会回滚远程 Agent；请新建对话或只读对账。"
+            "description": "在主聊天中使用 Agent 连续对话、查看进度、处理网站权限并下载独立文件。默认复用现有 OpenAI 连接。已绑定会话按云端历史恢复；普通历史作为文字引用创建新会话。空闲时可更新模型与推理供下一轮使用，联网、工具与系统提示词变更需要明确新建会话。",
+            "slogan": "在这里发送任务；进度、网站权限和生成文件都在当前聊天展示。",
+            "selection_notice": "Agent 使用现有 OpenAI 连接。普通历史作为文字引用；已绑定的 Agent 会话会先恢复云端状态再继续。",
+            "invalid_response": "连接响应无法解析，任务未自动重发；请重新连接原会话确认状态。"
         }
     },
     "msg": {

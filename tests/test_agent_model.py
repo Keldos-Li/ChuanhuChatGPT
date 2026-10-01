@@ -470,3 +470,10 @@ def test_explicit_network_chat_command_requires_fork_and_keeps_session(env,monke
     command=[c for c in calls if c['action']=='run'][-1]
     assert command['session_id'] is None and command['tool_settings']['network'] is False
     assert command['tool_settings']['web_search'] is True
+
+
+def test_active_agent_copy_matches_current_connection_and_recovery_contract(env):
+    for language in ('zh_CN','en_US'):
+        values=json.loads((ROOT/'locale'/f'{language}.json').read_text())['model']['openai_agent']
+        assert set(values)=={'description','slogan','selection_notice','invalid_response'}
+        assert not any(old in ' '.join(values.values()) for old in ('隔离 SDK','专用密钥','只读对账','计费','isolated SDK','dedicated credentials','billed','Regenerate'))
