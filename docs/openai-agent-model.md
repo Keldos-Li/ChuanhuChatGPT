@@ -56,8 +56,9 @@ Ordinary sampling, single-turn and token controls do not configure this beta API
   never treats the previous turn, an ambiguous candidate, an idle session, EOF or
   a subagent's completion as success. A pending cancellation is submitted once
   recovery identifies that target.
-- A missing runtime/key/SDK or a confirmed rejected initial request is
-  `not_started`; fix configuration and explicitly send again. A create request
+- A missing runtime/key/SDK, a busy session or turn-history limit detected before
+  submission, or a confirmed rejected initial request is `not_started`. No input
+  was sent; fix configuration or start a new conversation and explicitly send again. A create request
   whose result is unknown remains `uncertain`. Recovery can search the latest
   100 sessions for its private run ID; it does not automatically resubmit.
 - If no safe match is found, retain the private journal and ask the operator to
@@ -107,7 +108,8 @@ request injection, switch concurrency, owner isolation, preflight failures,
 ambiguous/unknown turn recovery, pending cancellation and malicious imports.
 Browser QA verifies main dropdown/send/progress/answer/file bubbles/follow-up,
 remote cancellation through the real Stop event chain, and continued conversation.
-The browser download automation stalled; cached file/link construction was
-verified, but an actual completed browser download is not claimed. This change's
+The browser download automation stalled and reported failure, but a subsequent
+read-only check confirmed the downloaded 42-byte artifact matched the synthetic
+main-chat marker exactly. No repeat download was required. This change's
 verification uses no new paid API calls, and beta availability remains dependent
 on the deployed SDK/project.

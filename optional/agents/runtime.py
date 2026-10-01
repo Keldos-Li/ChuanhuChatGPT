@@ -233,7 +233,10 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
                     return state
                 if time.monotonic() > deadline:
                     raise AgentError('Agents time budget exceeded; closing the stream does not cancel the turn. Inspect or explicitly cancel the saved session.', state)
-    except AgentError:
+    except AgentError as error:
+        if not state.submission_started:
+            state.outcome = 'not_started'
+            error.state = state
         raise
     except Exception as error:
         if not state.submission_started:
