@@ -29,29 +29,9 @@ def build(language='zh_CN'):
     env=install(ROOT,temporary/'history',language,presets)
     import modules.webui as webui
     # Keep assets real, but all private journals/history inside a synthetic folder.
-    cancellation=Event();counter=0
-    def worker(command):
-        nonlocal counter
-        if command['action']=='run':
-            counter+=1;cancellation.clear();turn='turn_synthetic_'+str(counter)
-            sid=command.get('session_id') or 'sess_synthetic'
-            yield dict(type='progress',session_id=sid,turn_id=turn,outcome='in_progress',progress='Synthetic sandbox task running')
-            duration=15 if 'slow' in command['prompt'].lower() else 1
-            for _ in range(duration*10):
-                if cancellation.wait(.1):
-                    yield dict(type='result',session_id=sid,turn_id=turn,outcome='cancelled',text='Synthetic task cancelled')
-                    return
-            yield dict(type='result',session_id=sid,turn_id=turn,outcome='completed',text='Synthetic Agent answer '+str(counter)+': '+command['prompt'])
-        elif command['action']=='cancel':
-            cancellation.set();yield dict(type='result',outcome='cancel_requested')
-        elif command['action']=='download':
-            folder=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'));file=folder/'synthetic.txt'
-            file.write_text('Offline main-chat artifact. No API called.')
-            yield dict(type='result',artifacts=[{'id':'artifact_offline','session_id':'sess_synthetic','turn_id':'turn_synthetic_'+str(counter),'path':str(file),'name':file.name,'type':'text/plain','size':file.stat().st_size,'status':'ready'}])
-        elif command['action'] in ('inspect','recover'):
-            yield dict(type='result',session_id=command['session_id'],turn_id=command['turn_id'],outcome='cancelled' if cancellation.is_set() else 'completed',text='Synthetic read-only recovery')
-        else:raise AssertionError(command)
-    env.agents.worker_messages=worker
+    from main_chat_mock import MainChatMock
+    synthetic_service=MainChatMock()
+    env.agents.worker_messages=synthetic_service.worker
     source=ast.parse((ROOT/'ChuanhuChatbot.py').read_text())
     block=next(node for node in source.body if isinstance(node,ast.With))
     layout=[]
