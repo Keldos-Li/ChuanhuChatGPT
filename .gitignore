@@ -154,6 +154,8 @@ files/
 tmp/
 
 scripts/
+!templates/extension/scripts/
+!templates/extension/scripts/*.py
 !extensions/**/scripts/
 !extensions/**/scripts/*.py
 include/
