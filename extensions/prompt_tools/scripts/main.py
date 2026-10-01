@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import html
-import locale
-import os
-from pathlib import Path
 
-import commentjson as json
 import gradio as gr
 
+from modules.presets import i18n
 from modules.plugin_callbacks import on_toolbox_tab
 
 
@@ -47,28 +44,11 @@ PROMPTS = [
 ]
 
 
-def _language():
-    language = "auto"
-    config_path = Path("config.json")
-    if config_path.exists():
-        try:
-            with config_path.open("r", encoding="utf-8") as f:
-                language = json.load(f).get("language", language)
-        except Exception:
-            pass
-    language = os.environ.get("LANGUAGE", language).replace("-", "_")
-    if language == "auto":
-        language = locale.getdefaultlocale()[0] or "zh_CN"
-    return language
-
-
-LANGUAGE = _language()
-
-
 def tr(text: str):
-    if LANGUAGE.startswith("zh"):
+    language = getattr(i18n, "language", "zh_CN") or "zh_CN"
+    if language.startswith("zh"):
         return text
-    translations = TRANSLATIONS.get(LANGUAGE) or TRANSLATIONS.get(LANGUAGE.split("_", 1)[0]) or TRANSLATIONS["en_US"]
+    translations = TRANSLATIONS.get(language) or TRANSLATIONS.get(language.split("_", 1)[0]) or TRANSLATIONS["en_US"]
     return translations.get(text, text)
 
 

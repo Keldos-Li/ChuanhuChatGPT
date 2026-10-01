@@ -14,5 +14,14 @@ shared = ModuleType('modules.shared')
 shared.chuanhu_path = str(ROOT)
 sys.modules['modules.shared'] = shared
 presets = ModuleType('modules.presets')
-presets.i18n = lambda text: text
+import json
+def flatten(tree,prefix=''):
+    result={}
+    for key,value in tree.items():
+        dotted=f'{prefix}.{key}' if prefix else key
+        if isinstance(value,dict): result.update(flatten(value,dotted))
+        else: result[dotted]=value
+    return result
+locale=flatten(json.loads((ROOT/'locale/zh_CN.json').read_text()))
+presets.i18n = lambda key: locale.get(key,key)
 sys.modules['modules.presets'] = presets

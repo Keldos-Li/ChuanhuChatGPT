@@ -13,7 +13,7 @@
 .venv/bin/python tests/project_ui_mock.py --build-only --language en_US
 ```
 
-单元与集成测试覆盖配置原子持久化、损坏状态关闭插件、manifest 校验、重复 ID、失败导入回滚、相对 helper 导入与旧裸模块冲突、回调归属与生成器关闭、禁用后事件防护、暂存安装默认关闭、真实临时 Git 仓库 fetch/脏更新拒绝，以及用户数据隔离。
+当前合并后共 **58 项测试通过**。单元与集成测试覆盖配置原子持久化、损坏状态关闭插件、manifest 校验、重复 ID、失败导入回滚、相对 helper 导入与旧裸模块冲突、回调归属与生成器关闭、禁用后事件防护、暂存安装默认关闭、真实临时 Git 仓库 fetch/脏更新拒绝，以及用户数据隔离。
 
 Agent 模拟 SDK 测试覆盖目标 root turn、重放事件、断流未知结局、继续排除旧 turn、显式函数白名单、恢复、取消、产物限制、专用凭据来源与创建不明时对账。真实 Gradio HTTP 验收覆盖任务、继续、两个浏览器、下载、恢复、清理、双击和远程取消。首个 yield 后关闭生成器必须恢复未提交状态、释放 owner 锁，允许重新发送；继续任务关闭则保留上一个已完成 turn。
 
@@ -27,8 +27,12 @@ Agent 模拟 SDK 测试覆盖目标 root turn、重放事件、断流未知结�
 
 ## 上游兼容状态
 
-2026-10-01 fetch 后的上游 `main` 是 `2c7d5304c215520dbc6077f185fc45d8e0c8d919`；共同祖先为 `c020b2ddc0fc230ef4f2398152a89d8a2d907f0a`。原 extension 与当前上游的三方合并预检仍存在冲突，涉及 `ChuanhuChatbot.py`、`locale/en_US.json`、`modules/config.py`、`modules/models/base_model.py`。上游最近改变了全项目 locale 标识体系。
+2026-10-01 fetch 后的上游 `main` 是 `2c7d5304c215520dbc6077f185fc45d8e0c8d919`；共同祖先为 `c020b2ddc0fc230ef4f2398152a89d8a2d907f0a`。在隔离分支中合并了当前上游，保留此前实现基线 `cdb5ec2c4f910feffc424f64dc708d541c806c57`，没有改原工作目录或远端 extension 分支。
 
-本轮尚未 rebase/merge 上游，也未在其新 locale 基线上运行完整应用。因此这组改动可以作为原 PR1200 extension 分支的后续提交，但不能据此宣称 PR 已解决冲突或可立即合入当前上游。需要另行解决冲突并复验启动、生命周期、翻译与 provider 集成。
+主入口冲突保留插件工具箱/管理入口，并使用上游分层 locale ID；英文 locale 使用上游完整树，再增补插件管理文案；base_model 保留上游生成状态提示与全部既有 hook。config 自动合并成功，相对上游只保留旧 disabled_extensions 的两处兼容增量。没有回退上游其他 provider、配置或翻译重构。
 
-当前上游没有 `modules/extensions.py`、plugin_callbacks、plugin_context 等插件基础设施。本轮生命周期修复依赖尚未合入的 PR1200；直接拆成上游小 PR 会隐含引入整个插件系统，不符合独立小修复的范围。本轮不为此强拆或发布未验收主功能。
+合并后重跑全部测试、真实 Gradio HTTP 工作流、中英文真实项目布局构建和源码编译。另有四项测试直接执行合并后真实 `BaseLLMModel.predict` 方法，使用合成 provider 验证流式/非流式成功和错误路径、hook 顺序、改写后的历史保存。这不会导入付费 provider，也不能代替所有 provider 的在线测试。
+
+本地提交现在包含该上游祖先，可作为 PR1200 的后续集成提交；旧远端 PR 尚未更新，所以网站仍可能显示旧冲突状态。完整主入口连同全部模型依赖未启动，普通 provider、生产部署与不同版本 Gradio 不作已验收承诺。官方 beta 接口仍需按文档范围理解。
+
+当前上游没有插件基础设施。本轮生命周期修复依赖 PR1200；直接拆成上游小 PR 会隐含引入整个插件系统，不符合独立小修复的范围。本轮不强拆或发布未验收主功能。

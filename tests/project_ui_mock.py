@@ -31,10 +31,17 @@ def build(language='zh_CN'):
     class OfflineLocale:
         def __init__(self):
             self.language=language
-            self.mapping=json.loads((ROOT/'locale'/(language+'.json')).read_text())
-            self.fallback=json.loads((ROOT/'locale/en_US.json').read_text())
+            self.mapping=self.flatten(json.loads((ROOT/'locale'/(language+'.json')).read_text()))
+            self.fallback=self.flatten(json.loads((ROOT/'locale/en_US.json').read_text()))
+        @staticmethod
+        def flatten(tree, prefix=''):
+            result={}
+            for key,value in tree.items():
+                dotted=f'{prefix}.{key}' if prefix else key
+                if isinstance(value,dict): result.update(OfflineLocale.flatten(value,dotted))
+                else: result[dotted]=value
+            return result
         def __call__(self,key):
-            if self.language=='zh_CN': return key
             return self.mapping.get(key,self.fallback.get(key,key))
     locale_module=ModuleType('modules.webui_locale');locale_module.I18nAuto=OfflineLocale
     sys.modules['modules.webui_locale']=locale_module
@@ -98,7 +105,11 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=8773);parser.add_argument('--host',default='127.0.0.1');parser.add_argument('--language',choices=['zh_CN','en_US'],default='zh_CN');parser.add_argument('--build-only',action='store_true');args=parser.parse_args()
     demo=build(args.language)
     if args.build_only:
-        print('Actual project component layout built:',len(demo.get_config_file()['components']),'components. No providers or credentials loaded.')
+        config=demo.get_config_file()
+        labels=[component.get('props',{}).get(key,'') for component in config['components'] for key in ('label','placeholder')]
+        unresolved=[label for label in labels if isinstance(label,str) and label.startswith(('ui.','msg.','app.'))]
+        if unresolved: raise RuntimeError('Unresolved project locale labels: '+str(unresolved))
+        print('Actual project component layout built:',len(config['components']),'components. All project locale labels resolved. No providers or credentials loaded.')
         demo.close();return
     demo.queue().launch(server_name=args.host,server_port=args.port,share=False,prevent_thread_lock=True,
        allowed_paths=[str(ROOT/'web_assets'),str(ROOT/'extensions')],

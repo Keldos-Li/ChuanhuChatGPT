@@ -162,7 +162,7 @@ def discover_extensions(disabled_extensions: list[str] | None = None) -> list[Ex
                 extensions.append(extension)
             except Exception as exc:
                 extension = Extension(id=child.name, path=child, name=child.name, enabled=False)
-                extension.error = i18n("读取 metadata.json 失败：") + str(exc)
+                extension.error = i18n("ui.settings.extensions.metadata_error") + str(exc)
                 extensions.append(extension)
     groups = {}
     for extension in extensions:
@@ -217,7 +217,7 @@ def _load_script(extension: Extension, script_path: Path):
             raise ImportError(f"Local module {name!r} conflicts with an existing module; use package-relative imports")
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(i18n("无法加载插件脚本：") + str(script_path))
+        raise RuntimeError(i18n("ui.settings.extensions.script_error") + str(script_path))
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     extension.module_names.append(module_name)
@@ -270,7 +270,7 @@ def load_extensions(disabled_extensions: list[str] | None = None, force: bool = 
                 plugin_callbacks.register_error(extension.id, extension.error)
                 break
     _loaded = True
-    logging.info(i18n("已加载 {count} 个插件").format(count=len([x for x in _loaded_extensions if x.enabled and not x.error])))
+    logging.info(i18n("ui.settings.extensions.loaded").format(count=len([x for x in _loaded_extensions if x.enabled and not x.error])))
     return get_loaded_extensions()
 
 
@@ -350,7 +350,7 @@ def _render_callback_tabs(kind: str):
             except Exception as exc:
                 message = "".join(traceback.format_exception_only(type(exc), exc)).strip()
                 plugin_callbacks.register_error(record.extension_id, f"{record.name}: {message}")
-                gr.Markdown(i18n("加载插件界面失败：") + f"`{message}`")
+                gr.Markdown(i18n("ui.settings.extensions.ui_error") + f"`{message}`")
 
 
 def render_extension_tabs():
@@ -359,12 +359,12 @@ def render_extension_tabs():
 
 def _extension_status(extension: Extension):
     if extension.error:
-        return i18n("错误")
+        return i18n("ui.settings.extensions.error")
     if extension.restart_required:
-        return i18n("需要重启")
+        return i18n("ui.settings.extensions.restart_required")
     if not extension.enabled:
-        return i18n("已禁用")
-    return i18n("已启用")
+        return i18n("ui.settings.extensions.disabled")
+    return i18n("ui.settings.extensions.enabled")
 
 
 def _is_git_extension(extension: Extension):
@@ -417,13 +417,13 @@ def _find_extension(extension_id: str):
 def _set_extension_enabled(extension_id: str, enabled: bool):
     extension = _find_extension(extension_id)
     if extension is None:
-        return i18n("未找到插件：") + extension_id
+        return i18n("ui.settings.extensions.not_found") + extension_id
     if extension.error and enabled:
-        return i18n("插件启用失败：") + extension.error
+        return i18n("ui.settings.extensions.enable_error") + extension.error
     try:
         _save_enabled(extension_id, bool(enabled))
     except (OSError, ValueError) as exc:
-        return i18n("保存插件状态失败：") + str(exc)
+        return i18n("ui.settings.extensions.save_error") + str(exc)
     disabled = set(_configured_disabled_extensions)
     disabled.discard(extension_id) if enabled else disabled.add(extension_id)
     _configured_disabled_extensions[:] = sorted(disabled)
@@ -440,23 +440,23 @@ def _set_extension_enabled(extension_id: str, enabled: bool):
                 break
     plugin_callbacks.set_extension_enabled(extension.id, extension.enabled and not extension.error and not extension.restart_required)
     if extension.error:
-        return i18n("插件启用失败：") + extension.error
+        return i18n("ui.settings.extensions.enable_error") + extension.error
     if extension.enabled:
-        return i18n("插件已启用并保存；新界面和静态资源需要重启应用。")
-    return i18n("插件已禁用，已注册的 Python 钩子会立即停止执行。")
+        return i18n("ui.settings.extensions.enabled_saved")
+    return i18n("ui.settings.extensions.disabled_saved")
 
 
 @synchronized
 def install_extension(source: str):
     source = (source or "").strip()
     if not source:
-        return i18n("请输入 Git URL 或本地插件目录。")
+        return i18n("ui.settings.extensions.source_required")
     target_name = _safe_extension_name(source)
     if target_name.startswith("."):
-        return i18n("插件目录名称无效。")
+        return i18n("ui.settings.extensions.invalid_directory")
     target_path = extensions_dir() / target_name
     if target_path.exists():
-        return i18n("目标插件目录已存在：") + str(target_path)
+        return i18n("ui.settings.extensions.directory_exists") + str(target_path)
     try:
         # Hidden staging prevents discovery of a partially copied installation.
         with tempfile.TemporaryDirectory(prefix=".install-", dir=extensions_dir()) as staging:
@@ -485,27 +485,27 @@ def install_extension(source: str):
             _save_enabled(extension.id, False)
             candidate.rename(target_path)
         refresh_extension_list()
-        return i18n("插件已安装并默认禁用；检查来源和代码后启用，重启以加载界面。")
+        return i18n("ui.settings.extensions.installed_disabled")
     except subprocess.CalledProcessError:
-        return i18n("插件安装失败：Git 操作失败，请检查来源与访问权限。")
+        return i18n("ui.settings.extensions.install_git_error")
     except Exception as exc:
-        return i18n("插件安装失败：") + str(exc)
+        return i18n("ui.settings.extensions.install_error") + str(exc)
 
 
 @synchronized
 def update_extension(extension_id: str):
     extension = _find_extension(extension_id)
     if extension is None:
-        return i18n("未找到插件：") + extension_id
+        return i18n("ui.settings.extensions.not_found") + extension_id
     if not _is_git_extension(extension):
-        return i18n("该插件不是 Git 仓库，无法自动更新。")
+        return i18n("ui.settings.extensions.not_git")
     try:
         status = subprocess.run(
             ["git", "-C", str(extension.path), "status", "--porcelain"],
             check=True, capture_output=True, text=True, timeout=15,
         )
         if status.stdout.strip():
-            return i18n("插件有本地修改或未跟踪文件，请先保存；更新已取消。")
+            return i18n("ui.settings.extensions.dirty_update")
         subprocess.run(
             ["git", "-C", str(extension.path), "pull", "--ff-only"],
             check=True, capture_output=True, text=True, timeout=120,
@@ -515,11 +515,11 @@ def update_extension(extension_id: str):
         _unload_extension(extension)
         extension.restart_required = True
         plugin_callbacks.set_extension_enabled(extension.id, False)
-        return i18n("插件已更新，Python 回调已暂停；请重启应用加载新版本。")
+        return i18n("ui.settings.extensions.updated")
     except subprocess.CalledProcessError:
-        return i18n("插件更新失败：请检查远程访问、跟踪分支或分支分歧；未执行强制重置。")
+        return i18n("ui.settings.extensions.update_git_error")
     except Exception as exc:
-        return i18n("插件更新失败：") + str(exc)
+        return i18n("ui.settings.extensions.update_error") + str(exc)
 
 
 def update_all_extensions():
@@ -528,7 +528,7 @@ def update_all_extensions():
         if _is_git_extension(extension):
             messages.append(f"{extension.name}: {update_extension(extension.id)}")
     if not messages:
-        return i18n("没有可自动更新的 Git 插件。")
+        return i18n("ui.settings.extensions.no_updates")
     return "\n\n".join(messages)
 
 
@@ -557,7 +557,7 @@ def refresh_extension_list():
     for removed in previous.values():
         _unload_extension(removed)
     _loaded_extensions = found
-    return i18n("插件列表已刷新；新插件界面需要重启应用。")
+    return i18n("ui.settings.extensions.refreshed")
 
 
 @synchronized
@@ -571,10 +571,10 @@ def check_extension_updates():
                 ["git", "-C", str(extension.path), "fetch", "--prune"],
                 check=True, capture_output=True, timeout=60,
             )
-            messages.append(extension.id + ": " + i18n("有更新" if _git_extension_has_updates(extension) else "未发现更新"))
+            messages.append(extension.id + ": " + i18n("ui.settings.extensions.update_available" if _git_extension_has_updates(extension) else "ui.settings.extensions.up_to_date"))
         except (subprocess.SubprocessError, OSError):
-            messages.append(extension.id + ": " + i18n("检查失败，请检查远程访问与跟踪分支。"))
-    return "\n\n".join(messages) or i18n("没有可检查的 Git 插件。")
+            messages.append(extension.id + ": " + i18n("ui.settings.extensions.check_error"))
+    return "\n\n".join(messages) or i18n("ui.settings.extensions.no_git")
 
 
 def check_extension_updates_from_ui():
@@ -584,7 +584,7 @@ def check_extension_updates_from_ui():
 def extension_manager_html():
     extensions = get_loaded_extensions()
     if not extensions:
-        return f'<div class="extension-muted">{escape(i18n("未发现插件。"))}</div>'
+        return f'<div class="extension-muted">{escape(i18n("ui.settings.extensions.empty"))}</div>'
 
     rows = []
     for extension in extensions:
@@ -598,7 +598,7 @@ def extension_manager_html():
             update_link = (
                 f'<button type="button" class="extension-inline-update" '
                 f'data-extension-action="update" data-extension-id="{escape(extension.id)}">'
-                f'{escape(i18n("更新"))}</button>'
+                f'{escape(i18n("ui.settings.extensions.update"))}</button>'
             )
         rows.append(
             f"""
@@ -610,7 +610,7 @@ def extension_manager_html():
                 </div>
                 <div class="extension-desc">{escape(description)}</div>
                 <div class="extension-meta">{escape(extension.id)} · {escape(version)} · {escape(status)}</div>
-                {f'<div class="extension-error">{escape(i18n("错误：") + extension.error)}</div>' if extension.error else ''}
+                {f'<div class="extension-error">{escape(i18n("ui.settings.extensions.error_prefix") + extension.error)}</div>' if extension.error else ''}
               </div>
               <label class="extension-native-switch" title="{escape(status)}">
                 <input class="extension-native-input" type="checkbox" data-extension-action="toggle" data-extension-id="{escape(extension.id)}" {checked} {disabled}>
@@ -626,20 +626,20 @@ def handle_extension_action(action_json: str):
     try:
         action = json.loads(action_json or "{}")
     except Exception:
-        return i18n("插件操作参数无效。"), extension_manager_html()
+        return i18n("ui.settings.extensions.invalid_action"), extension_manager_html()
 
     if not isinstance(action, dict) or not isinstance(action.get("id", ""), str):
-        return i18n("插件操作参数无效。"), extension_manager_html()
+        return i18n("ui.settings.extensions.invalid_action"), extension_manager_html()
     extension_id = action.get("id", "")
     action_type = action.get("action", "")
     if action_type == "toggle":
         if type(action.get("enabled")) is not bool:
-            return i18n("插件操作参数无效。"), extension_manager_html()
+            return i18n("ui.settings.extensions.invalid_action"), extension_manager_html()
         message = _set_extension_enabled(extension_id, action["enabled"])
     elif action_type == "update":
         message = update_extension(extension_id)
     else:
-        message = i18n("未知插件操作。")
+        message = i18n("ui.settings.extensions.unknown_action")
     return message, extension_manager_html()
 
 
@@ -656,36 +656,36 @@ def update_all_extensions_from_ui():
 
 
 def render_extension_manager():
-    gr.Markdown(i18n("插件是受信任的 Python / JavaScript 代码，可访问进程和文件；只启用可信来源。管理操作影响所有用户。"))
+    gr.Markdown(i18n("ui.settings.extensions.trust_notice"))
     status_box = gr.Markdown("", elem_classes="extension-status")
     action_payload = gr.Textbox(value="", visible=False, elem_id="extension-action-payload")
     action_btn = gr.Button(value="", visible=False, elem_id="extension-action-btn")
 
     source = gr.Textbox(
-        label=i18n("Git URL 或本地插件目录"),
+        label=i18n("ui.settings.extensions.source"),
         placeholder="https://github.com/user/chuanhu-extension-example.git",
         lines=1,
         elem_classes="no-container extension-install-source",
     )
-    install_btn = gr.Button(i18n("安装"), variant="primary", elem_classes="extension-action-button extension-install-button")
+    install_btn = gr.Button(i18n("ui.settings.extensions.install"), variant="primary", elem_classes="extension-action-button extension-install-button")
 
-    gr.Markdown(i18n("已安装插件"), elem_classes="extension-section-label extension-installed-title")
+    gr.Markdown(i18n("ui.settings.extensions.installed"), elem_classes="extension-section-label extension-installed-title")
     list_html = gr.HTML(extension_manager_html(), elem_id="extension-manager-list")
 
     install_btn.click(install_extension_from_ui, inputs=[source], outputs=[status_box, list_html], show_progress=True)
     action_btn.click(handle_extension_action, inputs=[action_payload], outputs=[status_box, list_html], show_progress=True)
 
     with gr.Row():
-        refresh_btn = gr.Button(i18n("刷新列表"))
-        check_btn = gr.Button(i18n("检查更新"))
-        update_btn = gr.Button(i18n("更新全部"))
+        refresh_btn = gr.Button(i18n("ui.settings.extensions.refresh"))
+        check_btn = gr.Button(i18n("ui.settings.extensions.check_updates"))
+        update_btn = gr.Button(i18n("ui.settings.extensions.update_all"))
     refresh_btn.click(refresh_extension_list_from_ui, outputs=[status_box, list_html])
     check_btn.click(check_extension_updates_from_ui, outputs=[status_box, list_html])
     update_btn.click(update_all_extensions_from_ui, outputs=[status_box, list_html])
 
     errors = plugin_callbacks.get_errors()
     if errors:
-        gr.Markdown(i18n("插件错误"), elem_classes="extension-section-label")
+        gr.Markdown(i18n("ui.settings.extensions.errors"), elem_classes="extension-section-label")
         for item in errors:
             gr.Markdown(f"- `{item['extension']}`：{item['message']}", elem_classes="extension-error")
 
