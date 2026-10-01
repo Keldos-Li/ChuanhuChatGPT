@@ -65,7 +65,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         super().__init__(model_name=model_name, user=user_name, config={'stream': True})
         self._selection_name = model_name
         self.need_api_key = False
-        self._connection_key = api_key or self.api_key
+        self._connection_key = self.api_key or api_key
         self.api_key = None  # Credentials never enter exported chat metadata.
         self._default_instructions = self.system_prompt
         self._owner = owner

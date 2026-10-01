@@ -477,3 +477,9 @@ def test_active_agent_copy_matches_current_connection_and_recovery_contract(env)
         values=json.loads((ROOT/'locale'/f'{language}.json').read_text())['model']['openai_agent']
         assert set(values)=={'description','slogan','selection_notice','invalid_response'}
         assert not any(old in ' '.join(values.values()) for old in ('隔离 SDK','专用密钥','只读对账','计费','isolated SDK','dedicated credentials','billed','Regenerate'))
+
+
+def test_model_specific_api_key_retains_existing_metadata_priority(env):
+    env.presets.MODEL_METADATA['OpenAI Agent']['api_key']='synthetic-model-scoped-key'
+    model=select(env)
+    assert model._connection_key=='synthetic-model-scoped-key'
