@@ -26,10 +26,10 @@ import PIL
 import urllib3
 from duckduckgo_search import DDGS
 from huggingface_hub import hf_hub_download
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.chat_models.base import BaseChatModel
-from langchain.schema import (AgentAction, AgentFinish, AIMessage, BaseMessage,
-                              HumanMessage, SystemMessage)
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.agents import AgentAction, AgentFinish
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from .. import shared
 from ..config import retrieve_proxy, auth_list
@@ -455,10 +455,10 @@ class BaseLLMModel:
             status = i18n("msg.status.summary_done")
             logging.info(i18n("msg.status.summarizing"))
             os.environ["OPENAI_API_KEY"] = self.api_key
-            from langchain.callbacks import StdOutCallbackHandler
-            from langchain.chains.summarize import load_summarize_chain
-            from langchain.chat_models import ChatOpenAI
-            from langchain.prompts import PromptTemplate
+            from langchain_core.callbacks import StdOutCallbackHandler
+            from langchain_classic.chains.summarize import load_summarize_chain
+            from langchain_openai import ChatOpenAI
+            from langchain_core.prompts import PromptTemplate
 
             prompt_template = (
                 "Write a concise summary of the following:\n\n{text}\n\nCONCISE SUMMARY IN "
@@ -466,7 +466,7 @@ class BaseLLMModel:
                 + ":"
             )
             PROMPT = PromptTemplate(template=prompt_template, input_variables=["text"])
-            llm = ChatOpenAI()
+            llm = ChatOpenAI(http_socket_options=())
             chain = load_summarize_chain(
                 llm,
                 chain_type="map_reduce",
@@ -498,8 +498,8 @@ class BaseLLMModel:
         else:
             fake_inputs = real_inputs
         if files:
-            from langchain.embeddings.huggingface import HuggingFaceEmbeddings
-            from langchain.vectorstores.base import VectorStoreRetriever
+            from langchain_community.embeddings.huggingface import HuggingFaceEmbeddings
+            from langchain_core.vectorstores import VectorStoreRetriever
 
             limited_context = True
             msg = i18n("msg.index.loading")
@@ -1262,8 +1262,8 @@ class Base_Chat_Langchain_Client(BaseLLMModel):
             self.model, BaseChatModel
         ), "model is not instance of LangChain BaseChatModel"
         history = self._get_langchain_style_history()
-        response = self.model.generate(history)
-        return response.content, sum(response.content)
+        response = self.model.invoke(history)
+        return response.content, (response.usage_metadata or {}).get('total_tokens', -1)
 
     def get_answer_stream_iter(self):
         it = CallbackToIterator()
@@ -1272,11 +1272,14 @@ class Base_Chat_Langchain_Client(BaseLLMModel):
         ), "model is not instance of LangChain BaseChatModel"
         history = self._get_langchain_style_history()
 
+        errors = []
         def thread_func():
-            self.model(
-                messages=history, callbacks=[ChuanhuCallbackHandler(it.callback)]
-            )
-            it.finish()
+            try:
+                self.model.invoke(history, config={'callbacks': [ChuanhuCallbackHandler(it.callback)]})
+            except Exception as error:
+                errors.append(error)
+            finally:
+                it.finish()
 
         t = Thread(target=thread_func)
         t.start()
@@ -1284,3 +1287,5 @@ class Base_Chat_Langchain_Client(BaseLLMModel):
         for value in it:
             partial_text += value
             yield partial_text
+        if errors:
+            raise errors[0]

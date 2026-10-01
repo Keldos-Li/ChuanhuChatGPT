@@ -42,7 +42,7 @@ def _get_model(
             if getattr(original_model, "is_hosted_agent", False) and original_model._selection_name == model_name:
                 model = original_model
             else:
-                model = OpenAIAgentsClient(model_name, user_name=user_name, owner=owner)
+                model = OpenAIAgentsClient(model_name, user_name=user_name, owner=owner, api_key=access_key)
             msg += " — " + i18n("model.openai_agent.selection_notice")
         elif model_type == ModelType.OpenAIVision or model_type == ModelType.OpenAI:
             logging.info(f"正在加载 OpenAI 模型: {model_name}")

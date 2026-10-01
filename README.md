@@ -190,4 +190,4 @@ python ChuanhuChatbot.py
 
 ### OpenAI Agent 主聊天模型
 
-从原有模型下拉框选择 **OpenAI Agent**，使用主聊天框发送托管任务、查看进度与文件输出。可选运行环境、专用密钥和恢复行为见 [接入说明](docs/openai-agent-model.md)。
+从原有模型下拉框选择 **OpenAI Agent**，在主聊天框连续对话，查看任务进度、处理网站权限请求并下载生成的文件。Agent 与普通 OpenAI 模型共用项目运行环境和连接配置；工具设置用于新会话，模型与推理设置可在空闲时更新供下一轮使用。

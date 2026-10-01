@@ -111,6 +111,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     transport = importlib.import_module('modules.agent_transport')
     transport.ROOT = root
     agents = importlib.import_module('modules.models.OpenAIAgents')
+    agents.connection_for_model = lambda **kwargs: {'api_key': 'offline-fixture-only', 'base_url': 'https://offline.invalid/v1', 'organization': '', 'project': '', 'proxy_env': {}}
     factory = ModuleType('modules.models.models')
     vars(factory).update(helpers, __name__='modules.models.models', __package__='modules.models',
                          config=SimpleNamespace(local_embedding=False), deepcopy=deepcopy,

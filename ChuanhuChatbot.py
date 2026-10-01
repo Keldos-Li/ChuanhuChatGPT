@@ -6,6 +6,7 @@ logging.basicConfig(
 )
 
 from modules.models.models import get_model, change_model
+from modules.agent_ui import AgentPanel
 from modules.train_func import *
 from modules.repo import *
 from modules.webui import *
@@ -137,6 +138,8 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                         show_share_button=False,
                         placeholder=setPlaceholder(model_name=MODELS[DEFAULT_MODEL]),
                     )
+                agent_panel = AgentPanel()
+                agent_panel.output_components()
                 with gr.Row(elem_id="chatbot-footer"):
                     with gr.Column(elem_id="chatbot-input-box"):
                         with gr.Row(elem_id="chatbot-input-row"):
@@ -162,6 +165,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                                         value="", variant="primary", elem_id="submit-btn")
                                     cancelBtn = gr.Button(
                                         value="", variant="secondary", visible=False, elem_id="cancel-btn")
+                        agent_panel.selectors()
                         # Note: Buttons below are set invisible in UI. But they are used in JS.
                         with gr.Row(elem_id="chatbot-buttons", visible=False):
                             with gr.Column(min_width=120, scale=1):
@@ -212,6 +216,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.multi_account_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
                             else:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.usage_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
+                        agent_panel.settings_components()
                         gr.Markdown("---", elem_classes="hr-line", visible=not HIDE_MY_KEY)
                         with gr.Accordion(label="Prompt", open=True):
                             systemPromptTxt = gr.Textbox(
@@ -487,6 +492,8 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                 historySelectBtn = gr.Button(
                     visible=False, elem_classes="invisible-btn", elem_id="history-select-btn")  # Not used
 
+    agent_panel.wire(current_model, chatbot, status_display)
+
     # https://github.com/gradio-app/gradio/pull/3296
 
     def create_greeting(request: gr.Request):
@@ -498,7 +505,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             user_info, user_name = gr.Markdown(
                 value=f"", visible=False), ""
         current_model = get_model(
-            model_name=MODELS[DEFAULT_MODEL], access_key=my_api_key, user_name=user_name)[0]
+            model_name=MODELS[DEFAULT_MODEL], access_key=my_api_key, user_name=user_name, request=request)[0]
         if not hide_history_when_not_logged_in or user_name:
             loaded_stuff = current_model.auto_load()
         else:
@@ -506,7 +513,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             loaded_stuff = [gr.update(), gr.update(), gr.Chatbot(label=MODELS[DEFAULT_MODEL]), current_model.single_turn, current_model.temperature, current_model.top_p, current_model.n_choices, current_model.stop_sequence, current_model.token_upper_limit, current_model.max_generation_token, current_model.presence_penalty, current_model.frequency_penalty, current_model.logit_bias, current_model.user_identifier, current_model.stream, gr.DownloadButton(), gr.DownloadButton()]
         return user_info, user_name, current_model, toggle_like_btn_visibility(DEFAULT_MODEL), *loaded_stuff, init_history_list(user_name, prepend=current_model.history_file_path.rstrip(".json"))
     demo.load(create_greeting, inputs=None, outputs=[
-              user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load")
+              user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load").then(agent_panel.values, [current_model], agent_panel.outputs)
     chatgpt_predict_args = dict(
         fn=predict,
         inputs=[
@@ -643,7 +650,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         set_single_turn, [current_model, single_turn_checkbox], None, show_progress=False)
     use_streaming_checkbox.change(set_streaming, [current_model, use_streaming_checkbox], None, show_progress=False)
     model_select_dropdown.input(change_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
-                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model")
+                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model").then(agent_panel.values, [current_model], agent_panel.outputs)
     model_select_dropdown.change(toggle_like_btn_visibility, [model_select_dropdown], [
                                  like_dislike_area], show_progress=False)
     # model_select_dropdown.change(

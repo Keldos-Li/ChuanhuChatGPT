@@ -16,6 +16,7 @@ os.environ['GRADIO_ANALYTICS_ENABLED']='False'
 os.environ['MPLCONFIGDIR']=tempfile.mkdtemp(prefix='chuanhu-mpl-')
 import gradio as gr
 from offline_models import OfflineLocale, install
+from modules.agent_ui import AgentPanel
 
 
 def build(language='zh_CN'):
@@ -45,8 +46,8 @@ def build(language='zh_CN'):
         elif command['action']=='download':
             folder=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'));file=folder/'synthetic.txt'
             file.write_text('Offline main-chat artifact. No API called.')
-            yield dict(type='result',files=[str(file)])
-        elif command['action']=='inspect':
+            yield dict(type='result',artifacts=[{'id':'artifact_offline','session_id':'sess_synthetic','turn_id':'turn_synthetic_'+str(counter),'path':str(file),'name':file.name,'type':'text/plain','size':file.stat().st_size,'status':'ready'}])
+        elif command['action'] in ('inspect','recover'):
             yield dict(type='result',session_id=command['session_id'],turn_id=command['turn_id'],outcome='cancelled' if cancellation.is_set() else 'completed',text='Synthetic read-only recovery')
         else:raise AssertionError(command)
     env.agents.worker_messages=worker
@@ -58,7 +59,7 @@ def build(language='zh_CN'):
         layout.append(node)
     namespace={name:getattr(presets,name) for name in dir(presets) if not name.startswith('__')}
     namespace.update(env.wrappers)
-    namespace.update(gr=gr,change_model=env.factory.change_model,CONCURRENT_COUNT=2,
+    namespace.update(AgentPanel=AgentPanel,gr=gr,change_model=env.factory.change_model,CONCURRENT_COUNT=2,
         config=SimpleNamespace(user_avatar=None,bot_avatar=None,http_proxy='',api_host='api.openai.com'),
         my_api_key='',HIDE_MY_KEY=True,multi_api_key=False,check_update=False,show_api_billing=False,
         hide_history_when_not_logged_in=False,advance_docs={'pdf':{}},chat_name_method_index=0,latex_delimiters_set=[],
@@ -75,7 +76,7 @@ def build(language='zh_CN'):
     gr.blocks.BlockContext.__init__=scope[wrapper.name](gr.blocks.BlockContext.__init__)
     # Exact actual event-chain source, no substitute dropdown or chat callbacks.
     event_prefixes=('cancelBtn.click(', 'user_input.submit(', 'submitBtn.click(',
-                    'retryBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(')
+                    'retryBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(', 'agent_panel.wire(')
     events=[node for node in block.body
             if (isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id.endswith('_args') for target in node.targets))
             or (isinstance(node,ast.Expr) and ast.unparse(node).startswith(event_prefixes))]

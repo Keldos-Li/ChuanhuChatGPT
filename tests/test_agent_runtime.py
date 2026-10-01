@@ -1,218 +1,329 @@
+"""No-network session lifecycle regressions, including restore and stop races."""
+from contextlib import contextmanager
+from copy import deepcopy
 import importlib.util
+import io
+import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('agent_runtime', ROOT/'optional/agents/runtime.py')
-import sys
-runtime = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = runtime
-spec.loader.exec_module(runtime)
+sys.path.insert(0, str(ROOT))
+from optional.agents import runtime
+from optional.agents.tools import ToolConfigurationError
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch, tmp_path):
+    import socket
+    from optional.agents import tools
+    monkeypatch.setattr(tools, 'CONTROL_ROOT', tmp_path / 'function-controls')
+    monkeypatch.setattr(socket.socket, 'connect', lambda *a, **k: (_ for _ in ()).throw(AssertionError('Real network forbidden')))
 
 
 def event(kind, turn_id='t1', session='sess_test', **kw):
-    return {'type': 'agent.session.turn.'+kind, 'session_id':session, 'turn_id':turn_id, **kw}
+    return {'type': 'agent.session.turn.' + kind, 'session_id': session, 'turn_id': turn_id, **kw}
 
 
 def turn(kind, turn='t1', subagent=None):
-    return event(kind, turn, turn={'id':turn, 'subagent_id':subagent})
+    return event(kind, turn, turn={'id': turn, 'subagent_id': subagent, 'status': kind})
 
 
 def text(kind, value, turn_id='t1', item='msg1', **kw):
-    return event('output_text.'+kind, turn_id, item_id=item, output_index=0, content_index=0,
-                 **{('delta' if kind == 'delta' else 'text'):value}, **kw)
+    return event('output_text.' + kind, turn_id, item_id=item, output_index=0, content_index=0,
+                 **{('delta' if kind == 'delta' else 'text'): value}, **kw)
+
+
+def message(identifier, value, turn_id='t1', status='completed', role='assistant'):
+    return {'id': identifier, 'type': 'message', 'role': role, 'turn_id': turn_id, 'status': status,
+            'content': [{'type': 'output_text' if role == 'assistant' else 'input_text', 'text': value}]}
 
 
 class Stream:
     def __init__(self, events, trace): self.events, self.trace = events, trace
     def __enter__(self): self.trace.append('stream_open'); return iter(self.events)
-    def __exit__(self,*args): self.trace.append('stream_close')
+    def __exit__(self, *args): self.trace.append('stream_close')
+
+
+class FakePages:
+    """An auto-paginating SDK iterator, recording whether every page was read."""
+    def __init__(self, pages): self.pages, self.visited = pages, []
+    def __iter__(self):
+        for number, page in enumerate(self.pages):
+            self.visited.append(number)
+            yield from page
+
 
 class FakeClient:
-    def __init__(self, events, session_status='idle', saved_turn='completed'):
-        self.trace=[]; self.payloads=[]; self.submitted=[]
-        self.events=events; self.session_status=session_status; self.saved_turn=saved_turn
-        operations=SimpleNamespace(create=self.send, stream=self.stream)
-        self.required_actions=[]
-        sessions=SimpleNamespace(create=self.create, events=operations,
-           retrieve=lambda id: {'status': self.session_status, 'required_actions':self.required_actions},
-           turns=SimpleNamespace(retrieve=lambda id,**kw:{'id':id,'status':self.saved_turn}, list=lambda *a,**kw:[]),
-           items=SimpleNamespace(list=lambda *a,**k:[{'type':'message','role':'assistant','turn_id':'t1','content':[{'type':'output_text','text':'saved'}]}]),
-           artifacts=SimpleNamespace(list=lambda *a,**k:[]))
-        self.beta=SimpleNamespace(agents=SimpleNamespace(sessions=sessions))
-    def create(self, **kw): self.payloads.append(kw); return Stream(self.events,self.trace)
-    def stream(self,*a,**kw): return Stream(self.events,self.trace)
-    def send(self,*a,**kw): self.trace.append('submit'); self.submitted.append(kw)
+    def __init__(self, events=(), session_status='idle', saved_turn='completed'):
+        self.trace, self.payloads, self.submitted, self.updated = [], [], [], []
+        self.events, self.session_status, self.saved_turn = events, session_status, saved_turn
+        self.required_actions, self.saved_items, self.saved_artifacts, self.roots = [], [], [], []
+        self.agent = {'model': 'model', 'reasoning': {'effort': 'medium'}}
+        self.environment = {'type': 'openai_hosted', 'network': {'access': 'enabled'}}
+        sessions = SimpleNamespace(create=self.create, retrieve=self.retrieve, update=self.update,
+            events=SimpleNamespace(create=self.send, stream=self.stream),
+            turns=SimpleNamespace(retrieve=lambda identifier, **kw: {'id': identifier, 'status': self.saved_turn},
+                                  list=lambda *a, **kw: self.roots),
+            items=SimpleNamespace(list=lambda *a, **kw: self.saved_items),
+            artifacts=SimpleNamespace(list=lambda *a, **kw: self.saved_artifacts))
+        self.beta = SimpleNamespace(agents=SimpleNamespace(sessions=sessions))
+    def create(self, **kw): self.payloads.append(kw); return Stream(self.events, self.trace)
+    def stream(self, *a, **kw): return Stream(self.events, self.trace)
+    def send(self, *a, **kw): self.trace.append('submit'); self.submitted.append(kw)
+    def retrieve(self, identifier):
+        self.trace.append('retrieve')
+        return {'id': identifier, 'status': self.session_status, 'required_actions': deepcopy(self.required_actions),
+                'agent': deepcopy(self.agent), 'environment': deepcopy(self.environment)}
+    def update(self, identifier, **kw):
+        self.updated.append((identifier, kw)); self.agent.update(kw['agent']); return {'agent': deepcopy(self.agent)}
 
 
 def test_delta_done_replacement_dedupe_and_other_turns():
-    state=runtime.TurnState()
-    state.accept(turn('created'))
-    state.accept(text('delta','he',event_id='e1'))
-    state.accept(text('delta','he',event_id='e1'))
-    state.accept(text('delta','llo'))
-    state.accept(text('done','hello'))
-    state.accept(text('done','wrong turn',turn_id='other'))
-    state.accept(turn('completed', turn='child', subagent='sub1'))
-    assert state.outcome=='incomplete'
+    state = runtime.TurnState()
+    for value in [turn('created'), text('delta', 'he', event_id='e1'), text('delta', 'he', event_id='e1'),
+                  text('delta', 'llo'), text('done', 'hello'), text('done', 'wrong', turn_id='other'),
+                  turn('completed', turn='child', subagent='sub')]: state.accept(value)
+    assert state.outcome == 'in_progress'
     state.accept(turn('completed'))
-    assert state.text=='hello' and state.outcome=='completed'
+    assert state.text == 'hello' and state.outcome == 'completed'
 
 
 def test_only_done_and_session_isolation():
-    a,b=runtime.TurnState(),runtime.TurnState()
+    a, b = runtime.TurnState(), runtime.TurnState()
     a.accept(turn('created')); b.accept(turn('created'))
-    a.accept(text('done','one')); b.accept(text('done','two'))
-    a.accept({'type':'agent.session.turn.output_text.done','session_id':'other','turn_id':'t1','item_id':'msg1','output_index':0,'content_index':0,'text':'alien'})
-    assert a.text=='one' and b.text=='two'
+    a.accept(text('done', 'one')); b.accept(text('done', 'two'))
+    a.accept(dict(text('done', 'alien'), session_id='sess_other'))
+    assert a.text == 'one' and b.text == 'two'
 
-@pytest.mark.parametrize('kind', ['failed','cancelled'])
-def test_terminal_failure(kind):
-    client=FakeClient([turn('created'),turn(kind)])
-    with pytest.raises(runtime.AgentError, match=kind) as error: runtime.run_task(client,'test','model')
-    assert error.value.state.outcome==kind
-    assert len(client.payloads)==1
 
-@pytest.mark.parametrize('events', [[], [turn('created'), {'type':'agent.session.idle'}], [turn('created'),turn('completed',turn='child',subagent='sub')]])
+@pytest.mark.parametrize('kind', ['failed', 'cancelled'])
+def test_target_terminal_outcome_not_misreported_as_completed(kind):
+    client = FakeClient([turn('created'), turn(kind)], saved_turn=kind)
+    result = runtime.run_task(client, 'test', 'model')
+    assert result.outcome == kind and len(client.payloads) == 1
+
+
+@pytest.mark.parametrize('events', [[], [turn('created'), {'type': 'agent.session.idle'}],
+    [turn('created'), turn('completed', turn='child', subagent='sub')]])
 def test_eof_idle_and_subagent_completion_do_not_mean_success(events):
-    client=FakeClient(events)
-    with pytest.raises(runtime.AgentError, match='without target turn completion'): runtime.run_task(client,'test','model')
-    assert len(client.payloads)==1
+    client = FakeClient(events)
+    with pytest.raises(runtime.AgentError, match='连接已中断') as caught:
+        runtime.run_task(client, 'test', 'model')
+    assert len(client.payloads) == 1 and caught.value.state.outcome not in runtime.TERMINAL
 
 
-def test_payload_isolated_hosted_no_network_no_subagents_no_legacy_tools():
-    client=FakeClient([turn('created'),text('done','result'),turn('completed')])
-    result=runtime.run_task(client,'test','explicit-model')
-    assert result.text=='result'
-    payload=client.payloads[0]
-    assert payload['environment']=={'type':'openai_hosted','network':{'access':'disabled'}}
-    assert payload['agent']['tools']==[]
-    assert payload['agent']['multi_agent']=={'enabled':False}
-    assert payload['agent']['model']=='explicit-model'
+def test_default_tools_and_network_enabled_with_no_legacy_plugin_import():
+    client = FakeClient([turn('created'), text('done', 'result'), turn('completed')])
+    result = runtime.run_task(client, 'test', 'explicit-model')
+    assert result.text == 'result'
+    payload = client.payloads[0]
+    assert payload['environment'] == {'type': 'openai_hosted', 'network': {'access': 'enabled'}, 'desktop': {'enabled': True}}
+    assert {tool['type'] for tool in payload['agent']['tools']} == {'computer_use', 'web_search', 'programmatic_tool_calling'}
+    assert payload['agent']['model'] == 'explicit-model'
 
 
 def test_followup_stream_open_before_submit_and_no_new_session():
-    client=FakeClient([turn('created'),turn('completed')])
-    runtime.run_task(client,'follow up','model',session_id='sess_test')
-    assert client.trace[:2]==['stream_open','submit']
+    client = FakeClient([turn('created'), turn('completed')])
+    runtime.run_task(client, 'follow up', 'model', session_id='sess_test')
+    assert client.trace.index('stream_open') < client.trace.index('submit')
     assert not client.payloads
-    assert client.submitted[0]['events'][0]['type']=='agent.session.input.message'
+    assert client.submitted[0]['events'] == [{'type': 'agent.session.input.message', 'input': [{'role': 'user', 'content': [{'type': 'input_text', 'text': 'follow up'}]}]}]
 
 
 def test_followup_busy_does_not_send():
-    client=FakeClient([],session_status='in_progress')
-    with pytest.raises(runtime.AgentError,match='not ready'): runtime.run_task(client,'follow up','model',session_id='sess_test')
-    assert not client.submitted and not client.payloads
+    client = FakeClient([], session_status='in_progress')
+    with pytest.raises(runtime.AgentError, match='仍在运行') as caught:
+        runtime.run_task(client, 'follow up', 'model', session_id='sess_test')
+    assert not client.submitted and not client.payloads and caught.value.state.outcome == 'not_started'
 
 
-def test_function_allowlist_validates_parameters_and_submits_result():
-    client=FakeClient([]); state=runtime.TurnState('sess_test','t1'); handled=set()
-    action={'type':'function_call','turn_id':'t1','call_id':'call1','name':'text_statistics','arguments':{'text':'hello world'}}
-    runtime.handle_function_actions(client,state,{'required_actions':[action]},True,handled)
-    result=client.submitted[0]['events'][0]
-    assert result['success'] and '"words": 2' in result['output']
-    runtime.handle_function_actions(client,state,{'required_actions':[action]},True,handled)
-    assert len(client.submitted)==1
-    action=dict(action,call_id='call2',arguments={'text':'hello','path':'/private'})
-    runtime.handle_function_actions(client,state,{'required_actions':[action]},True,handled)
+def test_function_allowlist_validates_parameters_and_dedupes_results():
+    client = FakeClient(); state = runtime.TurnState('sess_test', 't1'); handled = set()
+    action = {'type': 'function_call', 'turn_id': 't1', 'call_id': 'call1', 'name': 'text_statistics', 'arguments': {'text': 'hello world'}}
+    runtime.handle_function_actions(client, state, {'required_actions': [action]}, {'functions': ['text_statistics']}, handled)
+    result = client.submitted[0]['events'][0]
+    assert result['success'] and json.loads(result['output'])['words'] == 2
+    runtime.handle_function_actions(client, state, {'required_actions': [action]}, {'functions': ['text_statistics']}, handled)
+    assert len(client.submitted) == 1
+    action = dict(action, call_id='call2', arguments={'text': 'hello', 'path': '/private'})
+    runtime.handle_function_actions(client, state, {'required_actions': [action]}, {'functions': ['text_statistics']}, handled)
     assert not client.submitted[1]['events'][0]['success']
-    with pytest.raises(runtime.AgentError,match='not explicitly allowed'):
-        runtime.handle_function_actions(client,state,{'required_actions':[dict(action,name='shell',call_id='call3')]},True,handled)
+    with pytest.raises(ToolConfigurationError, match='未启用'):
+        runtime.handle_function_actions(client, state, {'required_actions': [dict(action, name='shell', call_id='call3')]}, {'functions': ['text_statistics']}, handled)
 
 
 def test_recovery_reads_authoritative_turn_without_resubmitting():
-    client=FakeClient([],saved_turn='cancelled')
-    result=runtime.inspect_saved(client,'sess_test','t1')
-    assert result['outcome']=='cancelled' and result['text']=='saved'
+    client = FakeClient(saved_turn='cancelled'); client.saved_items = [message('msg1', 'saved')]
+    result = runtime.inspect_saved(client, 'sess_test', 't1')
+    assert result['outcome'] == 'cancelled' and result['text'] == 'saved'
     assert not client.submitted and not client.payloads
 
 
-def test_cancel_is_real_remote_event():
-    client=FakeClient([])
-    runtime.cancel_session(client,'sess_test')
-    assert client.submitted[0]['events']==[{'type':'agent.session.input.cancel'}]
+def test_restore_paginates_all_items_and_merges_by_id():
+    client = FakeClient()
+    pages = FakePages([[message('m' + str(n), str(n)) for n in range(300)],
+                      [message('m' + str(n), str(n)) for n in range(300, 650)],
+                      [message('m2', 'authoritative replacement')]])
+    client.saved_items = pages
+    result = runtime.inspect_saved(client, 'sess_test', 't1')
+    assert len(result['items']) == 650 and pages.visited == [0, 1, 2]
+    assert result['items'][2]['content'][0]['text'] == 'authoritative replacement'
 
-@pytest.mark.parametrize('status',[401,403,429,500])
+
+def test_followup_history_over_500_is_complete_and_submitted_once():
+    client = FakeClient([turn('created'), turn('completed')])
+    pages = FakePages([[{'id': 'old_' + str(i)} for i in range(500)], [{'id': 'old_' + str(i)} for i in range(500, 1100)]])
+    client.roots = pages
+    result = runtime.run_task(client, 'follow up', 'model', session_id='sess_test')
+    assert len(result.ignored_turn_ids) == 1100 and pages.visited == [0, 1] and len(client.submitted) == 1
+
+
+def test_reconnect_stream_is_open_before_snapshot_and_buffered_updates_win():
+    item = message('current', 'new authoritative output')
+    client = FakeClient([event('item.done', item=item), turn('completed')], session_status='in_progress', saved_turn='in_progress')
+    client.saved_items = [message('current', 'older partial', status='in_progress')]
+    result = runtime.recover_stream(client, 'sess_test', 't1')
+    assert client.trace[0] == 'stream_open' and client.trace.index('retrieve') > 0
+    assert result.outcome == 'completed' and result.text == 'new authoritative output'
+    assert len(result.items) == 1 and not client.submitted
+
+
+def test_completed_restore_does_not_replay_past_function_actions():
+    client = FakeClient([{'type': 'agent.session.requires_action', 'session_id': 'sess_test', 'turn_id': 't1'}])
+    client.saved_items = [message('saved', 'completed result')]
+    result = runtime.recover_stream(client, 'sess_test', 't1', tool_settings={'functions': ['text_statistics']})
+    assert result.outcome == 'completed' and not client.submitted
+
+
+def test_cancel_targets_current_turn_and_waits_for_remote_confirmation():
+    client = FakeClient(session_status='in_progress', saved_turn='in_progress')
+    client.roots = [{'id': 't1', 'status': 'in_progress', 'subagent_id': None}]
+    result = runtime.cancel_session(client, 'sess_test', 't1')
+    assert client.submitted[0]['events'] == [{'type': 'agent.session.input.cancel'}]
+    assert result['outcome'] == 'cancel_requested'
+
+
+@pytest.mark.parametrize('status', ['completed', 'failed', 'cancelled'])
+def test_cancel_natural_completion_race_preserves_actual_terminal_outcome(status):
+    client = FakeClient(saved_turn=status)
+    assert runtime.cancel_session(client, 'sess_test', 't1')['outcome'] == status
+    assert not client.submitted
+
+
+def test_cancel_stale_turn_cannot_cancel_a_new_turn():
+    client = FakeClient(session_status='in_progress', saved_turn='in_progress')
+    client.roots = [{'id': 'newer', 'status': 'in_progress', 'subagent_id': None}]
+    with pytest.raises(runtime.AgentError, match='运行任务已变化'):
+        runtime.cancel_session(client, 'sess_test', 't1')
+    assert not client.submitted
+
+
+def test_cancel_failure_does_not_claim_stopped_or_retry():
+    client = FakeClient(session_status='in_progress', saved_turn='in_progress')
+    client.roots = [{'id': 't1', 'status': 'in_progress', 'subagent_id': None}]
+    attempts = []
+    def fail(*a, **kw): attempts.append(kw); raise OSError('secret details')
+    client.beta.agents.sessions.events.create = fail
+    with pytest.raises(runtime.AgentError, match='尚待确认'):
+        runtime.cancel_session(client, 'sess_test', 't1')
+    assert len(attempts) == 1
+
+
+def test_settings_update_returns_only_confirmed_actual_values():
+    client = FakeClient()
+    assert runtime.update_settings(client, 'sess_test', 'gpt-6-sol', 'high') == {'model': 'gpt-6-sol', 'reasoning': 'high'}
+    assert len(client.updated) == 1 and not client.payloads and not client.submitted
+
+
+def test_settings_update_busy_or_unconfirmed_does_not_succeed():
+    client = FakeClient(session_status='in_progress')
+    with pytest.raises(runtime.AgentError, match='仍在执行'): runtime.update_settings(client, 'sess_test', 'gpt-6-sol', 'high')
+    assert not client.updated
+    client.session_status = 'idle'
+    client.beta.agents.sessions.update = lambda *a, **kw: {'agent': {'model': 'old', 'reasoning': {'effort': 'low'}}}
+    with pytest.raises(runtime.AgentError, match='尚未确认'): runtime.update_settings(client, 'sess_test', 'gpt-6-sol', 'high')
+
+
+@pytest.mark.parametrize('status', [401, 403, 404, 429, 500])
 def test_errors_do_not_expose_body_or_secret(status):
-    error=SimpleNamespace(status_code=status)
-    assert str(status) in str(runtime.safe_request_error(error))
-    class Failure(Exception):
-        status_code=status
-    client=FakeClient([])
+    class Failure(Exception): status_code = status
+    client = FakeClient()
     def fail(**kw): raise Failure('private prompt fake-secret-value')
-    client.beta.agents.sessions.create=fail
-    with pytest.raises(runtime.AgentError) as caught: runtime.run_task(client,'private prompt','model')
+    client.beta.agents.sessions.create = fail
+    with pytest.raises(runtime.AgentError) as caught: runtime.run_task(client, 'private prompt', 'model')
+    assert str(status) in str(caught.value)
     assert 'private prompt' not in str(caught.value) and 'fake-secret-value' not in str(caught.value)
+    assert caught.value.state.outcome == ('uncertain' if status == 500 else 'not_started')
 
 
-def test_key_is_dedicated_no_core_fallback(tmp_path,monkeypatch):
-    monkeypatch.delenv(runtime.KEY_NAME,raising=False)
-    monkeypatch.setenv('OPENAI_API_KEY','wrong-provider-key')
-    path=tmp_path/'.env.agents';path.write_text('CHUANHU_AGENT_API_KEY=\n')
-    with pytest.raises(runtime.AgentError): runtime.read_dedicated_key(path)
-    path.write_text('CHUANHU_AGENT_API_KEY="dedicated-test-key"\n')
-    assert runtime.read_dedicated_key(path)=='dedicated-test-key'
+def test_key_reuses_existing_config_with_optional_override(tmp_path, monkeypatch):
+    monkeypatch.delenv('CHUANHU_AGENT_API_KEY', raising=False)
+    monkeypatch.setenv('OPENAI_API_KEY', 'ordinary-key')
+    path = tmp_path / '.env.agents'; path.write_text('CHUANHU_AGENT_API_KEY=\n')
+    assert runtime.read_dedicated_key(path) == 'ordinary-key'
+    path.write_text('CHUANHU_AGENT_API_KEY="optional-key"\n')
+    assert runtime.read_dedicated_key(path) == 'optional-key'
 
 
 def test_followup_ignores_replayed_prior_root_turn():
-    client=FakeClient([turn('created',turn='old'),text('done','OLD',turn_id='old'),turn('completed',turn='old'),turn('created',turn='new'),text('done','NEW',turn_id='new'),turn('completed',turn='new')])
-    client.beta.agents.sessions.turns.list=lambda *a,**kw:[{'id':'old'}]
-    result=runtime.run_task(client,'follow up','model',session_id='sess_test')
-    assert result.turn_id=='new' and result.text=='NEW'
-    assert len(client.submitted)==1
+    client = FakeClient([turn('created', turn='old'), text('done', 'OLD', turn_id='old'), turn('completed', turn='old'),
+                         turn('created', turn='new'), text('done', 'NEW', turn_id='new'), turn('completed', turn='new')])
+    client.roots = [{'id': 'old'}]
+    result = runtime.run_task(client, 'follow up', 'model', session_id='sess_test')
+    assert result.turn_id == 'new' and result.text == 'NEW' and len(client.submitted) == 1
 
 
-def test_uncertain_creation_lookup_uses_exact_run_id_and_does_not_resubmit():
-    client=FakeClient([])
-    run_id='a'*32
-    client.beta.agents.sessions.list=lambda **kw:[{'id':'sess_other','metadata':{}},{'id':'sess_match','metadata':{'chuanhu_run_id':run_id}}]
-    client.beta.agents.sessions.turns.list=lambda *a,**kw:[{'id':'t1','subagent_id':None}]
-    assert runtime.find_uncertain_session(client,run_id)==('sess_match','t1')
-    assert not client.submitted and not client.payloads
+def test_uncertain_creation_lookup_uses_exact_run_id_over_all_pages():
+    client = FakeClient(); run_id = 'a' * 32
+    pages = FakePages([[{'id': 'sess_other' + str(n), 'metadata': {}} for n in range(600)], [{'id': 'sess_match', 'metadata': {'chuanhu_run_id': run_id}}]])
+    client.beta.agents.sessions.list = lambda **kw: pages
+    client.roots = [{'id': 't1', 'subagent_id': None}]
+    assert runtime.find_uncertain_session(client, run_id) == ('sess_match', 't1')
+    assert pages.visited == [0, 1] and not client.submitted and not client.payloads
 
-@pytest.mark.parametrize('baseline',[[],['old']])
+
+@pytest.mark.parametrize('baseline', [[], ['old']])
 def test_missing_turn_recovers_unique_new_root(baseline):
-    client=FakeClient([],saved_turn='cancelled')
-    client.beta.agents.sessions.turns.list=lambda *a,**k:[{'id':id,'subagent_id':None} for id in baseline]+[{'id':'new','subagent_id':None},{'id':'child','subagent_id':'sub'}]
-    result=runtime.inspect_saved(client,'sess_test',baseline_turn_ids=baseline,submission_started=True)
-    assert result['turn_id']=='new' and result['outcome']=='cancelled'
-    assert not client.submitted
+    client = FakeClient(saved_turn='cancelled')
+    client.roots = [{'id': identifier, 'subagent_id': None} for identifier in baseline] + [{'id': 'new', 'subagent_id': None}, {'id': 'child', 'subagent_id': 'sub'}]
+    result = runtime.inspect_saved(client, 'sess_test', baseline_turn_ids=baseline, submission_started=True)
+    assert result['turn_id'] == 'new' and result['outcome'] == 'cancelled' and not client.submitted
 
-@pytest.mark.parametrize('roots',[[],['old'],['old','new','other']])
+
+@pytest.mark.parametrize('roots', [[], ['old'], ['old', 'new', 'other']])
 def test_missing_turn_never_chooses_previous_or_ambiguous_root(roots):
-    client=FakeClient([])
-    client.beta.agents.sessions.turns.list=lambda *a,**k:[{'id':id,'subagent_id':None} for id in roots]
-    result=runtime.inspect_saved(client,'sess_test',baseline_turn_ids=['old'],submission_started=True)
-    assert result['turn_id'] is None and result['outcome']=='incomplete'
+    client = FakeClient(); client.roots = [{'id': identifier, 'subagent_id': None} for identifier in roots]
+    result = runtime.inspect_saved(client, 'sess_test', baseline_turn_ids=['old'], submission_started=True)
+    assert result['turn_id'] is None and result['outcome'] == 'incomplete'
 
 
-def test_followup_exports_baseline_before_submission_even_without_new_turn_event():
-    client=FakeClient([{'type':'agent.session.ready','session_id':'sess_test'}])
-    client.beta.agents.sessions.turns.list=lambda *a,**k:[{'id':'old'}]
-    states=[]
+def test_followup_exports_baseline_before_submission_without_new_turn_event():
+    client = FakeClient([{'type': 'agent.session.ready', 'session_id': 'sess_test'}]); client.roots = [{'id': 'old'}]
+    states = []
     with pytest.raises(runtime.AgentError):
-        runtime.run_task(client,'new','model',session_id='sess_test',on_progress=lambda s:states.append((s.session_id,set(s.ignored_turn_ids),s.submission_started)))
-    assert states[0]==('sess_test',{'old'},False)
-    assert states[1]==('sess_test',{'old'},True)
-    assert len(client.submitted)==1
+        runtime.run_task(client, 'new', 'model', session_id='sess_test', on_progress=lambda state: states.append((state.session_id, set(state.ignored_turn_ids), state.submission_started)))
+    assert states[:2] == [('sess_test', {'old'}, False), ('sess_test', {'old'}, True)]
+    assert len(client.submitted) == 1
 
 
-@pytest.mark.parametrize('failure',['key','sdk'])
-def test_real_worker_preflight_failure_not_started(failure,monkeypatch,capsys):
-    import io,json
-    monkeypatch.setitem(sys.modules,'runtime',runtime)
-    spec=importlib.util.spec_from_file_location('agent_worker',ROOT/'optional/agents/worker.py')
-    worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
-    monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps({'action':'run','prompt':'test','model':'model'})+'\n'))
-    def fail(*a):raise runtime.AgentError('Synthetic '+failure+' unavailable')
-    monkeypatch.setattr(worker,'read_dedicated_key',fail if failure=='key' else lambda:'synthetic-only')
-    monkeypatch.setattr(worker,'create_client',fail)
-    worker.main()
-    message=json.loads(capsys.readouterr().out)
-    assert message['type']=='error' and message['outcome']=='not_started' and message['session_id'] is None
+def load_worker(monkeypatch, name='agent_worker'):
+    monkeypatch.setitem(sys.modules, 'runtime', runtime)
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'optional/agents/worker.py')
+    worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+    return worker
 
 
+@pytest.mark.parametrize('failure', ['key', 'sdk'])
+def test_real_worker_preflight_failure_not_started(failure, monkeypatch, capsys):
+    worker = load_worker(monkeypatch)
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(json.dumps({'action': 'run', 'prompt': 'test', 'model': 'model'}) + '\n'))
+    def fail(*a): raise runtime.AgentError('Synthetic ' + failure + ' unavailable')
+    monkeypatch.setattr(worker, 'create_client', fail)
+    worker.main(); output = json.loads(capsys.readouterr().out)
+    assert output['type'] == 'error' and output['outcome'] == 'not_started' and output.get('session_id') is None
 def test_safe_error_preserves_allowlisted_diagnostics_without_body_or_message():
     class Failure(Exception):
         status_code=400;code='invalid_value';param='environment.network.access';request_id='req_'+'a'*32
@@ -262,7 +373,6 @@ def test_real_worker_emits_filtered_diagnostics_not_exception_body(monkeypatch,c
     fake.beta.agents.sessions.create=fail
     @contextmanager
     def client(key):yield fake
-    monkeypatch.setattr(worker,'read_dedicated_key',lambda:'synthetic-only')
     monkeypatch.setattr(worker,'create_client',client)
     monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps({'action':'run','model':'gpt-6-astra','prompt':'offline'})+'\n'))
     worker.main()
@@ -271,3 +381,82 @@ def test_real_worker_emits_filtered_diagnostics_not_exception_body(monkeypatch,c
     assert message['outcome']=='not_started'
     assert message['diagnostics']=={'status_code':400,'code':'invalid_value','param':'environment.network.access','request_id':'req_'+'b'*32}
     assert 'sk-proj' not in output and 'private task' not in output
+
+
+def approval_client(request=None):
+    client = FakeClient(session_status='requires_action', saved_turn='in_progress')
+    client.required_actions = [{'type': 'computer_use_approval_request', 'turn_id': 't1', 'request_id': 'approval1',
+                                'request': request or {'type': 'browser_origin_access', 'origin': 'https://example.test', 'reason': 'Read requested site'}}]
+    return client
+
+
+@pytest.mark.parametrize('decision', ['approve', 'deny', 'cancel'])
+def test_current_site_response_is_scoped_to_original_request(decision):
+    client = approval_client()
+    result = runtime.submit_browser_response(client, 'sess_test', 't1', 'approval1', {'type': 'browser_origin_access', 'decision': decision})
+    assert result['accepted'] is True and len(client.submitted) == 1
+    assert client.submitted[0]['events'][0] == {'type': 'agent.session.input.computer_use_approval_request_result',
+        'request_id': 'approval1', 'response': {'type': 'browser_origin_access', 'decision': decision}}
+
+
+@pytest.mark.parametrize('change', ['wrong_turn', 'old_id', 'completed', 'consumed', 'widen_origin'])
+def test_stale_or_widened_origin_response_is_rejected(change):
+    client = approval_client(); turn_id, request_id = 't1', 'approval1'
+    response = {'type': 'browser_origin_access', 'decision': 'approve'}
+    if change == 'wrong_turn': turn_id = 'old'
+    elif change == 'old_id': request_id = 'old'
+    elif change == 'completed': client.session_status = 'idle'
+    elif change == 'consumed': client.required_actions = []
+    elif change == 'widen_origin': response['origin'] = 'https://other.example'
+    with pytest.raises(ToolConfigurationError): runtime.submit_browser_response(client, 'sess_test', turn_id, request_id, response)
+    assert not client.submitted
+
+
+@pytest.mark.parametrize('fields', [[{'field_id': 'other', 'value': 'synthetic'}], [],
+                                  [{'field_id': 'password', 'value': 'one'}, {'field_id': 'password', 'value': 'two'}]])
+def test_login_only_accepts_current_required_fields(fields):
+    client = approval_client({'type': 'browser_authentication', 'credential_origin': 'https://example.test',
+                              'fields': [{'id': 'password', 'required': True}]})
+    with pytest.raises(ToolConfigurationError):
+        runtime.submit_browser_response(client, 'sess_test', 't1', 'approval1', {'type': 'browser_authentication', 'action': 'submit', 'fields': fields})
+    assert not client.submitted
+
+
+def test_login_cancel_contains_no_fields_or_credentials():
+    client = approval_client({'type': 'browser_authentication', 'credential_origin': 'https://example.test', 'fields': []})
+    response = {'type': 'browser_authentication', 'action': 'cancel'}
+    assert runtime.submit_browser_response(client, 'sess_test', 't1', 'approval1', response)['accepted']
+    assert client.submitted[0]['events'][0]['response'] == response
+
+
+def test_all_artifacts_download_with_duplicate_names_and_individual_failure(tmp_path):
+    client = FakeClient()
+    client.saved_artifacts = FakePages([
+        [{'id': 'a' + str(n), 'path': '../../same.txt', 'turn_id': 't1'} for n in range(20)],
+        [{'id': 'a' + str(n), 'path': '../../same.txt', 'turn_id': 't1'} for n in range(20, 35)],
+    ])
+    class Content:
+        def __init__(self, identifier): self.identifier = identifier
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def iter_bytes(self):
+            if self.identifier == 'a1':
+                yield b'partial'
+                raise OSError('synthetic failure with private details')
+            if self.identifier == 'a0':
+                # The former 10MiB cap must not silently drop an output.
+                for _ in range(176): yield b'x' * 65536
+            else: yield b'whole artifact'
+    client.beta.agents.sessions.artifacts.with_streaming_response = SimpleNamespace(content=lambda identifier, **kw: Content(identifier))
+    result = runtime.download_artifacts(client, 'sess_test')
+    assert len(result) == 35 and client.saved_artifacts.visited == [0, 1]
+    assert result[0]['size'] > 10 * 1024 * 1024 and result[0]['status'] == 'ready'
+    assert result[1]['status'] == 'failed' and 'path' not in result[1]
+    assert all(item['status'] == 'ready' for item in result[2:])
+    assert len({item['path'] for item in result if item['status'] == 'ready'}) == 34
+    assert all(item['name'] == 'same.txt' and item['turn_id'] == 't1' for item in result)
+    assert 'private details' not in result[1]['error']
+    # Clean temporary downloaded fixtures after inspecting real bytes.
+    import shutil
+    for folder in {str(Path(item['path']).parents[1]) for item in result if item['status'] == 'ready'}:
+        shutil.rmtree(folder)

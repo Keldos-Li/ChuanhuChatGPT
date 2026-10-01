@@ -1,8 +1,14 @@
-"""JSON-lines bridge for the main-chat model's dedicated subprocess. No core imports."""
+"""JSON-lines worker using the main application's interpreter and configuration."""
 import json
-import sys
 import re
-from runtime import AgentError, create_client, read_dedicated_key, run_task, inspect_saved, cancel_session, download_artifacts, find_uncertain_session
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from optional.agents.connection import AgentConnectionError
+from optional.agents.tools import ToolConfigurationError
+from runtime import (AgentError, create_client, run_task, inspect_saved, recover_stream,
+                     cancel_session, download_artifacts, find_uncertain_session, update_settings,
+                     submit_browser_response, safe_request_error)
 
 
 def emit(kind, **data):
@@ -10,63 +16,56 @@ def emit(kind, **data):
 
 
 def main():
-    state = None
-    action = None
+    state, action = None, None
     try:
-        command = json.loads(sys.stdin.readline(100000))
+        command = json.loads(sys.stdin.readline())
         action = command.get('action')
-        if action == 'capabilities':
-            import openai
-            with create_client('offline-check') as client:
-                emit('capabilities', sdk_version=openai.__version__, available=hasattr(client.beta, 'agents'))
-            return
-        if action not in ('run', 'inspect', 'cancel', 'download', 'delete', 'recover_unknown'):
-            raise AgentError('Unknown worker action.')
+        allowed = {'run', 'inspect', 'recover', 'recover_unknown', 'cancel', 'download', 'update', 'browser_response', 'capabilities', 'title'}
+        if action not in allowed: raise AgentError('未知 Agent 操作')
         session_id = command.get('session_id')
-        if session_id and not re.fullmatch(r'sess_[A-Za-z0-9_-]{1,150}', session_id):
-            raise AgentError('Invalid session identifier.')
-        if action not in ('run', 'recover_unknown') and not session_id:
-            raise AgentError('No session to manage.')
-        with create_client(read_dedicated_key()) as client:
-            if action == 'run':
-                def progress(value):
-                    emit('progress', session_id=value.session_id, turn_id=value.turn_id,
-                         outcome=value.outcome, progress=value.progress, text=value.text,
-                         baseline_turn_ids=sorted(value.ignored_turn_ids), submission_started=value.submission_started)
+        if session_id and not re.fullmatch(r'sess_[A-Za-z0-9_-]+', session_id): raise AgentError('无效会话标识')
+        if action not in ('run', 'recover_unknown', 'capabilities', 'title') and not session_id: raise AgentError('当前没有可管理的会话')
+        with create_client(command.get('connection')) as client:
+            if action == 'capabilities':
+                import openai
+                emit('result', sdk_version=openai.__version__, available=hasattr(client.beta, 'agents'))
+                return
+            def progress(value):
+                nonlocal state
+                state = value
+                emit('progress', **value.snapshot())
+            if action == 'title':
+                result = client.chat.completions.create(model=command['model'], messages=[
+                    {'role': 'system', 'content': 'Write a short title for this conversation. Return only the title.'},
+                    {'role': 'user', 'content': json.dumps(command.get('history', []), ensure_ascii=False)}])
+                emit('result', title=result.choices[0].message.content or '')
+            elif action == 'run':
                 state = run_task(client, command.get('prompt'), command.get('model'), session_id=session_id,
-                                 allow_text_tool=command.get('allow_text_tool') is True, run_id=command.get('run_id'), on_progress=progress, instructions=command.get('instructions'))
-                emit('result', session_id=state.session_id, turn_id=state.turn_id, outcome=state.outcome, text=state.text)
-            elif action == 'recover_unknown':
-                session_id, turn_id = find_uncertain_session(client, command.get('run_id'))
-                result = inspect_saved(client, session_id, turn_id, baseline_turn_ids=[], submission_started=True)
-                emit('result', session_id=session_id, **result)
+                                 run_id=command.get('run_id'), on_progress=progress, instructions=command.get('instructions'),
+                                 reasoning=command.get('reasoning'), tool_settings=command.get('tool_settings'),
+                                 history_reference=command.get('history_reference'))
+                emit('result', **state.snapshot())
+            elif action in ('recover', 'recover_unknown'):
+                turn_id = command.get('turn_id')
+                if action == 'recover_unknown': session_id, turn_id = find_uncertain_session(client, command.get('run_id'))
+                state = recover_stream(client, session_id, turn_id, baseline_turn_ids=command.get('baseline_turn_ids'),
+                       submission_started=command.get('submission_started') is True, tool_settings=command.get('tool_settings'), on_progress=progress)
+                emit('result', **state.snapshot())
             elif action == 'inspect':
-                result = inspect_saved(client, session_id, command.get('turn_id'), command.get('baseline_turn_ids'), command.get('submission_started') is True)
+                emit('result', **inspect_saved(client, session_id, command.get('turn_id'), command.get('baseline_turn_ids'), command.get('submission_started') is True))
+            elif action == 'cancel': emit('result', session_id=session_id, turn_id=command.get('turn_id'), **cancel_session(client, session_id, command.get('turn_id')))
+            elif action == 'download': emit('result', session_id=session_id, artifacts=download_artifacts(client, session_id, artifact_ids=command.get('artifact_ids')))
+            elif action == 'update': emit('result', session_id=session_id, settings=update_settings(client, session_id, command.get('model'), command.get('reasoning')))
+            elif action == 'browser_response':
+                # Never echo submitted fields, including in errors or diagnostics.
+                result = submit_browser_response(client, session_id, command.get('turn_id'), command.get('request_id'), command.get('response'))
                 emit('result', session_id=session_id, **result)
-            elif action == 'cancel':
-                cancel_session(client, session_id)
-                emit('result', session_id=session_id, outcome='cancel_requested', text='Cancellation submitted; inspect to confirm the target turn stopped.')
-            elif action == 'download':
-                emit('result', session_id=session_id, files=download_artifacts(client, session_id))
-            elif action == 'delete':
-                session = client.beta.agents.sessions.retrieve(session_id)
-                if session.status != 'idle':
-                    raise AgentError('Cancel and inspect an active session before deleting it.')
-                client.beta.agents.sessions.delete(session_id)
-                emit('result', outcome='deleted')
-    except AgentError as error:
-        snapshot = error.state or state
-        emit('error', message=str(error), diagnostics=error.diagnostics, session_id=snapshot.session_id if snapshot else None,
-             turn_id=snapshot.turn_id if snapshot else None, outcome=snapshot.outcome if snapshot else ('not_started' if action == 'run' else 'incomplete'),
-             baseline_turn_ids=sorted(snapshot.ignored_turn_ids) if snapshot else None,
-             submission_started=snapshot.submission_started if snapshot else False)
+                command.pop('response', None)
     except Exception as error:
-        # Never surface exception bodies, request headers, argument values, or
-        # SDK logs to the host process/browser.
-        from runtime import safe_request_error
-        sanitized = safe_request_error(error)
-        emit('error', outcome=('not_started' if action == 'run' else 'incomplete') if state is None else state.outcome,
-             message=str(sanitized), diagnostics=sanitized.diagnostics)
+        snapshot = getattr(error, 'state', None) or state
+        sanitized = error if isinstance(error, (AgentError, AgentConnectionError, ToolConfigurationError)) else safe_request_error(error)
+        emit('error', message=str(sanitized), diagnostics=getattr(sanitized, 'diagnostics', {}),
+             **(snapshot.snapshot() if snapshot else {'outcome': 'not_started' if action == 'run' else 'incomplete'}))
 
-if __name__ == '__main__':
-    main()
+
+if __name__ == '__main__': main()

@@ -1,21 +1,22 @@
-"""Isolated, network-disabled verification against the installed SDK's types."""
+"""Network-free payload verification against the single project SDK's types."""
 import collections.abc
 import json
 import socket
 import sys
 import types
-from typing import Any, Literal, Required, NotRequired, Union, get_args, get_origin, get_type_hints
-socket.socket.connect=lambda *a,**k: (_ for _ in ()).throw(AssertionError('Network forbidden in contract test'))
+from typing import Any, Annotated, Literal, Required, NotRequired, Union, get_args, get_origin, get_type_hints
 import openai
 from openai._utils import maybe_transform
 from openai.types.beta.agents.session_create_params import SessionCreateParamsStreaming
+from openai.types.beta.agents.session_update_params import SessionUpdateParams
+from openai.types.beta.agents.sessions.event_create_params import EventCreateParams
 
 
 def validate(value, hint, path='payload'):
     origin=get_origin(hint)
     args=get_args(hint)
     if hint in (Any, object):return
-    if origin in (Required,NotRequired):return validate(value,args[0],path)
+    if origin in (Required,NotRequired,Annotated):return validate(value,args[0],path)
     if origin in (Union,types.UnionType):
         for choice in args:
             try:
@@ -54,17 +55,18 @@ def validate(value, hint, path='payload'):
     assert type(value) is hint,path+': incorrect primitive type'
 
 
-def check(payload):
-    assert openai.__version__=='3.13.0','Contract test requires the pinned SDK'
-    validate(payload,SessionCreateParamsStreaming)
-    assert payload.get('agent_id') or payload.get('agent',{}).get('model'),'Inline agent requires model'
+def check(payload, kind='create'):
+    assert openai.__version__=='3.22.0','Contract test requires the pinned SDK'
+    hint = {'create':SessionCreateParamsStreaming, 'update':SessionUpdateParams, 'events':EventCreateParams}[kind]
+    validate(payload,hint)
+    if kind == 'create':
+        assert payload.get('agent_id') or payload.get('agent',{}).get('model'),'Inline agent requires model'
     metadata=payload.get('metadata') or {}
     assert len(metadata)<=16 and all(len(key)<=64 and len(value)<=512 for key,value in metadata.items()),'SDK metadata bounds'
-    wire=maybe_transform(payload,SessionCreateParamsStreaming)
-    validate(wire,SessionCreateParamsStreaming)
-    assert wire['environment']['network']['access']=='disabled'
-    assert wire['agent']['multi_agent']['enabled'] is False
+    wire=maybe_transform(payload,hint)
+    validate(wire,hint)
     return {'sdk_version':openai.__version__,'serialized':wire}
 
 if __name__=='__main__':
+    socket.socket.connect=lambda *a,**k: (_ for _ in ()).throw(AssertionError('Network forbidden in contract test'))
     print(json.dumps(check(json.load(sys.stdin)),ensure_ascii=False))
