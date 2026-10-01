@@ -86,7 +86,7 @@ def test_payload_isolated_hosted_no_network_no_subagents_no_legacy_tools():
     result=runtime.run_task(client,'test','explicit-model')
     assert result.text=='result'
     payload=client.payloads[0]
-    assert payload['environment']=={'type':'openai_hosted','network':{'mode':'disabled'}}
+    assert payload['environment']=={'type':'openai_hosted','network':{'access':'disabled'}}
     assert payload['agent']['tools']==[]
     assert payload['agent']['multi_agent']=={'enabled':False}
     assert payload['agent']['model']=='explicit-model'
@@ -211,3 +211,63 @@ def test_real_worker_preflight_failure_not_started(failure,monkeypatch,capsys):
     worker.main()
     message=json.loads(capsys.readouterr().out)
     assert message['type']=='error' and message['outcome']=='not_started' and message['session_id'] is None
+
+
+def test_safe_error_preserves_allowlisted_diagnostics_without_body_or_message():
+    class Failure(Exception):
+        status_code=400;code='invalid_value';param='environment.network.access';request_id='req_'+'a'*32
+        @property
+        def body(self):raise AssertionError('Body must never be inspected')
+        @property
+        def response(self):raise AssertionError('Headers must never be inspected')
+    error=runtime.safe_request_error(Failure('sk-proj-do-not-display private prompt'))
+    assert error.diagnostics=={'status_code':400,'code':'invalid_value','param':'environment.network.access','request_id':'req_'+'a'*32}
+    assert 'environment.network.access' in str(error) and 'req_'+'a'*32 in str(error)
+    assert 'sk-proj' not in str(error) and 'private prompt' not in str(error)
+
+
+@pytest.mark.parametrize('value',['sk-proj-secret-value','Bearer credential-value','Authorization: secret',
+    'https://private.example/key','private prompt','invalid_value secret', 'x'*10000,
+    'req_'+'a'*32+'secret','environment.network.access\nsecret','环境.秘密'])
+def test_untrusted_diagnostic_values_are_dropped_not_truncated(value):
+    error=runtime.safe_request_error(SimpleNamespace(status_code=400,code=value,param=value,request_id=value))
+    assert error.diagnostics=={'status_code':400} and value not in str(error)
+
+
+def test_error_metadata_accessors_cannot_leak_exception_text():
+    class Failure(Exception):
+        status_code=400
+        @property
+        def code(self):raise RuntimeError('secret key must not escape')
+    error=runtime.safe_request_error(Failure('private message'))
+    assert error.diagnostics=={'status_code':400} and 'secret' not in str(error)
+
+
+def test_manual_agent_error_diagnostics_are_filtered():
+    error=runtime.AgentError('Safe fixed message',diagnostics={'code':'sk-proj-secret','param':'input',
+                            'request_id':'Authorization: secret','status_code':'400 secret','body':'secret'})
+    assert error.diagnostics=={'param':'input'}
+
+
+def test_real_worker_emits_filtered_diagnostics_not_exception_body(monkeypatch,capsys):
+    import io,json
+    from contextlib import contextmanager
+    monkeypatch.setitem(sys.modules,'runtime',runtime)
+    spec=importlib.util.spec_from_file_location('worker_error_diagnostics',ROOT/'optional/agents/worker.py')
+    worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+    class Failure(Exception):
+        status_code=400;code='invalid_value';param='environment.network.access';request_id='req_'+'b'*32
+    fake=FakeClient([])
+    def fail(**kwargs):raise Failure('sk-proj-secret-value private task; never surface this')
+    fake.beta.agents.sessions.create=fail
+    @contextmanager
+    def client(key):yield fake
+    monkeypatch.setattr(worker,'read_dedicated_key',lambda:'synthetic-only')
+    monkeypatch.setattr(worker,'create_client',client)
+    monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps({'action':'run','model':'gpt-6-astra','prompt':'offline'})+'\n'))
+    worker.main()
+    output=capsys.readouterr().out
+    message=json.loads(output.splitlines()[-1])
+    assert message['outcome']=='not_started'
+    assert message['diagnostics']=={'status_code':400,'code':'invalid_value','param':'environment.network.access','request_id':'req_'+'b'*32}
+    assert 'sk-proj' not in output and 'private task' not in output

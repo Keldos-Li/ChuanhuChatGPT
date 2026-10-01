@@ -17,9 +17,10 @@ KEY_NAME = 'CHUANHU_AGENT_API_KEY'
 
 
 class AgentError(RuntimeError):
-    def __init__(self, message, state=None):
+    def __init__(self, message, state=None, diagnostics=None):
         super().__init__(message)
         self.state = state
+        self.diagnostics = _safe_diagnostics(diagnostics or {})
 
 
 def read_dedicated_key(path=None):
@@ -124,8 +125,44 @@ class TurnState:
             raise AgentError('Agents turn ' + self.outcome + '; no fallback request was made.', self)
 
 
+ERROR_CODES = frozenset({'invalid_request_error', 'invalid_value', 'invalid_type',
+    'missing_required_parameter', 'unknown_parameter', 'unsupported_parameter',
+    'unsupported_value', 'invalid_api_key', 'model_not_found', 'insufficient_quota',
+    'rate_limit_exceeded', 'permission_denied', 'server_error', 'context_length_exceeded'})
+ERROR_PARAMS = frozenset({'agent', 'agent_id', 'agent.model', 'agent.instructions',
+    'agent.reasoning', 'agent.reasoning.effort', 'agent.reasoning.summary',
+    'agent.multi_agent', 'agent.multi_agent.enabled', 'agent.multi_agent.max_concurrent_subagents',
+    'agent.tools', 'agent.text', 'agent.service_tier', 'environment', 'environment.type',
+    'environment.network', 'environment.network.access', 'environment.network.mode', 'environment.network.allowed_domains',
+    'environment.environment_template_id', 'input', 'stream', 'metadata', 'metadata.chuanhu_run_id', 'vault_ids'})
+
+
+def _safe_diagnostics(values):
+    # Closed identifier allowlists; never truncate arbitrary text into an allowed
+    # value, inspect raw bodies/headers, or include SDK exception messages.
+    result = {}
+    status = values.get('status_code')
+    if type(status) is int and 100 <= status <= 599:
+        result['status_code'] = status
+    for key, allowed in (('code', ERROR_CODES), ('param', ERROR_PARAMS)):
+        value = values.get(key)
+        if type(value) is str and len(value) <= 80 and value in allowed:
+            result[key] = value
+    request_id = values.get('request_id')
+    if type(request_id) is str and len(request_id) == 36 and re.fullmatch(r'req_[a-f0-9]{32}', request_id):
+        result['request_id'] = request_id
+    return result
+
+
 def safe_request_error(error, state=None):
-    status = getattr(error, 'status_code', None)
+    def attribute(name):
+        try:
+            return getattr(error, name, None)
+        except Exception:
+            return None
+    diagnostics = _safe_diagnostics({key: attribute(key)
+                                    for key in ('status_code', 'code', 'param', 'request_id')})
+    status = diagnostics.get('status_code')
     if status == 401:
         message = 'OpenAI rejected the dedicated key (401); check the key and project.'
     elif status == 403:
@@ -134,7 +171,10 @@ def safe_request_error(error, state=None):
         message = f'Official Agents request failed (HTTP {status}); no retry or provider fallback was made.'
     else:
         message = 'Official Agents connection failed or timed out; inspect saved state before resubmitting.'
-    return AgentError(message, state)
+    details = '; '.join(f'{key}={value}' for key, value in diagnostics.items() if key != 'status_code')
+    if details:
+        message += ' [' + details + ']'
+    return AgentError(message, state, diagnostics=diagnostics)
 
 
 TEXT_TOOL = {'type': 'function', 'name': 'text_statistics',
@@ -207,7 +247,7 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
                 agent={'model': model, 'instructions': instructions or 'Perform only the requested task. Keep your final answer concise. Use files in /workspace for deliverables.',
                        'reasoning': {'effort': 'low'}, 'multi_agent': {'enabled': False},
                        'tools': [TEXT_TOOL] if allow_text_tool else []},
-                environment={'type': 'openai_hosted', 'network': {'mode': 'disabled'}},
+                environment={'type': 'openai_hosted', 'network': {'access': 'disabled'}},
                 input=prompt, stream=True, metadata={'chuanhu_run_id': run_id} if run_id else {},
             )
         with stream as events:

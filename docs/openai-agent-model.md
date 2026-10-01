@@ -29,7 +29,10 @@ an ignored `.env.agents` file at the repository root. Keep that file readable
 only by the server user. This code does not create keys or copy the application's
 ordinary provider key. Requests use the fixed official HTTPS endpoint, no
 redirects, no inherited proxy/endpoint/project/organization overrides, and no
-automatic SDK retries. The worker suppresses SDK exception bodies and stderr.
+automatic SDK retries. The worker suppresses SDK exception bodies and stderr. Error diagnostics retain
+only an integer HTTP status, closed allowlists of public error codes/parameter
+paths, and canonical bounded request IDs. Arbitrary messages, unknown identifiers,
+headers and raw bodies are never displayed or recorded.
 
 The model metadata entry in `modules/presets.py` selects the explicit hosted
 model ID (`gpt-6-astra` initially). Configure a model supported by your project.
@@ -107,6 +110,12 @@ or credentials and never calls a paid API. Main input `slow` starts a synthetic
 long task for cancellation testing. Unrelated history/training/settings actions
 are intentionally not wired in this preview.
 
+SDK contract tests use the separate pinned runtime, resolve generated required
+fields and verify real SDK serialization for the complete create payload, with
+network disabled. They cover both the default tool-free payload and the optional
+text tool, and reject the former `network.mode` spelling. Install the optional
+runtime first to run these tests; without it they are explicitly skipped.
+
 Tests cover isolated runtime events, real factory/send/retry/history behavior,
 request injection, switch concurrency, owner isolation, preflight failures,
 ambiguous/unknown turn recovery, pending cancellation and malicious imports.
@@ -114,6 +123,11 @@ Browser QA verifies main dropdown/send/progress/answer/file bubbles/follow-up,
 remote cancellation through the real Stop event chain, and continued conversation.
 The browser download automation stalled and reported failure, but a subsequent
 read-only check confirmed the downloaded 42-byte artifact matched the synthetic
-main-chat marker exactly. No repeat download was required. This change's
-verification uses no new paid API calls, and beta availability remains dependent
-on the deployed SDK/project.
+main-chat marker exactly. No repeat download was required. An explicitly authorized model-layer live check made one initial submission,
+received HTTP 400 (`not_started`), and stopped without a second input or retry.
+No session/turn ID or usage/cost data was returned. The former `network.mode`
+payload violated the pinned SDK contract (`network.access` is required); this is
+a high-probability cause, but the original structured server error was discarded
+and cannot prove its specific rejection reason. This correction is validated
+offline only; no live retest has been made. Beta/model availability and full
+production startup remain unverified.

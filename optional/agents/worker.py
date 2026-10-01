@@ -56,7 +56,7 @@ def main():
                 emit('result', outcome='deleted')
     except AgentError as error:
         snapshot = error.state or state
-        emit('error', message=str(error), session_id=snapshot.session_id if snapshot else None,
+        emit('error', message=str(error), diagnostics=error.diagnostics, session_id=snapshot.session_id if snapshot else None,
              turn_id=snapshot.turn_id if snapshot else None, outcome=snapshot.outcome if snapshot else ('not_started' if action == 'run' else 'incomplete'),
              baseline_turn_ids=sorted(snapshot.ignored_turn_ids) if snapshot else None,
              submission_started=snapshot.submission_started if snapshot else False)
@@ -64,7 +64,9 @@ def main():
         # Never surface exception bodies, request headers, argument values, or
         # SDK logs to the host process/browser.
         from runtime import safe_request_error
-        emit('error', outcome=('not_started' if action == 'run' else 'incomplete') if state is None else state.outcome, message=str(safe_request_error(error)))
+        sanitized = safe_request_error(error)
+        emit('error', outcome=('not_started' if action == 'run' else 'incomplete') if state is None else state.outcome,
+             message=str(sanitized), diagnostics=sanitized.diagnostics)
 
 if __name__ == '__main__':
     main()
