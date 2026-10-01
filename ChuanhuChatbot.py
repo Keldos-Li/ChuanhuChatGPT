@@ -5,7 +5,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
 )
 
-from modules.models.models import get_model
+from modules.models.models import get_model, change_model
 from modules.train_func import *
 from modules.repo import *
 from modules.webui import *
@@ -565,7 +565,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     # Chatbot
-    cancelBtn.click(interrupt, [current_model], [])
+    cancelBtn.click(interrupt, [current_model], [status_display], queue=False, concurrency_limit=None)
 
     user_input.submit(**transfer_input_args).then(**
                                                   chatgpt_predict_args).then(**end_outputing_args).then(**auto_name_chat_history_args)
@@ -642,8 +642,8 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     single_turn_checkbox.change(
         set_single_turn, [current_model, single_turn_checkbox], None, show_progress=False)
     use_streaming_checkbox.change(set_streaming, [current_model, use_streaming_checkbox], None, show_progress=False)
-    model_select_dropdown.change(get_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
-                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox], show_progress=True, api_name="get_model")
+    model_select_dropdown.input(change_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
+                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model")
     model_select_dropdown.change(toggle_like_btn_visibility, [model_select_dropdown], [
                                  like_dislike_area], show_progress=False)
     # model_select_dropdown.change(
@@ -795,7 +795,7 @@ if __name__ == "__main__":
         _allowed_paths.append(config.midjourney_temp_folder)
     demo.queue().launch(
         allowed_paths=_allowed_paths,
-        blocked_paths=["config.json", "files", "models", "lora", "modules", "history"],
+        blocked_paths=["config.json", ".env.agents", ".agents-runtime", "agent_data", "files", "models", "lora", "modules", "history"],
         server_name=server_name,
         server_port=server_port,
         share=share,

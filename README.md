@@ -187,3 +187,7 @@ python ChuanhuChatbot.py
 <a href="https://github.com/GaiZhenbiao/ChuanhuChatGPT/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=GaiZhenbiao/ChuanhuChatGPT" />
 </a>
+
+### OpenAI Agent 主聊天模型
+
+从原有模型下拉框选择 **OpenAI Agent**，使用主聊天框发送托管任务、查看进度与文件输出。可选运行环境、专用密钥和恢复行为见 [接入说明](docs/openai-agent-model.md)。

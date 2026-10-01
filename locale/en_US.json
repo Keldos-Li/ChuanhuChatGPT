@@ -240,6 +240,30 @@
         },
         "o1": {
             "description": "The o1 series of large language models are trained with reinforcement learning to perform complex reasoning. o1 models think before they answer, producing a long internal chain of thought before responding to the user."
+        },
+        "openai_agent": {
+            "description": "Official hosted Agent in the main chat. Sends the current input and explicitly configured Agent prompt; no automatic old-chat or local-file upload. Dedicated key and isolated SDK; sandbox code execution is billed. Retry reconciles without resending, Stop requests remote cancellation. Artifacts appear after the answer.",
+            "slogan": "Send a task here. Code and files run in an official hosted sandbox.",
+            "selection_notice": "Agent uses dedicated credentials. Send authorizes billed official sandbox execution. Earlier visible messages are not sent automatically.",
+            "runtime_missing": "Isolated Agents runtime is missing; see docs/agents.md.",
+            "invalid_response": "Invalid worker response; no resend. Use Retry to reconcile.",
+            "timeout": "Local wait timed out; the remote task does not stop automatically. Stop and retry to reconcile.",
+            "browser_required": "Agent requires a valid current browser session.",
+            "wrong_owner": "This Agent model belongs to another browser.",
+            "reconcile_first": "Agent outcome is unconfirmed. Stop or use Regenerate for read-only reconciliation first.",
+            "billing": "Agent sends are billed by the official API; this billing display makes no request.",
+            "dedicated_key": "Agent only uses CHUANHU_AGENT_API_KEY, never the ordinary chat key.",
+            "status": "Agent: {outcome} {detail}",
+            "already_finished": "The current task has ended.",
+            "cancel_pending": "Remote stop requested; await target confirmation. Cancellation remains pending until identifiers arrive.",
+            "invalid_artifacts": "Invalid artifact path or size; download rejected.",
+            "text_only": "Agent accepts text tasks of 1–20000 characters.",
+            "no_local_tools": "Agent does not read the knowledge base, attachments or web search. Turn off web search and clear attachments before sending a text task.",
+            "stale_input": "Ignored stale input; the current conversation is unchanged.",
+            "settings_locked": "The current Agent session model and prompt are fixed. Start a new chat to change them.",
+            "unsent": "Stopped before sending; no new task submitted.",
+            "retry_readonly": "Read-only reconciliation; no resend or remote rewind.",
+            "no_rewind": "Deleting local turns does not rewind the remote Agent. Start a new chat or reconcile its status."
         }
     },
     "msg": {
@@ -360,7 +384,8 @@
             "tokens_per_second": "Tokens per second：{token_generation_speed}",
             "tools_enabled": "Enabled tools: ",
             "total_cost": ", total cost: ",
-            "uploaded": "Uploaded"
+            "uploaded": "Uploaded",
+            "stop_requested": "Stop requested."
         },
         "train": {
             "failed": "Training failed: {error}",

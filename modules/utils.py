@@ -38,10 +38,15 @@ if TYPE_CHECKING:
         data: List[List[str | int | bool]]
 
 
-def predict(current_model, *args):
-    iter = current_model.predict(*args)
-    for i in iter:
-        yield i
+def predict(current_model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
+    if getattr(current_model, "is_hosted_agent", False):
+        current_model.bind_owner(request)
+    iterator = current_model.predict(inputs, chatbot, use_websearch, files, reply_language)
+    try:
+        yield from iterator
+    finally:
+        if hasattr(iterator, "close"):
+            iterator.close()
 
 
 def billing_info(current_model):
@@ -61,7 +66,7 @@ def delete_chat_history(current_model, *args):
 
 
 def interrupt(current_model, *args):
-    return current_model.interrupt(*args)
+    return current_model.interrupt(*args) or i18n("msg.status.stop_requested")
 
 
 def reset(current_model, *args):
