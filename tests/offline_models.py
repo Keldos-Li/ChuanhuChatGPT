@@ -17,6 +17,7 @@ import tempfile
 import time
 import traceback
 from types import ModuleType, SimpleNamespace
+from threading import RLock
 from uuid import uuid4
 import gradio as gr
 
@@ -72,7 +73,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     shared.state = SimpleNamespace(multi_api_key=False)
     sys.modules['modules.shared'] = shared
     helpers = dict(vars(presets), gr=gr, os=os, json=json, logging=logging, time=time,
-                   traceback=traceback, Enum=Enum, shared=shared,
+                   traceback=traceback, Enum=Enum, shared=shared, RLock=RLock, deepcopy=deepcopy,
                    HISTORY_DIR=str(history_dir), GRADIO_CACHE=str(history_dir/'cache'),
                    get_first_history_name=lambda user='':uuid4().hex+'.json',
                    new_auto_history_filename=lambda user='':uuid4().hex+'.json',

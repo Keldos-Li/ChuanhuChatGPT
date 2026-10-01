@@ -299,3 +299,93 @@ def test_stop_during_download_does_not_cancel_completed_turn(env,monkeypatch):
     monkeypatch.setattr(env.agents,'worker_messages',worker);send(env,model)
     assert model._state['outcome']=='completed'
     assert [c['action'] for c in calls]==['run','download']
+
+
+def test_ordinary_partial_switch_rejected_then_complete_history_roundtrip(env,monkeypatch):
+    complete(env,monkeypatch)
+    ordinary=select(env,name='GPT3.5 Turbo')
+    def stream():
+        yield 'ordinary partial'
+        yield 'ordinary completed'
+    ordinary.get_answer_stream_iter=stream
+    generator=ordinary.predict('ordinary task',[])
+    next(generator);next(generator);partial=next(generator)
+    assert partial[0][-1][1]=='ordinary partial'
+    assert ordinary.history==[{'role':'user','content':'ordinary task'}]
+    switched=env.factory.change_model('OpenAI Agent',None,None,None,None,None,'',ordinary,request())
+    assert switched[0] is ordinary and switched[8]['value']=='GPT3.5 Turbo'
+    assert ordinary._chat_running and not ordinary._chat_retired
+    list(generator)
+    assert ordinary.history[-1]=={'role':'assistant','content':'ordinary completed'}
+    agent=select(env,ordinary);send(env,agent,'agent task')
+    expected=[{'role':'user','content':'ordinary task'},{'role':'assistant','content':'ordinary completed'},
+              {'role':'user','content':'agent task'},{'role':'assistant','content':'Agent synthetic answer'}]
+    assert agent.history==expected
+    saved=json.loads((env.history_dir/agent.history_file_path).read_text())
+    assert saved['history']==expected
+    assert saved['chatbot']==[['ordinary task','ordinary completed'],['agent task','Agent synthetic answer']]
+    agent.load_chat_history(agent.history_file_path)
+    assert agent.history==expected and agent.chatbot==saved['chatbot']
+    imported=select(env,browser='browser-two');imported.load_chat_history(agent.history_file_path)
+    assert imported.history==expected and imported._state=={'outcome':'not_started'}
+
+
+@pytest.mark.parametrize('close_at',[0,2])
+def test_closed_ordinary_iterator_restores_complete_history_before_switch(env,monkeypatch,close_at):
+    complete(env,monkeypatch);ordinary=select(env,name='GPT3.5 Turbo')
+    send(env,ordinary,'completed task');previous=deepcopy(ordinary.history);display=deepcopy(ordinary.chatbot)
+    generator=ordinary.predict('interrupted task',deepcopy(display))
+    for _ in range(close_at+1):next(generator)
+    generator.close()
+    assert ordinary.history==previous and ordinary.chatbot==display and not ordinary._chat_running
+    agent=select(env,ordinary);assert agent.history==previous
+    send(env,agent,'agent task')
+    agent.load_chat_history(agent.history_file_path)
+    assert agent.history[-1]['content']=='Agent synthetic answer' and len(agent.history)==4
+
+
+def test_ordinary_switch_atomic_rejects_queued_old_predict(env,monkeypatch):
+    ordinary=select(env,name='GPT3.5 Turbo');send(env,ordinary)
+    constructor=env.agents.OpenAIAgentsClient
+    ready=threading.Event();release=threading.Event();errors=[];switched=[]
+    def blocked(*a,**k):
+        ready.set();assert release.wait(3);return constructor(*a,**k)
+    monkeypatch.setattr(env.agents,'OpenAIAgentsClient',blocked)
+    switch=threading.Thread(target=lambda:switched.append(select(env,ordinary)))
+    switch.start();assert ready.wait(3)
+    def queued():
+        try:list(ordinary.predict('late ordinary task',ordinary.chatbot))
+        except gr.Error as error:errors.append(error)
+    old_predict=threading.Thread(target=queued);old_predict.start();release.set()
+    switch.join(3);old_predict.join(3)
+    assert not switch.is_alive() and not old_predict.is_alive()
+    assert errors and switched[0] is not ordinary and ordinary._chat_retired
+    assert switched[0].history==ordinary.history and len(ordinary.history)==2
+
+
+def test_ordinary_stop_keeps_partial_pair_and_can_switch(env,monkeypatch):
+    complete(env,monkeypatch);ordinary=select(env,name='GPT3.5 Turbo')
+    def stream():
+        yield 'ordinary partial'
+        yield 'ordinary completed'
+    ordinary.get_answer_stream_iter=stream
+    generator=ordinary.predict('ordinary task',[])
+    next(generator);next(generator);next(generator)
+    ordinary.interrupt();list(generator)
+    assert ordinary.history[-1]['content']=='ordinary partial' and not ordinary._chat_running
+    agent=select(env,ordinary);send(env,agent,'agent task')
+    agent.load_chat_history(agent.history_file_path)
+    assert len(agent.history)==4 and agent.history[-1]['content']=='Agent synthetic answer'
+
+
+def test_ordinary_retry_reserves_before_rewind_and_close_restores_history(env,monkeypatch):
+    complete(env,monkeypatch);ordinary=select(env,name='GPT3.5 Turbo');send(env,ordinary)
+    previous=deepcopy(ordinary.history)
+    generator=ordinary.retry(deepcopy(ordinary.chatbot));next(generator)
+    assert ordinary._chat_running
+    assert select(env,ordinary) is ordinary
+    generator.close()
+    assert ordinary.history==previous and not ordinary._chat_running
+    ordinary.get_answer_stream_iter=lambda:iter(['ordinary regenerated'])
+    list(ordinary.retry(deepcopy(ordinary.chatbot)))
+    assert len(ordinary.history)==2 and ordinary.history[-1]['content']=='ordinary regenerated'

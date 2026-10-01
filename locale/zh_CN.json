@@ -385,7 +385,8 @@
             "tools_enabled": "启用的工具：",
             "total_cost": "，本次对话累计消耗了 ",
             "uploaded": "上传了",
-            "stop_requested": "已请求停止。"
+            "stop_requested": "已请求停止。",
+            "model_busy": "模型正在生成或已被切换，请等待完成后使用当前选中的模型。"
         },
         "train": {
             "failed": "训练失败，原因：{error}",

@@ -42,6 +42,10 @@ Ordinary sampling, single-turn and token controls do not configure this beta API
 
 - Existing local chat remains visible when switching models, but only the new
   submitted text and this Agent's explicit instructions are sent remotely.
+  Switching is refused while any current model is generating. The previous model
+  is atomically retired after a successful switch, so queued old sends cannot
+  overwrite the new chat. A closed ordinary-model iterator restores its last
+  completed local transcript before another model can adopt it.
 - Follow-ups use the same owned remote session. Local retrieval, web search,
   uploaded files, legacy plugin tools, provider credentials, billing requests and
   automatic chat-title requests are not sent to it.

@@ -385,7 +385,8 @@
             "tools_enabled": "Enabled tools: ",
             "total_cost": ", total cost: ",
             "uploaded": "Uploaded",
-            "stop_requested": "Stop requested."
+            "stop_requested": "Stop requested.",
+            "model_busy": "The model is generating or has been replaced. Wait for completion and use the currently selected model."
         },
         "train": {
             "failed": "Training failed: {error}",

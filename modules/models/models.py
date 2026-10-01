@@ -204,6 +204,14 @@ def get_model(model_name, lora_model_path=None, access_key=None, temperature=Non
                 original_model.bind_owner(request)
             original_model.prepare_model_switch()
             return _get_model(*arguments)
+    if original_model is not None:
+        with original_model._chat_lock:
+            if original_model._chat_running or original_model._chat_retired:
+                raise gr.Error(i18n('msg.status.model_busy'))
+            result = _get_model(*arguments)
+            if result[0] is not original_model:
+                original_model._chat_retired = True
+            return result
     return _get_model(*arguments)
 
 

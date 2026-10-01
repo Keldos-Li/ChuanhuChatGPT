@@ -9,10 +9,11 @@ import shutil
 import time
 import traceback
 from collections import deque
+from copy import deepcopy
 from enum import Enum
 from io import BytesIO
 from itertools import islice
-from threading import Condition, Thread
+from threading import Condition, RLock, Thread
 from typing import Any, Dict, List, Optional
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, TypeVar, Union
 from uuid import UUID
@@ -296,6 +297,9 @@ class BaseLLMModel:
         self.history_file_path = get_first_history_name(user)
         self.user_name = user
         self.chatbot = []
+        self._chat_lock = RLock()
+        self._chat_running = False
+        self._chat_retired = False
 
         self.default_single_turn = config["single_turn"]
         self.default_temperature = config["temperature"]
@@ -593,7 +597,30 @@ class BaseLLMModel:
             display_append = ""
         return limited_context, fake_inputs, display_append, real_inputs, chatbot
 
-    def predict(
+    def _run_chat(self, operation, *args, **kwargs):
+        with self._chat_lock:
+            if self._chat_running or self._chat_retired:
+                raise gr.Error(i18n('msg.status.model_busy'))
+            previous = deepcopy((self.history, self.all_token_counts, self.chatbot))
+            self._chat_running = True
+        finished = False
+        try:
+            yield from operation(*args, **kwargs)
+            finished = True
+        finally:
+            with self._chat_lock:
+                if not finished:
+                    # A closed iterator must not expose a half-written pair to
+                    # the next model. Keep the last completed local transcript.
+                    self.history, self.all_token_counts, self.chatbot = previous
+                self._chat_running = False
+
+    def predict(self, inputs, chatbot, use_websearch=False, files=None,
+                reply_language="中文", should_check_token_count=True):
+        yield from self._run_chat(self._predict, inputs, chatbot, use_websearch,
+                                 files, reply_language, should_check_token_count)
+
+    def _predict(
         self,
         inputs,
         chatbot,
@@ -738,6 +765,11 @@ class BaseLLMModel:
         self.auto_save(chatbot)
 
     def retry(
+        self, chatbot, use_websearch=False, files=None, reply_language="中文",
+    ):
+        yield from self._run_chat(self._retry, chatbot, use_websearch, files, reply_language)
+
+    def _retry(
         self,
         chatbot,
         use_websearch=False,
@@ -762,7 +794,7 @@ class BaseLLMModel:
             yield chatbot, f'{STANDARD_ERROR_MSG}{i18n("msg.error.empty_context")}'
             return
 
-        iter = self.predict(
+        iter = self._predict(
             inputs,
             chatbot,
             use_websearch=use_websearch,
