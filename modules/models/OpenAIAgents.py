@@ -366,6 +366,27 @@ class OpenAIAgentsClient(BaseLLMModel):
         if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
         yield from self._download(self._state.get('generation'), [artifact_id])
 
+    def _network_request(self, inputs):
+        commands = {'开网': True, '开启联网': True, '允许联网': True, '打开联网': True,
+                    '关网': False, '关闭联网': False, '禁用联网': False, '关闭云端联网': False}
+        normalized = inputs.strip().strip('。！!').removeprefix('请')
+        if normalized not in commands: return None
+        with self._lock:
+            if self._retired: raise gr.Error('聊天已切换，未修改旧会话设置')
+            self._assert_idle()
+            desired = commands[normalized]
+            effective = (self._session_settings or {}).get('tools', self._tool_settings)['network']
+            word = '开启' if desired else '关闭'
+            if self._state.get('session_id') and effective != desired:
+                self._pending_network = desired
+                self._notice = f'现有会话无法直接{word}云端执行环境联网。请选择“按新配置新建并继续”确认；只携带文字历史，原会话保持原设置。内置网页搜索单独配置'
+            elif not self._state.get('session_id'):
+                self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=desired))
+                self._notice = f'新会话的云端执行环境联网已设为{word}；请输入任务。内置网页搜索单独配置'
+            else:
+                self._notice = f'当前会话的云端执行环境联网已经{word}；内置网页搜索单独配置'
+            return deepcopy(self._display), self._status()
+
     def predict(self, inputs, chatbot, use_websearch=False, files=None, reply_language=None, should_check_token_count=True):
         if not self._owner: raise gr.Error('需要在当前登录会话中发送')
         if not isinstance(inputs, str) or not inputs.strip(): raise gr.Error('请输入文字任务')
@@ -373,26 +394,13 @@ class OpenAIAgentsClient(BaseLLMModel):
         if self._needs_sync:
             yield from self.reconnect()
             chatbot = self.chatbot
+        network_result = self._network_request(inputs)
+        if network_result is not None:
+            yield network_result
+            return
         with self._lock:
             if self._retired or (self._display and display_signature(chatbot) != display_signature(self._display)): raise gr.Error('聊天内容已变化，请在当前聊天中重新发送')
             self._assert_idle()
-            network_commands = {'开网': True, '开启联网': True, '允许联网': True, '打开联网': True,
-                                '关网': False, '关闭联网': False, '禁用联网': False, '关闭云端联网': False}
-            normalized = inputs.strip().strip('。！!').removeprefix('请')
-            if normalized in network_commands:
-                desired = network_commands[normalized]
-                effective = (self._session_settings or {}).get('tools', self._tool_settings)['network']
-                word = '开启' if desired else '关闭'
-                if self._state.get('session_id') and effective != desired:
-                    self._pending_network = desired
-                    self._notice = f'现有会话无法直接{word}云端执行环境联网。请选择“按新配置新建并继续”确认；只携带文字历史，原会话保持原设置。内置网页搜索单独配置'
-                elif not self._state.get('session_id'):
-                    self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=desired))
-                    self._notice = f'新会话的云端执行环境联网已设为{word}；请输入任务。内置网页搜索单独配置'
-                else:
-                    self._notice = f'当前会话的云端执行环境联网已经{word}；内置网页搜索单独配置'
-                yield deepcopy(self._display), self._status()
-                return
             reservation = (self._owner, self._state.get('session_id') or self._key()[1])
             with _bindings_lock:
                 if reservation in _session_locks or reservation in _cancel_sessions:
@@ -465,21 +473,25 @@ class OpenAIAgentsClient(BaseLLMModel):
             yield deepcopy(self._display), self._status()
 
     def reconnect(self):
+        empty_result = None
         with self._lock:
             if self._running or self._retired: raise gr.Error('当前连接仍在运行')
             if getattr(self, '_connection_mismatch', False): raise gr.Error(self._notice)
             session = self._state.get('session_id')
             if not session and self._state.get('outcome') != 'uncertain':
-                yield deepcopy(self._display), self._status()
-                return
-            generation = self._state.get('generation') or uuid4().hex
-            self._state['generation'] = generation
-            self._running = True
-            self._notice = ''
-            command = {'action': 'recover' if session else 'recover_unknown', 'session_id': session,
-                       'turn_id': self._state.get('turn_id'), 'run_id': generation,
-                       'baseline_turn_ids': self._state.get('baseline_turn_ids'), 'submission_started': self._state.get('submission_started') is True,
-                       'tool_settings': (self._session_settings or {}).get('tools', self._tool_settings)}
+                empty_result = (deepcopy(self._display), self._status())
+            else:
+                generation = self._state.get('generation') or uuid4().hex
+                self._state['generation'] = generation
+                self._running = True
+                self._notice = ''
+                command = {'action': 'recover' if session else 'recover_unknown', 'session_id': session,
+                           'turn_id': self._state.get('turn_id'), 'run_id': generation,
+                           'baseline_turn_ids': self._state.get('baseline_turn_ids'), 'submission_started': self._state.get('submission_started') is True,
+                           'tool_settings': (self._session_settings or {}).get('tools', self._tool_settings)}
+        if empty_result is not None:
+            yield empty_result
+            return
         try:
             yield deepcopy(self._display), '正在恢复历史'
             for message in self._worker(command):
