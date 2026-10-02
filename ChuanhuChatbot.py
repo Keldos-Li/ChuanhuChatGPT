@@ -127,20 +127,21 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                         json_label=i18n("ui.history.export_json"),
                         md_label=i18n("ui.history.export_markdown")
                     ), elem_id="chatbot-header-btn-bar")
-                with gr.Row():
-                    chatbot = gr.Chatbot(
-                        label="Chuanhu Chat",
-                        elem_id="chuanhu-chatbot",
-                        latex_delimiters=latex_delimiters_set,
-                        sanitize_html=False,
-                        # height=700,
-                        show_label=False,
-                        avatar_images=[config.user_avatar, config.bot_avatar],
-                        show_share_button=False,
-                        placeholder=setPlaceholder(model_name=MODELS[DEFAULT_MODEL]),
-                    )
-                agent_panel = AgentPanel()
-                agent_panel.output_components()
+                with gr.Column(elem_id="chatbot-content", min_width=0):
+                    with gr.Row(elem_id="chatbot-messages"):
+                        chatbot = gr.Chatbot(
+                            label="Chuanhu Chat",
+                            elem_id="chuanhu-chatbot",
+                            latex_delimiters=latex_delimiters_set,
+                            sanitize_html=False,
+                            show_label=False,
+                            avatar_images=[config.user_avatar, config.bot_avatar],
+                            show_share_button=False,
+                            placeholder=setPlaceholder(model_name=MODELS[DEFAULT_MODEL]),
+                        )
+                    with gr.Column(elem_id="model-output-panels", min_width=0, scale=0):
+                        agent_panel = AgentPanel()
+                        agent_panel.output_components()
                 with gr.Row(elem_id="chatbot-footer"):
                     with gr.Column(elem_id="chatbot-input-box"):
                         with gr.Row(elem_id="chatbot-input-row"):

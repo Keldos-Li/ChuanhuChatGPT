@@ -11,6 +11,7 @@ import importlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -73,7 +74,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     shared.API_HOST = 'api.openai.com'
     shared.state = SimpleNamespace(multi_api_key=False)
     sys.modules['modules.shared'] = shared
-    helpers = dict(vars(presets), capabilities=capabilities, require_capability=require_capability, model_lock=model_lock, reserve_submission=reserve_submission, consume_submission=consume_submission, gr=gr, os=os, json=json, logging=logging, time=time,
+    helpers = dict(vars(presets), capabilities=capabilities, require_capability=require_capability, model_lock=model_lock, reserve_submission=reserve_submission, consume_submission=consume_submission, gr=gr, os=os, re=re, json=json, logging=logging, time=time,
                    traceback=traceback, Enum=Enum, shared=shared, RLock=RLock, deepcopy=deepcopy,
                    HISTORY_DIR=str(history_dir), GRADIO_CACHE=str(history_dir/'cache'),
                    get_first_history_name=lambda user='':uuid4().hex+'.json',
@@ -87,7 +88,8 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
                    colorama=SimpleNamespace(Fore=SimpleNamespace(BLUE=''),Style=SimpleNamespace(RESET_ALL='')),
                    TOKEN_OFFSET=1000,REDUCE_TOKEN_FACTOR=.5, STANDARD_ERROR_MSG='Error: ',
                    NO_APIKEY_MSG='No key', NO_INPUT_MSG='No input', beautify_err_msg=lambda text:text)
-    definitions(root/'modules/utils.py', {'save_file','save_md_file'}, helpers)
+    definitions(root/'modules/utils.py', {'save_file','save_md_file','replace_special_symbols',
+                                        'init_history_list','get_history_list'}, helpers)
     base = ModuleType('modules.models.base_model')
     vars(base).update(helpers)
     base.__name__ = 'modules.models.base_model'

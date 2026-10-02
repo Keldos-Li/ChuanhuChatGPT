@@ -20,7 +20,7 @@ def _agent(model):
 class ArtifactPanel:
     """Output files independent from input attachments and text chat bubbles."""
     def __init__(self):
-        with gr.Group(visible=False, elem_id='model-output-files') as self.group:
+        with gr.Column(visible=False, elem_id='model-output-files', min_width=0, scale=0) as self.group:
             gr.Markdown('### 生成的文件')
             self.list = gr.Dataframe(headers=['文件', '类型', '大小', '状态'], datatype=['str'] * 4, interactive=False, wrap=True)
             self.files = gr.File(file_count='multiple', interactive=False, label='下载文件')
@@ -104,7 +104,7 @@ class AgentPanel:
 
     def output_components(self):
         self.artifacts = ArtifactPanel()
-        with gr.Group(visible=False, elem_id='agent-browser-requests') as self.browser_group:
+        with gr.Column(visible=False, elem_id='agent-browser-requests', min_width=0, scale=0) as self.browser_group:
             self.request_id = gr.Dropdown(label='当前网站请求', choices=[])
             self.browser_html = gr.HTML()
             with gr.Row():

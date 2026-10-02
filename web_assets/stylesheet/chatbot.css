@@ -182,8 +182,70 @@ hr.append-display {
     }
 }
 
-#chuanhu-chatbot {
-    height: calc(100dvh - 65px) !important;
+/* Header, conversation and composer share the available viewport height.
+   Output files and website requests must reserve space instead of being laid
+   out after a full-height chat and clipped by the app's overflow boundary. */
+#chatbot-area {
+    height: 100%;
+    min-height: 0;
+    gap: 0;
+}
+#chatbot-area > #chatbot-header,
+#chatbot-area > #chatbot-footer {
+    position: relative;
+    top: auto;
+    bottom: auto;
+    right: auto;
+    width: 100%;
+    flex: 0 0 auto;
+}
+#chatbot-content {
+    flex: 1 1 0;
+    min-height: 0;
+    gap: 0;
+    overflow: hidden;
+}
+#chatbot-messages {
+    flex: 1 1 0;
+    min-height: 0;
+}
+#model-output-panels {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 60%;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+#model-output-panels > .gradio-column {
+    flex: 0 0 auto;
+    padding: 12px 20px;
+    min-width: 0;
+}
+#agent-browser-form {
+    overflow-wrap: anywhere;
+}
+#agent-browser-form label {
+    display: block;
+    margin-block: 8px;
+}
+#agent-browser-form label[hidden] {
+    display: none;
+}
+#agent-browser-form input,
+#agent-browser-form select {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+}
+@container chatbot-area (width < 500px) {
+    #model-output-panels > .gradio-column {
+        padding-inline: 12px;
+    }
+}
+#chatbot-messages > #chuanhu-chatbot {
+    height: 100% !important;
+    min-height: 0;
     border-radius: 0;
 }
 #chuanhu-chatbot > .wrapper > .bubble-wrap {
@@ -192,8 +254,8 @@ hr.append-display {
     width: 100%;
     flex-direction: column;
     padding-inline: 20px;
-    padding-top: 72px;
-    padding-bottom: 180px;
+    padding-top: 16px;
+    padding-bottom: 16px;
 }
 #chuanhu-chatbot > .wrapper > .bubble-wrap .message-wrap {
     align-self: center;
