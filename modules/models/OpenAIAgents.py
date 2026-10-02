@@ -379,8 +379,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         for key in ('session_id', 'turn_id', 'baseline_turn_ids', 'submission_started'):
             if key in message and message[key] is not None: self._state[key] = message[key]
         if message.get('submission_started') is True:
-            if self._input_stager is not None and self._input_context:
-                self._input_stager.mark_submitted(self._input_context['input_ids'])
+            if self._input_stager is not None:
+                # Any turn can edit earlier sandbox files, including uploads
+                # whose own message was cancelled before submission.
+                self._input_stager.mark_submitted(self._installed_inputs)
             self._clear_input_selection()
             self._input_context = None
         outcome = message.get('outcome')
