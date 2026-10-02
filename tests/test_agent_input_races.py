@@ -64,10 +64,12 @@ def test_older_upload_response_cannot_remove_newer_added_file(env,tmp_path,monke
     captured=threading.Event();release=threading.Event()
     original=app.fns[fns['upload_files']].fn
     def delay_response(model,files,target,request:gr.Request):
-        result=original(model,files,target,request)
+        iterator=original(model,files,target,request)
+        result=next(iterator)
         if len(files)==1 and Path(str(files[0])).name=='one.txt':
             captured.set();assert release.wait(5)
-        return result
+        yield result
+        yield from iterator
     app.fns[fns['upload_files']].fn=delay_response
     async def exercise():
         req=gr.Request(session_hash='review')

@@ -187,13 +187,13 @@ hr.append-display {
 /* Header, conversation and composer share the available viewport height.
    Output files and website requests must reserve space instead of being laid
    out after a full-height chat and clipped by the app's overflow boundary. */
-#chatbot-area {
+#chatbot-area.agent-mode {
     height: 100%;
     min-height: 0;
     gap: 0;
 }
-#chatbot-area > #chatbot-header,
-#chatbot-area > #chatbot-footer {
+#chatbot-area.agent-mode > #chatbot-header,
+#chatbot-area.agent-mode > #chatbot-footer {
     position: relative;
     top: auto;
     bottom: auto;
@@ -201,13 +201,13 @@ hr.append-display {
     width: 100%;
     flex: 0 0 auto;
 }
-#chatbot-content {
+#chatbot-area.agent-mode #chatbot-content {
     flex: 1 1 0;
     min-height: 0;
     gap: 0;
     overflow: hidden;
 }
-#chatbot-messages {
+#chatbot-area.agent-mode #chatbot-messages {
     flex: 1 1 0;
     min-height: 0;
 }
@@ -262,12 +262,14 @@ hr.append-display {
 .model-file-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .model-file-name { font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
 #chuanhu-chatbot .model-file-name {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    display: flex;
+    white-space: nowrap;
+    min-width: 0;
     overflow: hidden;
 }
-#chuanhu-chatbot .model-file-content { gap: 0; }
+#chuanhu-chatbot .model-file-basename { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#chuanhu-chatbot .model-file-extension { flex: 0 0 auto; }
+#chuanhu-chatbot .model-file-content { gap: 0; flex: 1; }
 #chuanhu-chatbot .model-file-meta { font-size: 11px; line-height: 1.35; }
 .model-file-meta, .model-file-error, .model-file-feedback {
     font-size: 0.875em; color: var(--body-text-color-subdued); overflow-wrap: anywhere;
@@ -323,8 +325,7 @@ hr.append-display {
 }
 #agent-tool-settings .switch-checkbox input[type="checkbox"]:disabled { opacity: 0.5; cursor: not-allowed; }
 #chatbot-messages > #chuanhu-chatbot {
-    height: 100% !important;
-    min-height: 0;
+    height: calc(100dvh - 65px) !important;
     border-radius: 0;
 }
 #chuanhu-chatbot > .wrapper > .bubble-wrap {
@@ -333,8 +334,8 @@ hr.append-display {
     width: 100%;
     flex-direction: column;
     padding-inline: 20px;
-    padding-top: 16px;
-    padding-bottom: 16px;
+    padding-top: 72px;
+    padding-bottom: 180px;
 }
 #chuanhu-chatbot > .wrapper > .bubble-wrap .message-wrap {
     align-self: center;
@@ -612,3 +613,6 @@ img.avatar-image {
         display: none;
     }
 }
+
+#chatbot-area.agent-mode #chuanhu-chatbot { height: 100% !important; min-height: 0; }
+#chatbot-area.agent-mode #chuanhu-chatbot .bubble-wrap { padding-top: 16px; padding-bottom: 16px; }

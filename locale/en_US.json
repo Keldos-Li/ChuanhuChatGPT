@@ -242,8 +242,8 @@
             "description": "The o1 series of large language models are trained with reinforcement learning to perform complex reasoning. o1 models think before they answer, producing a long internal chain of thought before responding to the user."
         },
         "openai_agent": {
-            "description": "Use Agent in the main chat for ongoing conversations, progress, website permissions and separate output files. Reuses the existing OpenAI connection by default. Bound sessions restore authoritative cloud history; ordinary history is quoted in a new session. Model and reasoning changes apply to the next turn; environment, tools and instructions require an explicit new session.",
-            "slogan": "Send a task here. Progress, website permissions and generated files appear in this conversation.",
+            "description": "Chat with OpenAI Agent to work with files and complete tasks.",
+            "slogan": "Give Agent a task. Work through it together.",
             "selection_notice": "Agent reuses the existing OpenAI connection. Ordinary history is quoted as context; bound Agent conversations restore cloud state before continuing.",
             "invalid_response": "The connection response could not be read. No task was resent; reconnect the original session to confirm its state."
         }

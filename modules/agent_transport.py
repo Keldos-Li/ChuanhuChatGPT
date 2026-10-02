@@ -34,6 +34,7 @@ def worker_messages(command, connection=None):
     this local observer. The connection snapshot is not logged or persisted.
     """
     command = dict(command)
+    observer_cancelled = command.pop('_observe_cancel', None)
     try:
         connection = connection if connection is not None else command.get('connection')
         if connection is None:
@@ -82,7 +83,11 @@ def worker_messages(command, connection=None):
         process.stdin.write(json.dumps(command, ensure_ascii=False) + '\n')
         process.stdin.close()
         while True:
-            line = messages.get()
+            if observer_cancelled and observer_cancelled(): return
+            try:
+                line = messages.get(timeout=0.5)
+            except queue.Empty:
+                continue
             if line is None:
                 if not terminal_received:
                     yield {'type': 'error', **snapshot, 'outcome': 'incomplete',

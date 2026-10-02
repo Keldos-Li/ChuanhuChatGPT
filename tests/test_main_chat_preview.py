@@ -17,13 +17,26 @@ async def exercise():
     from gradio.state_holder import SessionState
     from main_chat_preview import build
     app = build()
+    import inspect
+    config=app.get_config_file()
+    generators={i:fn.fn.__name__ for i,fn in enumerate(app.fns) if fn.fn and inspect.isgeneratorfunction(fn.fn)}
+    for index,name in generators.items():
+        assert config['dependencies'][index]['queue'] is not False, (index,name)
+    for name in ('upload_files','remove_files','login','observe_history'):
+        matches=[i for i,n in generators.items() if n==name]
+        assert matches and all(config['dependencies'][i]['queue'] is True for i in matches)
+        assert all(app.fns[i].concurrency_limit is None for i in matches)
+    stop=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='interrupt')
+    assert not inspect.isgeneratorfunction(app.fns[stop].fn) and config['dependencies'][stop]['queue'] is False
+    follow_index,follow=next((i,dep) for i,dep in enumerate(config['dependencies']) if dep['trigger_after']==stop)
+    assert follow['queue'] is False and app.fns[follow_index].fn.__name__=='emit_stop_error'
     from modules.presets import i18n
     state = SessionState(app)
     functions = {fn.fn.__name__: i for i, fn in enumerate(app.fns) if fn.fn}
     request = gr.Request(session_hash='preview-history')
     chat_frames = []
 
-    async def call(name, inputs):
+    async def call(name, inputs, expected_error=None):
         index = functions[name]
         if name=='transfer_input' and len(inputs)==2:
             current=state[app.fns[functions['initial']].outputs[0]._id]
@@ -52,6 +65,12 @@ async def exercise():
             if not result['is_generating']: break
             result = await app.process_api(index, inputs, state=state, request=request,
                                            iterator=result['iterator'])
+        if name in ('predict_with_ui','observe_history','upload_files','remove_files','login','retry_file'):
+            try:
+                await app.process_api(functions['emit_ui_error'],[None],state=state,request=request)
+            except gr.Error as error:
+                assert expected_error and expected_error in str(error), str(error)
+                assert not current._running and not getattr(current,'_pending_send',None)
         return result['data']
 
     try:
@@ -79,9 +98,14 @@ async def exercise():
 
         await call('change_model', ['OpenAI Agent', None, '', 1, 1, 'QA', '', None])
         model = state[current_id]
+        index = functions['observe_history']
+        inactive = await app.process_api(index, [None], state=state, request=request, session_hash='inactive-observer', event_id='inactive-observer')
+        assert inactive['is_generating'] and all(value == gr.update() for value in inactive['data'])
+        inactive = await app.process_api(index, [None], state=state, request=request, iterator=inactive['iterator'], session_hash='inactive-observer', event_id='inactive-observer')
+        assert not inactive['is_generating'] and all(value == gr.update() for value in inactive['data'])
         await call('reset', [None, False])
         await call('transfer_input', ['files', None])
-        await call('predict_with_ui', [None, None, model.chatbot, False, [], 'English'])
+        await call('predict_with_ui', [None, None, model.chatbot, False, [], 'English'], expected_error='模拟单文件下载失败')
         await call('auto_name_chat_history', [None, i18n('naming.by_first_question'), None, False])
         saved = model.history_file_path
         session = model._state['session_id']
@@ -90,7 +114,7 @@ async def exercise():
         assert not model._state.get('session_id') and not model._artifacts
         await call('load_chat_history', [None, saved.removesuffix('.json')])
         assert model._state['session_id'] == session
-        await call('reconnect', [None])
+        await call('observe_history', [None])
         assert len(model._artifacts) == 3
         assert model.chatbot[-1][0] == 'files'
         # The browser's actual new-settings flow must reconcile the provisional
@@ -109,7 +133,7 @@ async def exercise():
         assert ordinary.chatbot == model.chatbot
         assert len(ordinary.chatbot) == 1 and ordinary.chatbot[0][1]
         await call('change_model', ['OpenAI Agent', None, '', 1, 1, 'QA', '', None])
-        await call('reconnect',[None])
+        await call('observe_history',[None])
         await call('reset',[None,False])
         from uuid import uuid4
         upload=Path(gr.utils.get_upload_folder())/('qa-'+uuid4().hex)

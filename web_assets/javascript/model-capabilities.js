@@ -13,6 +13,10 @@
         const marker = app.querySelector('#model-capability-state [data-model-capabilities]');
         if (!marker) return;
         try { snapshot = JSON.parse(marker.dataset.modelCapabilities); } catch (_) { return; }
+        const chatArea = app.querySelector("#chatbot-area");
+        if (chatArea && chatArea.classList.contains("agent-mode") !== (snapshot.agent_tools === true)) {
+            chatArea.classList.toggle("agent-mode", snapshot.agent_tools === true);
+        }
         const mapping = {
             regenerate: '.regenerate-btn', history_delete: '.delete-latest-btn',
             history_edit: '.edit-message-btn', history_rollback: '.rollback-btn',

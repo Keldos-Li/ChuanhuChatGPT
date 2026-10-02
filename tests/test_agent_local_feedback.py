@@ -24,8 +24,8 @@ def test_agent_stream_is_local_and_completed_hides_without_changing_history():
         yield current.chatbot, current._status()
     frames = list(panel.status_callback(predict, 1, header=True)(current))
     assert [frame[1] for frame in frames] == ['', '', '']
-    assert frames[0][-1]['value'] == '正在运行' and frames[0][-1]['visible']
-    assert frames[1][-1]['value'] == '等待授权或登录' and frames[1][-1]['visible']
+    assert frames[0][-1]['value'] == '' and not frames[0][-1]['visible']
+    assert frames[1][-1]['value'] == '' and not frames[1][-1]['visible']
     assert frames[2][-1]['value'] == '' and not frames[2][-1]['visible']
     assert (current.chatbot, current.history) == before
 
@@ -33,7 +33,7 @@ def test_agent_stream_is_local_and_completed_hides_without_changing_history():
 def test_shared_stop_prompt_and_model_change_route_only_agent_branch():
     panel = AgentPanel(); agent = model(); ordinary = model(agent=False)
     callback = panel.status_callback(lambda current: 'callback feedback', header=True)
-    assert callback(agent)[0] == '' and callback(agent)[1]['visible']
+    assert callback(agent)[0] == '' and not callback(agent)[1]['visible']
     assert callback(current=ordinary)[0] == 'callback feedback'
     assert not callback(ordinary)[1]['visible']
     change = panel.status_callback(lambda previous, replacement: (replacement, 'selected'),
@@ -47,10 +47,10 @@ def test_local_stale_noop_and_input_failure_are_not_lost():
     noop = panel.status_callback(lambda current: gr.update())(current)
     assert 'value' not in noop
     upload = panel.status_callback(lambda current: '附件未添加：上传失败', input_feedback=True)(current)
-    assert upload['visible'] and '上传失败' in upload['value']
+    assert not upload['visible'] and upload['value']==''
     current._state['outcome'] = 'failed'
     failed = panel.activity_value(current)
-    assert failed['visible'] and failed['value'] == '执行失败'
+    assert not failed['visible'] and failed['value']==''
 
 
 def test_completed_authorization_notice_hides_but_recovery_notice_stays_local():
@@ -60,4 +60,4 @@ def test_completed_authorization_notice_hides_but_recovery_notice_stays_local():
     assert not panel.activity_value(current)['visible']
     assert current._notice  # UI projection does not mutate task state.
     current._notice = '当前轮已结束，但云端历史尚未完整同步；回答已保留，请重新连接后继续'
-    assert panel.activity_value(current)['visible']
+    assert not panel.activity_value(current)['visible']

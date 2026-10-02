@@ -153,11 +153,11 @@ def main():
     try:
         command = json.loads(sys.stdin.readline())
         action = command.get('action')
-        allowed = {'run', 'prepare_inputs', 'inspect', 'recover', 'recover_unknown', 'cancel', 'download', 'update', 'browser_response', 'capabilities', 'title'}
+        allowed = {'run', 'prepare_inputs', 'inspect', 'recover', 'recover_unknown', 'observe', 'observe_unknown', 'cancel', 'download', 'update', 'browser_response', 'capabilities', 'title'}
         if action not in allowed: raise AgentError('未知 Agent 操作')
         session_id = command.get('session_id')
         if session_id and not re.fullmatch(r'sess_[A-Za-z0-9_-]+', session_id): raise AgentError('无效会话标识')
-        if action not in ('run', 'prepare_inputs', 'recover_unknown', 'capabilities', 'title') and not session_id: raise AgentError('当前没有可管理的会话')
+        if action not in ('run', 'prepare_inputs', 'recover_unknown', 'observe_unknown', 'capabilities', 'title') and not session_id: raise AgentError('当前没有可管理的会话')
         if action == 'prepare_inputs':
             journal = PreparationJournal(command.get('staging_root'), command.get('run_id'))
             # Read after acquiring the lock: another worker may have advanced
@@ -200,11 +200,11 @@ def main():
                                  reasoning=command.get('reasoning'), tool_settings=command.get('tool_settings'),
                                  history_reference=command.get('history_reference'), input_files=command.get('input_files'))
                 emit('result', **state.snapshot())
-            elif action in ('recover', 'recover_unknown'):
+            elif action in ('recover', 'recover_unknown', 'observe', 'observe_unknown'):
                 turn_id = command.get('turn_id')
-                if action == 'recover_unknown': session_id, turn_id = find_uncertain_session(client, command.get('run_id'))
+                if action in ('recover_unknown', 'observe_unknown'): session_id, turn_id = find_uncertain_session(client, command.get('run_id'))
                 state = recover_stream(client, session_id, turn_id, baseline_turn_ids=command.get('baseline_turn_ids'),
-                       submission_started=command.get('submission_started') is True, tool_settings=command.get('tool_settings'), on_progress=progress)
+                       submission_started=command.get('submission_started') is True, tool_settings=command.get('tool_settings'), on_progress=progress, read_only=action in ('observe', 'observe_unknown'))
                 emit('result', **state.snapshot())
             elif action == 'inspect':
                 emit('result', **inspect_saved(client, session_id, command.get('turn_id'), command.get('baseline_turn_ids'), command.get('submission_started') is True))

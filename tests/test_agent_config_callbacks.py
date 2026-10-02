@@ -1,6 +1,7 @@
 import asyncio
 from copy import deepcopy
 import threading
+import pytest
 import gradio as gr
 from gradio.state_holder import SessionState
 from modules.agent_ui import AgentPanel
@@ -37,7 +38,8 @@ def test_latest_ui_configuration_is_frozen_with_send_before_delayed_callbacks(en
         # input callback has run. It freezes under the same lock as reservation.
         await app.process_api(transfer,['run frozen',None,'gpt-6-astra','default',0,[],*config_values(False),'UI instructions',model._conversation_id,2],state=state,request=request())
         envelope=state[question._id]
-        await app.process_api(choose,[None,*config_values(True),3,model._conversation_id],state=state,request=request())
+        with pytest.raises(gr.Error,match='当前任务仍在运行'):
+            await app.process_api(choose,[None,*config_values(True),3,model._conversation_id],state=state,request=request())
         assert model._tool_settings['network'] is False and model.system_prompt=='UI instructions'
         list(env.wrappers['predict'](model,envelope,[],request=request()))
         command=next(command for command in calls if command['action']=='run')

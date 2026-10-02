@@ -54,7 +54,6 @@ CHUANHU_DESCRIPTION = i18n("app.description")
 
 ONLINE_MODELS = [
     "GPT3.5 Turbo",
-    "OpenAI Agent",
     "GPT-4o",
     "GPT-4o-mini",
     "GPT-5",
@@ -72,6 +71,7 @@ ONLINE_MODELS = [
     "DeepSeek R1",
     "川虎助理",
     "川虎助理 Pro",
+    "OpenAI Agent",
     "DALL-E 3",
     "Gemini 2.0 Flash",
     "Gemini 2.0 Flash-Lite",
@@ -159,7 +159,8 @@ MODEL_METADATA = {
         "model_type": "OpenAIAgents",
         "description": "model.openai_agent.description",
         "system": "Perform only the requested task. Keep your final answer concise. Use files in /workspace for deliverables.",
-        "placeholder": {"slogan": "model.openai_agent.slogan"},
+        "placeholder": {"logo": "file=web_assets/model_logos/codex-color.png",
+                        "logo_rounded": "false", "slogan": "model.openai_agent.slogan"},
         "metadata": {"allow_text_tool": False},
     },
     "Llama-2-7B":{

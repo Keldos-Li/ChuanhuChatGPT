@@ -278,7 +278,7 @@ def _seed(state, saved):
     state.history_authoritative = True
 
 
-def _process_events(client, events, state, settings, on_progress):
+def _process_events(client, events, state, settings, on_progress, *, read_only=False):
     handled = set()
     for event in events:
         event = as_dict(event)
@@ -304,7 +304,8 @@ def _process_events(client, events, state, settings, on_progress):
             session = as_dict(client.beta.agents.sessions.retrieve(state.session_id))
             state.required_actions = pending_action_cards(session, state.turn_id)
             if state.required_actions: state.outcome = 'requires_action'
-            handle_function_actions(_no_retry(client), state, session, settings or {}, handled)
+            if not read_only:
+                handle_function_actions(_no_retry(client), state, session, settings or {}, handled)
         elif event.get('type') in ('agent.session.in_progress', 'agent.session.turn.in_progress'):
             if state.outcome not in TERMINAL:
                 state.outcome = 'in_progress'
@@ -418,7 +419,7 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
         raise _error(error, state) from None
 
 
-def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, submission_started=False, tool_settings=None, on_progress=None):
+def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, submission_started=False, tool_settings=None, on_progress=None, read_only=False):
     state = TurnState(session_id, turn_id)
     try:
         # The stream must be connected before the first history/status request.
@@ -432,9 +433,10 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
             # Only current required_actions are actionable, not historical items.
             session = as_dict(client.beta.agents.sessions.retrieve(session_id))
             state.required_actions = pending_action_cards(session, state.turn_id)
-            handle_function_actions(_no_retry(client), state, session, tool_settings or {}, set())
+            if not read_only:
+                handle_function_actions(_no_retry(client), state, session, tool_settings or {}, set())
             if on_progress: on_progress(state)
-            _process_events(client, events, state, tool_settings, on_progress)
+            _process_events(client, events, state, tool_settings, on_progress, read_only=read_only)
             _reconcile_terminal(client, state)
             return state
     except Exception as error: raise _error(error, state) from None

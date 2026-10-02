@@ -60,14 +60,12 @@ body.popup-open {
     font-size: var(--text-xxl);
     line-height: 1.3;
     text-align: left;
-    margin-top: 0;
+    margin-top: 4px;
     white-space: nowrap;
     flex-direction: row;
     display: inline-flex;
     align-items: center;
-    position: static;
-    width: max-content;
-    min-width: 0;
+    position: absolute;
 }
 #description {
     text-align: center;
@@ -133,28 +131,37 @@ body.popup-open {
 
 /* status-display */
 #chuanhu-header > #status-display {
-    display: block;
-    position: relative;
-    min-width: 0;
-    min-height: 0;
-    max-width: none;
-    max-height: 30dvh;
-    overflow: auto;
-    overflow-wrap: anywhere;
-    text-align: right;
+    display: flex;
+    min-height: 2em;
+    align-items: flex-end;
+    justify-content: flex-end;
+    transition: all 0.6s;
+    max-width: 50%;
+    height: 100%;
+    bottom: 0;
+    position: absolute;
+    
+    @media screen and (max-width: 639px) {
+        right: 16px;
+        right: max(16px, env(safe-area-inset-right));
+    }
+    @media screen and (min-width: 640px) {
+        right: 24px;
+        right: max(24px, env(safe-area-inset-right));
+    }
 }
 #chuanhu-header > #status-display div.gradio-markdown {
     min-height: unset;
 }
 #chuanhu-header > #status-display > .wrap {
-    margin-top: 0;
+    margin-top: 8px;
 }
 #status-display p {
     font-size: .85em;
     font-family: ui-monospace, "SF Mono", "SFMono-Regular", "Menlo", "Consolas", "Liberation Mono", "Microsoft Yahei UI", "Microsoft Yahei", monospace;
     /* Windows下中文的monospace会fallback为新宋体，实在太丑，这里折中使用微软雅黑 */
     color: var(--body-text-color-subdued);
-    margin: 0;
+    margin-bottom: 8px;
 }
 
 #chatbot-ctrl-btns {
@@ -266,17 +273,11 @@ body.popup-open {
     left: 0;
     right: 0;
     /* padding: 6px 64px; */
-    min-height: 65px;
-    height: auto;
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: 4px 16px;
-    align-items: center;
+    height: 65px;
     background: var(--background-fill-primary);
     border-bottom: 1px solid var(--border-color-primary);
 
     @media screen and (max-width: 639px) {
-        grid-template-columns: minmax(0, 1fr);
         padding: 6px 16px;
         padding-left: max(16px, env(safe-area-inset-left));
         padding-right: max(16px, env(safe-area-inset-right));
@@ -289,11 +290,6 @@ body.popup-open {
     /* @media screen and (min-width: 1024px) {
         padding: 6px 96px;
     } */
-}
-@media screen and (max-width: 639px) {
-    #chuanhu-header > #status-display {
-        text-align: left;
-    }
 }
 #chuanhu-header.under-box {
     z-index: 995 !important;
@@ -308,8 +304,8 @@ body.popup-open {
     /* margin-top: 54px; */
     /* height: calc(100dvh - 72px); */
     position: absolute;
-    top: var(--chuanhu-header-height, 65px);
-    height: calc(100dvh - var(--chuanhu-header-height, 65px));
+    top: 65px;
+    height: calc(100dvh - 65px);
 }
 
 #chuanhu-area {
@@ -650,7 +646,7 @@ input:checked + .chatbot-input-more-span {
 #menu-area.showSide {
     width: var(--menu-width);
     max-width: var(--menu-width);
-    height: calc(100dvh - var(--chuanhu-header-height, 65px));
+    height: calc(100dvh - 65px);
     visibility: visible;
     /* margin-right: 16px; */
     border-right: 0.5px solid var(--border-color-primary);
@@ -662,7 +658,7 @@ input:checked + .chatbot-input-more-span {
 }
 #toolbox-area.showSide {
     width: var(--toolbox-width);
-    height: calc(100dvh - var(--chuanhu-header-height, 65px));
+    height: calc(100dvh - 65px);
     visibility: visible;
     /* margin-left: 16px; */
 }
@@ -996,8 +992,8 @@ input:checked + .chatbot-input-more-span {
 } */
 
 #chuanhu-history {
-    max-height: calc(100dvh - var(--chuanhu-header-height, 65px) - 61px);
-    max-height: calc(100dvh - var(--chuanhu-header-height, 65px) - calc(36px + 12px + max(12px, env(safe-area-inset-bottom)) + 1px ));
+    max-height: calc(100dvh - 65px - 61px);
+    max-height: calc(100dvh - 65px - calc(36px + 12px + max(12px, env(safe-area-inset-bottom)) + 1px ));
     /* overflow-y: auto; */
 }
 #chuanhu-history > div {
@@ -1318,3 +1314,4 @@ button:active .icon-need-hover, button:active.icon-need-hover {
 #chuanhu-body {
     transition: top 0.3s ease-in-out, display 0.3s ease;
 }  */
+

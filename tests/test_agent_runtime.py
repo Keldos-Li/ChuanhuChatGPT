@@ -486,3 +486,31 @@ def test_effective_settings_snapshot_excludes_mcp_secrets():
     snapshot=runtime._public_settings({'agent':{'model':'model','tools':[{'type':'mcp','server_label':'explicit','allowed_tools':['read'],'transport':{'authorization':'secret','headers':{'X-Key':'secret'}}}]},'environment':{'type':'openai_hosted','env':{'SECRET':'secret'},'network':{'access':'enabled'}}})
     assert 'secret' not in repr(snapshot).lower()
     assert snapshot['agent']['tools'][0]['allowed_tools']==['read']
+
+
+def test_read_only_recovery_never_executes_or_submits_function_actions(monkeypatch):
+    client=FakeClient([{'type':'agent.session.requires_action','session_id':'sess_test'},turn('completed')],
+                      session_status='requires_action',saved_turn='in_progress')
+    client.required_actions=[{'type':'function_call','call_id':'function1','name':'text_statistics','arguments':'{}'}]
+    monkeypatch.setattr(runtime,'handle_function_actions',lambda *a,**kw: (_ for _ in ()).throw(AssertionError('Observer must never execute functions')))
+    result=runtime.recover_stream(client,'sess_test','t1',read_only=True)
+    assert result.outcome=='completed' and not client.submitted and not client.payloads and not client.updated
+    assert client.trace[0]=='stream_open' and client.trace[-1]=='stream_close'
+
+
+@pytest.mark.parametrize('action',['observe','observe_unknown'])
+def test_real_worker_entry_accepts_read_only_observation_actions(action,monkeypatch,capsys):
+    worker=load_worker(monkeypatch,'readonly_worker_entry')
+    fake=FakeClient(saved_turn='completed');called=[]
+    @contextmanager
+    def client(connection):
+        called.append('client');yield fake
+    monkeypatch.setattr(worker,'create_client',client)
+    monkeypatch.setattr(worker,'find_uncertain_session',lambda client,run_id:('sess_test','t1'))
+    command={'action':action,'run_id':'a'*32}
+    if action=='observe':command.update(session_id='sess_test',turn_id='t1')
+    monkeypatch.setattr(sys,'stdin',io.StringIO(json.dumps(command)+'\n'))
+    worker.main()
+    messages=[json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert called==['client'] and messages[-1]['type']=='result'
+    assert messages[-1]['session_id']=='sess_test' and not fake.submitted and not fake.payloads

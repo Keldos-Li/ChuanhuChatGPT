@@ -38,6 +38,12 @@ def build(language='zh_CN'):
     print('Synthetic input fixtures:',fixtures)
     env=install(ROOT,temporary/'history',language,presets)
     import modules.webui as webui
+    webui.get_html = lambda filename: (ROOT/"web_assets"/"html"/filename).read_text()
+    utility_source = ast.parse((ROOT/'modules/utils.py').read_text())
+    placeholder_node = next(node for node in utility_source.body if isinstance(node, ast.FunctionDef) and node.name == 'setPlaceholder')
+    placeholder_scope = dict(__name__='modules.utils', __package__='modules', MODEL_METADATA=presets.MODEL_METADATA, i18n=presets.i18n, BaseLLMModel=object)
+    exec(compile(ast.Module(body=[placeholder_node], type_ignores=[]), '<real-placeholder>', 'exec'), placeholder_scope)
+    env.factory.setPlaceholder = placeholder_scope['setPlaceholder']
     # Keep assets real, but all private journals/history inside a synthetic folder.
     from main_chat_mock import MainChatMock
     synthetic_service=MainChatMock()
@@ -57,7 +63,7 @@ def build(language='zh_CN'):
         get_html=webui.get_html,get_history_names=lambda:[],get_first_history_name=lambda:None,
         get_template_names=lambda:['Offline examples'],load_template=lambda *a,**k:[],hide_middle_chars=lambda value:'',
         repo_tag_html=lambda:'Offline main preview',version_time=lambda:'2026-10-01',versions_html=lambda:'Synthetic providers; no API requests',
-        setPlaceholder=lambda **kw:'Offline preview: all responses are synthetic.',
+        setPlaceholder=placeholder_scope['setPlaceholder'],
         get_geoip=lambda:'Offline acceptance: actual main chat; synthetic Agent. No API requests.',
         get_history_list=lambda *a:gr.update())
     overwrite=ast.parse((ROOT/'modules/overwrites.py').read_text())

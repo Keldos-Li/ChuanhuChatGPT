@@ -124,7 +124,7 @@ def test_native_id_list_stays_parallel_to_only_ready_downloadable_paths_for_dupl
     ])
     values = ArtifactPanel.values(current)
     cards = markup_cards(values)
-    assert [card.findtext('.//span[@class="model-file-name"]') for card in cards] == ['same.txt'] * 5
+    assert [''.join(card.find('.//span[@class="model-file-name"]').itertext()) for card in cards] == ['same.txt'] * 5
     assert json.loads(values[2]['label']) == ['second', 'first']
     assert values[2]['value'] == ['/tmp/second/same.txt', '/tmp/first/same.txt']
     assert cards[3].get('data-file-action') == '' and cards[3].get('disabled') is not None

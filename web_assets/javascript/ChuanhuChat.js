@@ -41,7 +41,6 @@ var settingBox = null;
 var trainingBox = null;
 var popupWrapper = null;
 var chuanhuHeader = null;
-var headerResizeObserver = null;
 var menu = null;
 var toolbox = null;
 // var trainBody = null;
@@ -102,16 +101,6 @@ function initialize() {
     trainingBox = gradioApp().querySelector('#chuanhu-training');
     popupWrapper = gradioApp().querySelector('#popup-wrapper');
     chuanhuHeader = gradioApp().querySelector('#chuanhu-header');
-    // Long status messages and a narrow viewport can make the header taller.
-    // Reserve its measured height so no text is clipped or overlaps the chat.
-    if (headerResizeObserver) headerResizeObserver.disconnect();
-    const updateHeaderHeight = () => {
-        document.documentElement.style.setProperty('--chuanhu-header-height',
-            `${Math.ceil(chuanhuHeader.getBoundingClientRect().height)}px`);
-    };
-    headerResizeObserver = new ResizeObserver(updateHeaderHeight);
-    headerResizeObserver.observe(chuanhuHeader);
-    updateHeaderHeight();
     menu = gradioApp().querySelector('#menu-area');
     toolbox = gradioApp().querySelector('#toolbox-area');
     grModelDescDiv = gradioApp().querySelector('#gr-model-description');

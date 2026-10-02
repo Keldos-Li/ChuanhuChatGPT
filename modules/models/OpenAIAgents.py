@@ -31,6 +31,10 @@ _session_locks = {}
 _cancel_sessions = {}
 
 
+def normalize_reasoning(value):
+    return None if value in (None, 'default', 'none') else value
+
+
 class ModelUpdateError(Exception):
     """A next-turn parameter update failed before the task was submitted."""
 
@@ -121,6 +125,76 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         except AgentConnectionError:
             return {'base_url': getattr(shared.state, 'openai_api_base', ''), 'organization': '', 'project': ''}
 
+    def record_ui_error(self, message, key=None, *, source=None, operation=None):
+        with self._lock:
+            operation = operation or getattr(self, '_predict_error_operation', None) or self._state.get('generation')
+            event = (self._conversation_id, operation, source, key or str(message))
+            seen = getattr(self, '_ui_error_seen', set())
+            if event in seen: return
+            seen.add(event)
+            self._ui_error_seen = seen
+            self._ui_errors = [*getattr(self, '_ui_errors', []), {
+                'owner': self._owner, 'conversation': self._conversation_id,
+                'generation': self._state.get('generation'), 'operation': operation,
+                'source': source, 'message': str(message)}]
+
+    def _take_operation_errors(self, operation, source=None):
+        errors = getattr(self, '_ui_errors', [])
+        own = lambda record: record['operation'] == operation and record['source'] == source
+        self._ui_errors = [record for record in errors if not own(record)]
+        return [record for record in errors if own(record)]
+
+    def take_ui_error(self, *, operation=None, source=None):
+        # Offline/internal callers can inspect one exact operation; never drain
+        # the whole ledger on behalf of an unrelated successful callback.
+        with self._lock:
+            operation = self._state.get('generation') if operation is None else operation
+            return '\n'.join(record['message'] for record in self._take_operation_errors(operation, source))
+
+    def has_ui_error(self, operation):
+        with self._lock:
+            return any(record['operation'] == operation and record['source'] is None
+                       for record in getattr(self, '_ui_errors', []))
+
+    def complete_error_operation(self, operation, *, source=None):
+        """Freeze an immutable receipt only after cleanup and final UI output."""
+        with self._lock:
+            records = self._take_operation_errors(operation, source)
+            if self._retired: return
+            valid = [record for record in records if record['owner'] == self._owner
+                     and record['conversation'] == self._conversation_id
+                     and record['generation'] == self._state.get('generation')]
+            if valid:
+                receipt = {'id': operation, 'owner': self._owner,
+                           'conversation': self._conversation_id,
+                           'generation': self._state.get('generation'),
+                           'messages': [record['message'] for record in valid]}
+                self._ui_error_outbox = [*getattr(self, '_ui_error_outbox', []), receipt]
+
+    def take_completed_ui_errors(self):
+        """Atomically deliver completed receipts once; active errors stay private."""
+        with self._lock:
+            receipts = getattr(self, '_ui_error_outbox', [])
+            self._ui_error_outbox = []
+            if self._retired: return ''
+            return '\n'.join(message for receipt in receipts
+                if receipt['owner'] == self._owner and receipt['conversation'] == self._conversation_id
+                and receipt['generation'] == self._state.get('generation')
+                for message in receipt['messages'])
+
+    def _record_message_error(self, message, *, operation=None):
+        preparation = message.get('preparation') or {}
+        if preparation.get('outcome') == 'cancelled': return
+        if message.get('type') == 'error' or message.get('outcome') == 'failed' or preparation.get('outcome') == 'failed':
+            self.record_ui_error(message.get('message') or preparation.get('error') or 'Agent 执行失败', operation=operation)
+        if message.get('sync_complete') is False:
+            self.record_ui_error('云端历史尚未完整同步，现有回答已保留', operation=operation)
+        if message.get('artifact_error'):
+            self.record_ui_error('文件获取失败：' + str(message['artifact_error']), operation=operation)
+        for record in message.get('artifacts', []):
+            if record.get('status') == 'failed':
+                self.record_ui_error(record.get('error') or '文件获取失败，可重试', ('artifact', record.get('id'), record.get('error')), operation=operation)
+
     def _worker(self, command):
         from optional.agents.connection import AgentConnectionError
         try:
@@ -157,6 +231,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._restore_binding()
 
     def _restore_binding(self):
+        self._cancel_requested = self._cancel_sent = False
         self._draft_token = self._draft_conversation = None
         self._draft_submitted = self._draft_acknowledged = False
         self._tool_ui_patch = None
@@ -166,6 +241,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         if binding:
             self._restore_input_binding(binding)
             self._pending_model_settings = binding.get('next_model_settings')
+            if self._pending_model_settings:
+                self._pending_model_settings = (self._pending_model_settings[0], normalize_reasoning(self._pending_model_settings[1]))
             if binding.get('connection_ref') != self._connection_reference():
                 self._notice = '当前连接配置与原会话不同，未连接云端；可恢复原配置，或明确按现配置新建并继续'
                 self._state = dict(binding['state'], outcome='incomplete')
@@ -187,7 +264,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._session_settings = binding.get('settings')
             if self._session_settings:
                 self.model_name = self._session_settings['model']
-                self._reasoning = self._session_settings.get('reasoning')
+                self._reasoning = normalize_reasoning(self._session_settings.get('reasoning'))
+                self._session_settings['reasoning'] = self._reasoning
                 self.system_prompt = self._session_settings.get('instructions', self.system_prompt)
                 self._tool_settings = deepcopy(self._session_settings.get('tools', self._tool_settings))
             self._notice = self._notice or '已找到原会话，发送前将按云端记录恢复历史'
@@ -256,7 +334,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 if revision <= self._choice_revision: return None
             if self._retired: raise gr.Error('聊天已切换，请在当前聊天中选择')
             self._assert_idle()
-            if reasoning == 'default': reasoning = None
+            reasoning = normalize_reasoning(reasoning)
             if not isinstance(model, str) or not model.strip(): raise gr.Error('请选择 Agent 子模型')
             choice = (model.strip(), reasoning)
             self._pending_model_settings = choice if choice != (self.model_name, self._reasoning) else None
@@ -268,6 +346,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         with self._lock:
             if not self._pending_model_settings: return
             model, reasoning = self._pending_model_settings
+            reasoning = normalize_reasoning(reasoning)
             session = self._state.get('session_id')
             if (model, reasoning) == (self.model_name, self._reasoning):
                 self._pending_model_settings = None
@@ -292,7 +371,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         with self._lock:
             if self._state.get('generation') != generation or self._retired:
                 raise ModelUpdateError('聊天已变化，消息未发送')
-            self.model_name, self._reasoning = model, (confirmed.get('reasoning', reasoning) if session else reasoning)
+            self.model_name, self._reasoning = model, normalize_reasoning(confirmed.get('reasoning', reasoning) if session else reasoning)
             self._pending_model_settings = None
             if self._session_settings:
                 self._session_settings.update(model=model, reasoning=self._reasoning)
@@ -383,7 +462,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._notice = '已保留原聊天。下一条消息将携带现有文字引用创建新会话；旧工具状态和文件不继承'
         return deepcopy(self.chatbot), self._status()
 
-    def _cancel(self, generation):
+    def _cancel(self, generation, *, error_operation=None, error_source='stop'):
         with self._lock:
             if self._state.get('generation') != generation or self._state.get('outcome') in TERMINAL: return
             if self._cancel_sent or not self._state.get('session_id') or not self._state.get('turn_id'): return
@@ -398,6 +477,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     if message.get('type') == 'error':
                         self._cancel_sent = False
                         self._notice = '尚未确认停止：' + message.get('message', '连接失败')
+                        self.record_ui_error(self._notice, source=error_source, operation=error_operation)
                     elif message.get('type') == 'result':
                         if self._state.get('outcome') not in TERMINAL:
                             self._state['outcome'] = message.get('outcome', 'cancel_requested')
@@ -410,17 +490,24 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 else: _cancel_sessions.pop(cancel_key, None)
 
     def interrupt(self):
+        operation = uuid4().hex
         with self._lock:
             if self._input_context:
                 try: self._cancel_input_preparation()
-                except OSError: self._notice = '附件准备连接已中断，消息尚未发送'
+                except OSError:
+                    self._notice = '附件准备连接已中断，消息尚未发送'
+                    self.record_ui_error(self._notice, source='stop', operation=operation)
+                    self.complete_error_operation(operation, source='stop')
             if self._state.get('outcome') in TERMINAL: return self._status('当前轮已结束')
             self._cancel_requested = True
             self._state['outcome'] = 'cancel_requested'
             generation = self._state.get('generation')
             self._pending_actions = []
             self._remember()
-        self._cancel(generation)
+        try:
+            self._cancel(generation, error_operation=operation)
+        finally:
+            self.complete_error_operation(operation, source='stop')
         return self._status()
 
     def _sync_items(self, items):
@@ -443,7 +530,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._answer_index = len(self.history) - 1 if self.history and self.history[-1]['role'] == 'assistant' else None
         self._answer_row = len(self._display) - 1 if self._answer_index is not None else None
 
-    def _accept(self, message, generation, *, restoring=False):
+    def _accept(self, message, generation, *, restoring=False, error_operation=None):
         if self._retired or self._state.get('generation') != generation: return False
         session = message.get('session_id')
         if session and self._state.get('session_id') and session != self._state['session_id']: return False
@@ -483,15 +570,19 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         if restoring and settings.get('agent') and self._session_settings:
             agent = settings['agent']
             self.model_name = agent.get('model', self.model_name)
-            self._reasoning = (agent.get('reasoning') or {}).get('effort')
+            self._reasoning = normalize_reasoning((agent.get('reasoning') or {}).get('effort'))
             self._session_settings.update(model=self.model_name, reasoning=self._reasoning)
+        self._record_message_error(message, operation=error_operation)
         self._remember()
         return True
 
-    def _download(self, generation, artifact_ids=None):
+    def _download(self, generation, artifact_ids=None, *, error_operation=None):
         first = True
         for message in self._worker({'action': 'download', 'session_id': self._state['session_id'], 'artifact_ids': artifact_ids}):
             if message.get('type') == 'error':
+                with self._lock:
+                    if self._retired or self._state.get('generation') != generation: return
+                    self._record_message_error(message, operation=error_operation)
                 self._notice = '回答已保留，文件获取失败，可重试：' + message.get('message', '')
                 yield deepcopy(self._display), self._status()
                 return
@@ -509,16 +600,18 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 previous = {record['id']: record for record in self._artifacts}
                 if first and artifact_ids is None: previous = {}
                 previous.update((record['id'], record) for record in records)
+                self._record_message_error(dict(message, artifacts=records), operation=error_operation)
                 self._artifacts = list(previous.values())
                 self._remember()
                 first = False
             yield deepcopy(self._display), self._status()
 
-    def retry_artifact(self, artifact_id):
+    def retry_artifact(self, artifact_id, *, error_operation=None):
         with self._lock:
             if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
             generation = self._state.get('generation')
             retry_key = (self._state.get('session_id'), artifact_id)
+            attempt = error_operation or uuid4().hex
             if retry_key in self._active_file_retries: raise gr.Error('文件正在重新获取')
             self._active_file_retries.add(retry_key)
             for record in self._artifacts:
@@ -526,9 +619,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     record.update(status='preparing');record.pop('error', None)
         try:
             yield deepcopy(self._display), self._status()
-            yield from self._download(generation, [artifact_id])
+            yield from self._download(generation, [artifact_id], error_operation=attempt)
         except Exception:
             self._notice = '文件获取失败，可重试'
+            self.record_ui_error(self._notice, operation=attempt)
         finally:
             with self._lock:
                 self._active_file_retries.discard(retry_key)
@@ -536,6 +630,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     for record in self._artifacts:
                         if record['id']==artifact_id and record.get('status')=='preparing':
                             record.update(status='failed', error='文件获取未完成，请重试')
+                            self.record_ui_error(record['error'], ('artifact', record['id'], record['error']), operation=attempt)
                     self._remember()
         yield deepcopy(self._display), self._status()
 
@@ -638,7 +733,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         terminal = self._state.get('outcome') in TERMINAL
                         self._notice = detail
                     elif message.get('type') == 'result': terminal = self._state.get('outcome') in TERMINAL
-                if self._cancel_requested: self._cancel(generation)
+                if self._cancel_requested: self._cancel(generation, error_operation=getattr(self, '_predict_error_operation', None) or generation, error_source=None)
                 yield deepcopy(self._display), self._status(detail)
             if self._state.get('outcome') in ('completed', 'cancelled', 'failed') and self._state.get('session_id'):
                 yield from self._download(generation)
@@ -647,12 +742,19 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             with self._lock:
                 update_error = True
                 self._notice = '消息未发送：' + str(error)
+                preparation = (self._input_context or {}).get('resume_state') or {}
+                if not self._cancel_requested and preparation.get('outcome') != 'cancelled':
+                    self.record_ui_error(self._notice)
         finally:
             with self._lock:
                 if self._state.get('generation') == generation:
                     if not started:
                         rollback = self._input_rollback_state(previous[0], generation)
                         self._state, self.history, self._display, self._answer_index, self._answer_row = (rollback, *previous[1:])
+                        for error_record in getattr(self, '_ui_errors', []):
+                            if (error_record['operation'] == (getattr(self, '_predict_error_operation', None) or generation) and error_record['owner'] == self._owner
+                                    and error_record['conversation'] == self._conversation_id):
+                                error_record['generation'] = self._state.get('generation')
                         if self._cancel_requested: self._notice = '本轮尚未发送，已取消'
                     elif not terminal and self._state.get('outcome') not in TERMINAL:
                         self._state['outcome'] = 'incomplete' if self._state.get('session_id') else 'uncertain'
@@ -674,13 +776,73 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         if self._fork_previous and self._state.get('outcome') == 'not_started' and not self._state.get('session_id'):
                             # Keep the failed attempt as a separate local record,
                             # and return control to the original preserved session.
+                            failed_conversation = self._conversation_id
                             for name, value in self._fork_previous.items(): setattr(self, name, value)
+                            for error_record in getattr(self, '_ui_errors', []):
+                                if error_record['operation'] == (getattr(self, '_predict_error_operation', None) or generation) and error_record['conversation'] == failed_conversation and error_record['owner'] == self._owner:
+                                    error_record.update(conversation=self._conversation_id, generation=self._state.get('generation'))
                             self._fork_previous = None
                             self._notice = '新会话未创建，已回到原会话；本次未发送内容另存于本地历史，新配置仍已保存'
                         elif self._state.get('session_id'):
                             self._fork_previous = None
         if update_error or self._notice.startswith('新会话未创建'):
             yield deepcopy(self._display), self._status()
+
+    def observe_history(self, *, error_operation=None):
+        """Observe trusted history through GET/SSE; never execute tool actions."""
+        with self._lock:
+            if self._retired or not self._owner or not self._needs_sync: return
+            observer = error_operation or uuid4().hex
+            self._history_epoch = observer
+            if self._connection_mismatch:
+                self.record_ui_error('当前连接配置与原会话不同，未读取云端历史', operation=observer)
+                return
+            session = self._state.get('session_id')
+            original_generation = self._state.get('generation')
+            if not session and self._state.get('outcome') != 'uncertain': return
+            if not session and not original_generation: return
+            target = self._conversation_id
+            generation = original_generation or uuid4().hex
+            self._state['generation'] = generation
+            self._history_observing = observer
+            self._history_epoch = observer
+            def cancelled():
+                return self._retired or self._conversation_id != target or self._state.get('generation') != generation or getattr(self, '_history_observing', None) != observer
+            command = {'action': 'observe' if session else 'observe_unknown', 'session_id': session,
+                       'turn_id': self._state.get('turn_id'), 'run_id': original_generation,
+                       'baseline_turn_ids': self._state.get('baseline_turn_ids'),
+                       'submission_started': self._state.get('submission_started') is True,
+                       '_observe_cancel': cancelled}
+        try:
+            for message in self._worker(command):
+                with self._lock:
+                    if cancelled(): return
+                    if message.get('type') == 'error':
+                        self._record_message_error(message, operation=observer)
+                        self._needs_sync = True
+                        self._unavailable = True
+                        # Never replace preserved history with a partial error snapshot.
+                        chat = deepcopy(self._display)
+                    else:
+                        if not self._accept(message, generation, restoring=True, error_operation=observer): continue
+                        self.chatbot = deepcopy(self._display)
+                        chat = deepcopy(self._display)
+                if self._cancel_requested and message.get('type') != 'error':
+                    self._cancel(generation, error_operation=observer, error_source=None)
+                late_stop_failure = self._cancel_requested and self.has_ui_error(observer)
+                if late_stop_failure:
+                    with self._lock:
+                        if not cancelled(): self._needs_sync = self._unavailable = True
+                yield chat, self._status()
+                if message.get('type') == 'error' or late_stop_failure: return
+            if not cancelled() and self._state.get('outcome') in TERMINAL and self._state.get('session_id'):
+                yield from self._download(generation, error_operation=observer)
+        finally:
+            with self._lock:
+                if not cancelled():
+                    self._remember()
+                    self.auto_save(self.chatbot)
+                    self._history_observing = None
 
     def reconnect(self):
         empty_result = None
@@ -715,7 +877,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         message = {key: value for key, value in message.items() if key not in ('outcome', 'items', 'sync_complete')}
                     if not self._accept(message, generation, restoring=True): continue
                     self.chatbot = deepcopy(self._display)
-                if self._cancel_requested: self._cancel(generation)
+                if self._cancel_requested: self._cancel(generation, error_operation=getattr(self, '_predict_error_operation', None) or generation, error_source=None)
                 yield deepcopy(self._display), self._status()
             if self._state.get('outcome') in TERMINAL and self._state.get('session_id'):
                 yield from self._download(generation)
@@ -759,8 +921,13 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
 
     def load_chat_history(self, new_history_file_path=None):
         with self._lock:
-            self._assert_idle()
+            if self._running or getattr(self, '_pending_send', None):
+                raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
             self._remember()
+            self._history_observing = None
+            self._history_epoch = None
+            self._ui_errors = []
+            self._ui_error_outbox = []
             chosen = new_history_file_path or self.history_file_path
             if chosen:
                 root = (Path(HISTORY_DIR) / self.user_name).resolve()

@@ -3,6 +3,7 @@ import html
 import json
 import inspect
 from functools import wraps
+from uuid import uuid4
 from copy import deepcopy
 import gradio as gr
 from optional.agents.tools import FUNCTIONS, tool_availability
@@ -10,10 +11,20 @@ from modules.model_capabilities import capabilities
 
 MODEL_EFFORTS = {
     'gpt-6-astra': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
-    'gpt-6-sol': ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'],
+    'gpt-6-sol': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
     'gpt-6.1-sol': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
 }
-REASONING_CHOICES = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+REASONING_CHOICES = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+
+def split_filename(name):
+    """Keep familiar compound extensions intact; a dotfile is not an extension."""
+    compounds = ('.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst', '.tar.lzma', '.tar.lz', '.d.ts')
+    for suffix in compounds:
+        if name.lower().endswith(suffix) and len(name) > len(suffix):
+            return name[:-len(suffix)], name[-len(suffix):]
+    dot = name.rfind('.')
+    return (name[:dot], name[dot:]) if 0 < dot < len(name) - 1 else (name, '')
 
 
 def _agent(model):
@@ -76,11 +87,12 @@ class ArtifactPanel:
             if status == 'failed': status_text += '，点击重试'
             error = ('：' + str(record['error'])) if record.get('error') else ''
             escape = lambda value: html.escape(str(value), quote=True)
+            basename, extension = split_filename(record['name'])
             # Feather's generic file icon, also used by the installed Gradio UI.
             icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>'
             cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
                          + '<span class="model-file-icon">' + icon + '</span><span class="model-file-content">'
-                         + '<span class="model-file-name" title="' + escape(record['name']) + '">' + escape(record['name']) + '</span>'
+                         + '<span class="model-file-name" title="' + escape(record['name']) + '"><span class="model-file-basename">' + escape(basename) + '</span><span class="model-file-extension">' + escape(extension) + '</span></span>'
                          + '<span class="model-file-meta"><span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
                          + '<span class="model-file-error">' + escape(error) + '</span><span class="model-file-feedback" aria-live="polite"></span></span></button>')
         markup = '<div class="model-file-cards" aria-label="生成的文件">' + ''.join(cards) + '</div>' if cards else ''
@@ -145,20 +157,10 @@ class AgentPanel:
         self.format_assistant = format_assistant or (lambda value: value)
 
     def activity_value(self, model, status=None):
-        """Ephemeral conversation feedback, never assistant text or history."""
-        if not _agent(model): return gr.update(value='', visible=False)
-        # A late selector/config callback deliberately returns a no-op update.
-        # Do not turn it into a fresh status that can overwrite newer feedback.
+        """Task controls express normal state; errors use Gradio's error UI."""
         if isinstance(status, dict) and status.get('__type__') == 'update' and 'value' not in status:
             return gr.update()
-        default = model._status()
-        text = status if isinstance(status, str) else default
-        # Submission feedback is useful while authorization resumes, but is
-        # stale once that turn has completed. Keep actual recovery notices.
-        finished_authorization = model._state.get('outcome') == 'completed' and model._notice == '已提交网站请求，等待继续；登录结果尚未确认'
-        if model._state.get('outcome') in ('not_started', 'completed') and text == default and (not model._notice or finished_authorization):
-            text = ''
-        return gr.update(value=text, visible=bool(text))
+        return gr.update(value='', visible=False)
 
     def status_callback(self, callback, index=0, *, header=False, returned_model=None, input_feedback=False):
         """Keep ordinary header results; route only Agent feedback locally."""
@@ -166,10 +168,7 @@ class AgentPanel:
             values = list(result) if isinstance(result, (tuple, list)) else [result]
             model = values[returned_model] if returned_model is not None else next(
                 (arg for arg in args if hasattr(arg, 'chatbot')), None)
-            if input_feedback:
-                text = values[index]
-                local = gr.update(value=text, visible=bool(text))
-            else: local = self.activity_value(model, values[index])
+            local = self.activity_value(model, values[index])
             if header:
                 if _agent(model): values[index] = ''
                 return (*values, local)
@@ -181,8 +180,20 @@ class AgentPanel:
                 for result in callback(*args, **kwargs): yield project(result, (*args, *kwargs.values()))
             return generator
         @wraps(callback)
-        def call(*args, **kwargs): return project(callback(*args, **kwargs), (*args, *kwargs.values()))
+        def call(*args, **kwargs):
+            return project(callback(*args, **kwargs), (*args, *kwargs.values()))
         return call
+
+    def emit_ui_error(self, model, request: gr.Request):
+        # This event has no outputs. It can only consume immutable completed
+        # operation receipts, never active errors or shared frontend State.
+        if not _agent(model) or getattr(model, '_retired', False): return
+        model.bind_owner(request)
+        message = model.take_completed_ui_errors()
+        if message: raise gr.Error(message)
+
+    def emit_stop_error(self, model, request: gr.Request):
+        return self.emit_ui_error(model, request)
 
     def render_chat(self, model, rows):
         if not _agent(model): return rows
@@ -222,7 +233,7 @@ class AgentPanel:
     def selectors(self):
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
             self.model = gr.Dropdown(label='使用模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
-            self.reasoning = gr.Dropdown(label='推理强度', choices=REASONING_CHOICES, value='default', info='选择后自动用于下一轮对话', min_width=120)
+            self.reasoning = gr.Dropdown(label='推理强度', choices=REASONING_CHOICES, value='default', min_width=120)
             self.choice_revision = gr.Number(value=0, precision=0, visible=False)
 
     def output_components(self):
@@ -245,16 +256,15 @@ class AgentPanel:
             self.code = gr.Checkbox(label='代码与文件执行', value=True, elem_classes='switch-checkbox')
             self.search = gr.Checkbox(label='内置网页搜索', value=True, elem_classes='switch-checkbox')
             self.search_mode = gr.Dropdown(label='搜索模式', choices=['live', 'cached', 'disabled'], value='live')
-            self.domains = gr.Textbox(label='搜索域名范围（每行一个，可留空）')
+            self.domains = gr.Textbox(label='搜索域名范围（每行一个，可留空）', visible=False)
             self.browser = gr.Checkbox(label='云端浏览器', value=True, elem_classes='switch-checkbox')
             self.screenshots = gr.Checkbox(label='返回浏览器截图', value=False, elem_classes='switch-checkbox')
             self.discovery = gr.Checkbox(label='工具发现（配置可执行函数后生效）', value=True, elem_classes='switch-checkbox')
             self.programmatic = gr.Checkbox(label='程序化工具调用', value=True, elem_classes='switch-checkbox')
-            self.functions = gr.CheckboxGroup(label='已注册的应用函数', choices=list(FUNCTIONS), value=[])
+            self.functions = gr.CheckboxGroup(label='已注册的应用函数', choices=list(FUNCTIONS), value=[], visible=False)
             self.mcp = gr.Textbox(label='MCP 服务器', value='[]', lines=5)
             self.availability = gr.Dataframe(headers=['能力', '状态', '说明'], datatype=['str'] * 3, interactive=False, wrap=True, visible=False)
             self.fork = gr.Button('按新配置新建并继续', visible=False)
-            self.reconnect = gr.Button('重新连接原会话')
             self.tool_revision = gr.Number(value=0, precision=0, visible=False)
             self.config_target = gr.Textbox(visible=False)
 
@@ -312,7 +322,7 @@ class AgentPanel:
 
     @property
     def outputs(self):
-        return [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
+        return ([self.accordion] if hasattr(self, 'accordion') else []) + [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
                 self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit,
                 *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else []) + (list(self.sidebar[:4]) if hasattr(self, 'sidebar') else []) + [self.config_target]
 
@@ -320,7 +330,7 @@ class AgentPanel:
         enabled = _agent(model)
         if enabled and request is not None: model.bind_owner(request)
         if not enabled:
-            return [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
+            return ([gr.update(visible=False)] if hasattr(self, 'accordion') else []) + [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
                     *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + ['']
         busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
@@ -333,7 +343,7 @@ class AgentPanel:
         config = [settings['network'], settings['code_execution'], settings['web_search'], settings['search_mode'], '\n'.join(settings['search_domains']),
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
-        return [gr.update(visible=True), gr.update(visible=True), describe_settings(model),
+        return ([gr.update(visible=True)] if hasattr(self, 'accordion') else []) + [gr.update(visible=True), gr.update(visible=True), '',
                 gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
                 *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked) for value in config], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id]
@@ -341,11 +351,33 @@ class AgentPanel:
     def wrap_predict(self, predict, capability_ui):
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
             if _agent(model): files = agent_files
-            projected = ((self.render_chat(model, chat), status) for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request))
-            for chat, status in _chat_frames(projected):
-                yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
-            final_chat = gr.update(value=self.render_chat(model, model.chatbot)) if _agent(model) else gr.update()
-            yield final_chat, (model._status() if _agent(model) else gr.update()), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+            operation = uuid4().hex if _agent(model) else None
+            if operation is not None:
+                with model._lock:
+                    duplicate = bool(getattr(model, '_predict_error_operation', None))
+                    if not duplicate: model._predict_error_operation = operation
+                if duplicate:
+                    model.record_ui_error('当前任务仍在运行', operation=operation)
+                    yield tuple(gr.update() for _ in [None, None, *self.outputs, *capability_ui.outputs])
+                    model.complete_error_operation(operation)
+                    return
+            target, owner = (model._conversation_id, model._owner) if operation else (None, None)
+            try:
+                projected = ((self.render_chat(model, chat), status) for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request))
+                try:
+                    for chat, status in _chat_frames(projected):
+                        yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+                except gr.Error as error:
+                    if operation is None: raise
+                    model.record_ui_error(str(error), operation=operation)
+                if operation and (model._retired or model._conversation_id != target or model._owner != owner): return
+                final_chat = gr.update(value=self.render_chat(model, model.chatbot)) if _agent(model) else gr.update()
+                yield final_chat, (model._status() if _agent(model) else gr.update()), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+                if operation is not None: model.complete_error_operation(operation)
+            finally:
+                if operation is not None:
+                    with model._lock:
+                        if getattr(model, '_predict_error_operation', None) == operation: model._predict_error_operation = None
         return predict_with_ui
 
     def wire(self, current_model, chatbot, status_display, capability_ui=None):
@@ -365,30 +397,42 @@ class AgentPanel:
                     return update
             self.input_files.change(stage_files, [current_model, self.input_files], [self.input_files], queue=False)
             def remove_files(model, payload, request: gr.Request):
-                if not _agent(model): return '', '聊天已变化，附件未移除', self.input_value(model)
+                if not _agent(model):
+                    yield '', '', self.input_value(model)
+                    return
                 model.bind_owner(request)
+                operation = uuid4().hex
                 try:
                     removal = json.loads(payload)
                     if not isinstance(removal.get('ids'), list): raise ValueError()
                     message = model.remove_input_ids(removal['ids'], removal.get('target'))
-                except Exception as error: message = str(error) if isinstance(error, gr.Error) else '无法移除附件，请重试'
-                return '', message, self.input_value(model)
+                except Exception as error:
+                    message = str(error) if isinstance(error, gr.Error) else '无法移除附件，请重试'
+                    model.record_ui_error(message, operation=operation)
+                yield '', message, self.input_value(model)
+                model.complete_error_operation(operation)
             self.input_remove.click(self.status_callback(remove_files, 1, input_feedback=True), [current_model, self.input_remove_payload],
-                                    [self.input_remove_payload, self.input_feedback, self.input_files], queue=False)
+                                    [self.input_remove_payload, self.input_feedback, self.input_files], queue=True, concurrency_limit=None).then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
             def upload_files(model, files, target, request: gr.Request):
-                if not _agent(model): return '聊天已变化，附件未添加', gr.update(value=[]), gr.update()
+                if not _agent(model):
+                    yield '', gr.update(value=[]), gr.update()
+                    return
                 model.bind_owner(request)
+                operation = uuid4().hex
                 try: message = model.add_input_files(files, target)
-                except Exception as error: message = str(error)
-                return message, gr.update(value=[]), self.input_value(model)
+                except Exception as error:
+                    message = str(error)
+                    model.record_ui_error(message, operation=operation)
+                yield message, gr.update(value=[]), self.input_value(model)
+                model.complete_error_operation(operation)
             upload_event = self.input_picker.upload(self.status_callback(upload_files, input_feedback=True), [current_model, self.input_picker, self.input_target],
-                                     [self.input_feedback, self.input_picker, self.input_files], queue=False,
+                                     [self.input_feedback, self.input_picker, self.input_files], queue=True, concurrency_limit=None,
                 js='(model, files, target) => { window.chuanhuAgentUploadStaging = true; window.chuanhuRefreshSendButton?.(); return [model, files, window.chuanhuAgentUploadTarget || target]; }')
-            upload_event.then(None, [], [], queue=False, js='() => { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; window.chuanhuRefreshSendButton?.(); }')
+            upload_event.then(None, [], [], queue=False, js='() => { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; window.chuanhuRefreshSendButton?.(); }').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         def choose_settings(model, name, effort, revision, request: gr.Request):
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort, revision)
-            except Exception as error: message = str(error)
+            except Exception as error: raise gr.Error(str(error)) from None
             # A response generated before a newer selection may arrive last.
             # Never write selector values back from this asynchronous event.
             return message if message is not None else gr.update()
@@ -404,38 +448,62 @@ class AgentPanel:
                 value = self.config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp)
                 model.stage_agent_tools(value, revision, target)
                 return gr.update()
-            except Exception as error: return str(error) if not isinstance(error, json.JSONDecodeError) else 'MCP 配置不是有效 JSON'
+            except Exception as error:
+                raise gr.Error(str(error) if not isinstance(error, json.JSONDecodeError) else 'MCP 配置不是有效 JSON') from None
         tools_js = '''(model, ...values) => {
             window.chuanhuAgentToolRevision = (window.chuanhuAgentToolRevision || 0) + 1;
-            values[values.length - 2] = window.chuanhuAgentToolRevision;
-            return [model, ...values];
+            values[11] = window.chuanhuAgentToolRevision;
+            return [model, ...values.slice(0, 13)];
         }'''
         for component in self.config_inputs:
             component.input(self.status_callback(choose_tools), [current_model, *self.config_inputs, self.tool_revision, self.config_target],
                             [status_display], queue=False, js=tools_js)
         def fork(model, request: gr.Request):
-            model.bind_owner(request)
-            return model.new_session_from_history()
-        fork_event = self.fork.click(self.status_callback(fork, 1), [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs).then(self.chat_value, [current_model], [chatbot])
-        if capability_ui is not None: fork_event.then(capability_ui.values, [current_model], capability_ui.outputs)
-        def reconnect(model, request: gr.Request):
-            if _agent(model):
+            operation = uuid4().hex
+            try:
                 model.bind_owner(request)
-                projected = ((self.render_chat(model, chat), status) for chat, status in model.reconnect())
-                for chat, status in _chat_frames(projected):
-                    if capability_ui is None: yield chat, status
-                    else: yield chat, status, *capability_ui.values(model), *self.values(model, request=request, include_config=False)
-                # Generator cleanup clears the observer's running state only
-                # after its last yield; update the one main Stop/Send pair now.
-                if capability_ui is not None:
-                    yield gr.update(value=self.render_chat(model, model.chatbot)), model._status(), *capability_ui.values(model), *self.values(model, request=request, include_config=False)
-        reconnect_outputs = [chatbot, status_display] + (capability_ui.outputs + self.outputs if capability_ui is not None else [])
-        self.reconnect.click(self.status_callback(reconnect, 1), [current_model], reconnect_outputs)
-        def retry_file(model, identifier, request: gr.Request):
+                result = model.new_session_from_history()
+            except gr.Error as error:
+                model.record_ui_error(str(error), operation=operation)
+                result = (gr.update(), gr.update())
+            model.complete_error_operation(operation)
+            return result
+        fork_event = self.fork.click(self.status_callback(fork, 1), [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs).then(self.chat_value, [current_model], [chatbot])
+        if capability_ui is not None: fork_event = fork_event.then(capability_ui.values, [current_model], capability_ui.outputs)
+        fork_event.then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
+        # Called only after an authorized local history selection. This observer
+        # uses GET snapshots, never recover_stream or function-action execution.
+        self.history_outputs = [chatbot, status_display] + (capability_ui.outputs + self.outputs if capability_ui is not None else [])
+        def observe_history(model, request: gr.Request):
+            # Gradio 4.29 writes None to every output when a queued generator
+            # ends before its first frame. Always start with explicit no-ops.
+            yield tuple(gr.update() for _ in self.history_outputs)
+            if not _agent(model) or model._retired: return
             model.bind_owner(request)
-            for _, status in model.retry_artifact(identifier):
-                yield status, *self.values(model, request=request, include_config=False)
-        self.artifacts.retry.click(self.status_callback(retry_file), [current_model, self.artifacts.retry_id], [status_display, *self.outputs])
+            target, owner = model._conversation_id, model._owner
+            epoch = uuid4().hex
+            def current():
+                return not model._retired and model._conversation_id == target and model._owner == owner and getattr(model, '_history_epoch', None) == epoch
+            for chat, status in _chat_frames(model.observe_history(error_operation=epoch)):
+                if not current(): return
+                extras = (*capability_ui.values(model), *self.values(model, request=request, include_config=False)) if capability_ui is not None else ()
+                yield self.render_chat(model, chat), status, *extras
+            if not current(): return
+            extras = (*capability_ui.values(model), *self.values(model, request=request, include_config=False)) if capability_ui is not None else ()
+            yield gr.update(value=self.render_chat(model, model.chatbot)), model._status(), *extras
+            model.complete_error_operation(epoch)
+        self.observe_history = self.status_callback(observe_history, 1)
+        def retry_file(model, identifier, request: gr.Request):
+            operation = uuid4().hex
+            try:
+                model.bind_owner(request)
+                for _, status in model.retry_artifact(identifier, error_operation=operation):
+                    yield status, *self.values(model, request=request, include_config=False)
+            except gr.Error as error:
+                model.record_ui_error(str(error), operation=operation)
+                yield tuple(gr.update() for _ in [None, *self.outputs])
+            model.complete_error_operation(operation)
+        self.artifacts.retry.click(self.status_callback(retry_file), [current_model, self.artifacts.retry_id], [status_display, *self.outputs]).then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         self.request_id.input(browser_form, [current_model, self.request_id], [self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit])
         def origin(model, identifier, decision):
             card = next((card for card in model._pending_actions if card['request_id'] == identifier), None)
@@ -445,21 +513,33 @@ class AgentPanel:
             return model.respond_browser(identifier, response), *self.values(model)
         def origin_callback(decision):
             def respond(model, identifier, request: gr.Request):
-                model.bind_owner(request)
-                return origin(model, identifier, decision)
+                operation = uuid4().hex
+                try:
+                    model.bind_owner(request)
+                    result = origin(model, identifier, decision)
+                except Exception as error:
+                    model.record_ui_error(str(error), operation=operation)
+                    result = (gr.update(), *[gr.update() for _ in self.outputs])
+                # Direct callbacks finish all local work in one atomic response;
+                # the no-output follower reports errors after that response.
+                model.complete_error_operation(operation)
+                return result
             return respond
         for button, decision in ((self.approve, 'approve'), (self.deny, 'deny'), (self.cancel_request, 'cancel')):
-            button.click(self.status_callback(origin_callback(decision)), [current_model, self.request_id], [status_display, *self.outputs], queue=False)
+            button.click(self.status_callback(origin_callback(decision)), [current_model, self.request_id], [status_display, *self.outputs], queue=False).then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         def login(model, identifier, payload, request: gr.Request):
             model.bind_owner(request)
+            operation = uuid4().hex
             try:
                 response = json.loads(payload)
                 message = model.respond_browser(identifier, response)
             except Exception as error:
-                message = str(error) if isinstance(error, gr.Error) else '登录提交失败；请重新连接确认当前请求，勿重复提交'
+                message = str(error) if isinstance(error, gr.Error) else '登录提交失败；请重新选择历史确认当前请求，勿重复提交'
+                model.record_ui_error(message, operation=operation)
             finally: payload = None
-            return '', message, *self.values(model)
-        self.login_submit.click(self.status_callback(login, 1), [current_model, self.request_id, self.payload], [self.payload, status_display, *self.outputs], queue=False,
+            yield '', message, *self.values(model)
+            model.complete_error_operation(operation)
+        self.login_submit.click(self.status_callback(login, 1), [current_model, self.request_id, self.payload], [self.payload, status_display, *self.outputs], queue=True, concurrency_limit=None,
             js='''(model, id, unused) => {
                 const root = (typeof gradioApp === 'function' ? gradioApp() : document).querySelector('#agent-browser-form');
                 if (!root || root.dataset.requestId !== id) return [model, id, '{}'];
@@ -470,7 +550,7 @@ class AgentPanel:
                 if (option) response.selected_option = option.value;
                 root.querySelectorAll('input').forEach(x => x.value='');
                 return [model, id, JSON.stringify(response)];
-            }''')
+            }''').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         # A model output updates progress, file readiness and pending forms without
         # another message or a queued request behind the running generator.
         def live_values(model, request: gr.Request):

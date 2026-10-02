@@ -144,7 +144,7 @@ class MainChatMock:
                 state['items'].append({'id':'msg_'+uuid4().hex,'type':'message','role':'user','turn_id':state['turn_id'],'status':'completed','content':[{'type':'input_text','text':text}]})
             Thread(target=self._execute,args=(sid,command['prompt']),daemon=True).start()
             yield from self._observe(sid)
-        elif action in ('recover','inspect'):
+        elif action in ('recover','inspect','observe'):
             if sid not in self.sessions:
                 yield {'type':'error','message':'模拟服务没有这个会话','diagnostics':{'status_code':404}};return
             yield from self._observe(sid)

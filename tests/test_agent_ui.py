@@ -11,7 +11,7 @@ from test_agent_model import env, select, send, complete, request
 
 
 def artifact_rows(markup):
-    return [[card.find('.//span[@class="model-file-name"]').text or '', '', card.find('.//span[@class="model-file-size"]').text or '', (card.findtext('.//span[@class="model-file-state"]') or '') + (card.find('.//span[@class="model-file-error"]').text or '')] for card in ET.fromstring(markup).findall('button')]
+    return [[''.join(card.find('.//span[@class="model-file-name"]').itertext()), '', card.find('.//span[@class="model-file-size"]').text or '', (card.findtext('.//span[@class="model-file-state"]') or '') + (card.find('.//span[@class="model-file-error"]').text or '')] for card in ET.fromstring(markup).findall('button')]
 
 
 def panel_app(model):
@@ -118,6 +118,10 @@ def test_retry_listing_failure_returns_clickable_failed_card_then_can_retry(env,
             if isinstance(update,dict) and update.get('value'):frames.append(ET.fromstring(update['value']).find('button'))
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'file'],state=state,request=gr.Request(session_hash='retry'),iterator=result['iterator'])
+        if len(calls)==1:
+            with pytest.raises(gr.Error,match='listing unavailable'):
+                panel.emit_ui_error(model,gr.Request(session_hash='retry'))
+            assert frames[-1].get('data-file-action')=='retry' and not model._active_file_retries
         return frames
     try:
         failed=asyncio.run(retry())
@@ -223,13 +227,13 @@ def test_gradio_callback_updates_same_session_and_restores_on_failure(env,monkey
     index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
     result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1],state=state,request=gr.Request(session_hash='ui-test')))
     assert app.fns[index].outputs == [panel.activity]
-    assert result['data'][0]['visible'] and '下一轮' in result['data'][0]['value'] and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
+    assert not result['data'][0]['visible'] and result['data'][0]['value']=='' and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
     assert model.model_name!='gpt-6-sol'
     send(env,model,'apply on send')
     assert model.model_name=='gpt-6-sol'
     monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([{'type':'error','message':'rejected'}]))
     result=asyncio.run(app.process_api(index,[None,'bad','low',2],state=state,request=gr.Request(session_hash='ui-test')))
-    assert '下一轮' in result['data'][0]['value'] and model.model_name=='gpt-6-sol'
+    assert not result['data'][0]['visible'] and model.model_name=='gpt-6-sol'
     output=send(env,model,'must not submit')
     assert '消息未发送' in output[-1][1] and model.model_name=='gpt-6-sol'
     app.close()
@@ -273,14 +277,14 @@ def test_callback_owner_validation_is_gradio_injected(env,monkeypatch):
     app.close()
 
 
-def test_reconnect_waiting_permission_exposes_same_main_stop(env,monkeypatch):
+def test_history_observer_waiting_permission_exposes_same_main_stop(env,monkeypatch):
     from modules.model_capabilities import CapabilityUI
     model=select(env);model._state={'session_id':'sess_test','turn_id':'turn_one','generation':'g','outcome':'incomplete'}
-    model._session_settings=model._current_settings()
+    model._session_settings=model._current_settings();model._needs_sync=True
     calls=[]
     def worker(command):
         calls.append(command['action'])
-        if command['action']=='recover':
+        if command['action']=='observe':
             yield {'type':'progress','session_id':'sess_test','turn_id':'turn_one','outcome':'requires_action','required_actions':[{'request_id':'req','turn_id':'turn_one','request':{'type':'browser_origin_access','origin':'https://example.com'}}]}
             yield {'type':'result','session_id':'sess_test','turn_id':'turn_one','outcome':'cancelled','required_actions':[]}
         elif command['action']=='cancel':yield {'type':'result','outcome':'cancel_requested'}
@@ -290,20 +294,22 @@ def test_reconnect_waiting_permission_exposes_same_main_stop(env,monkeypatch):
         current=gr.State();chat=gr.Chatbot();status=gr.Markdown();main_send=gr.Button();main_stop=gr.Button(visible=False);selector=gr.Dropdown();marker=gr.HTML()
         caps=CapabilityUI([],selector,marker,main_send,main_stop);caps.wire(current,chat)
         panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components();panel.wire(current,chat,status,caps)
+        gr.Button().click(panel.observe_history, [current], panel.history_outputs, queue=False)
         main_stop.click(env.wrappers['interrupt'],[current],[status],queue=False)
     state=SessionState(app);state[current._id]=model
     indices={fn.fn.__name__:i for i,fn in enumerate(app.fns) if fn.fn}
     async def exercise():
         req=gr.Request(session_hash='ui')
-        result=await app.process_api(indices['reconnect'],[None],state=state,request=req)
+        result=await app.process_api(indices['observe_history'],[None],state=state,request=req)
+        assert all(value == gr.update() for value in result['data'])
+        result=await app.process_api(indices['observe_history'],[None],state=state,request=req,iterator=result['iterator'])
         assert result['data'][2+caps.outputs.index(main_stop)]['visible']
-        result=await app.process_api(indices['reconnect'],[None],state=state,request=req,iterator=result['iterator'])
-        assert result['data'][2+caps.outputs.index(main_stop)]['visible'] and model._pending_actions
+        assert model._pending_actions
         await app.process_api(indices['interrupt'],[None],state=state,request=req)
         assert 'cancel' in calls
         results=[]
         while result['is_generating']:
-            result=await app.process_api(indices['reconnect'],[None],state=state,request=req,iterator=result['iterator'])
+            result=await app.process_api(indices['observe_history'],[None],state=state,request=req,iterator=result['iterator'])
             results.append(result)
         updates=[entry['data'][2+caps.outputs.index(main_stop)] for entry in results if isinstance(entry['data'][2+caps.outputs.index(main_stop)],dict)]
         assert any(update.get('visible') is False for update in updates)
@@ -403,6 +409,10 @@ def test_single_file_retry_streams_preparing_and_result_without_losing_other_fil
                 rows=artifact_rows(update['value']);assert rows[0][0]=='other.txt' and rows[0][3]=='';statuses.append(rows[1][3])
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'retry'],state=state,request=req,iterator=result['iterator'])
+        if final_status=='failed':
+            with pytest.raises(gr.Error,match='still unavailable'):
+                panel.emit_ui_error(model,req)
+            assert statuses[-1].startswith('下载失败') and not model._active_file_retries
         assert '准备中' in statuses
         assert any((status == '' if final_status=='ready' else status.startswith('下载失败')) for status in statuses)
     try:asyncio.run(exercise())
