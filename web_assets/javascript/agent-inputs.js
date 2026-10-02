@@ -20,6 +20,7 @@
         window.chuanhuAgentUploading = true;
         previousError = root().querySelector('#agent-upload-files .error');
         sawProgress = false;
+        window.chuanhuRefreshSendButton?.();
     }, true);
     function removeSelected(event) {
         if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
@@ -56,8 +57,10 @@
         const app = root(), progress = app.querySelector('#agent-upload-files .uploading');
         if (progress) sawProgress = true;
         const error = app.querySelector('#agent-upload-files .error');
-        if (!window.chuanhuAgentUploadStaging && !progress && error && (sawProgress || error !== previousError))
+        if (!window.chuanhuAgentUploadStaging && !progress && error && (sawProgress || error !== previousError)) {
             window.chuanhuAgentUploading = false;
+            window.chuanhuRefreshSendButton?.();
+        }
     });
     function start() { observer.observe(document.documentElement, {childList:true, subtree:true}); }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();

@@ -27,6 +27,8 @@ var logginUser = null;
 var updateToast = null;
 var sendBtn = null;
 var cancelBtn = null;
+var sendControlsRoot = null;
+var sendControlsObserver = null;
 // var sliders = null;
 var updateChuanhuBtn = null;
 var rebootChuanhuBtn = null;
@@ -223,12 +225,69 @@ function selectHistory() {
     }
 }
 
-function disableSendBtn() {
-    sendBtn.disabled = user_input_ta.value.trim() === '';
-    user_input_ta.addEventListener('input', () => {
-        sendBtn.disabled = user_input_ta.value.trim() === '';
-    });
+function refreshSendButton() {
+    const app = gradioApp();
+    const button = app.querySelector('#submit-btn');
+    const textarea = app.querySelector('#user-input-tb textarea');
+    if (!button || !textarea) return false;
+
+    const conversation = window.chuanhuInputConversation?.() || '';
+    const preview = conversation ? app.querySelector('#agent-pending-files') : null;
+    let hasAttachments = false;
+    if (preview) {
+        try {
+            const metadata = JSON.parse(preview.querySelector('[data-testid="block-label"]').textContent.trim());
+            const ids = metadata.ids;
+            hasAttachments = metadata.target === conversation && Array.isArray(ids) && ids.length > 0 &&
+                ids.every(id => typeof id === 'string' && id.length > 0) &&
+                new Set(ids).size === ids.length && ids.length === preview.querySelectorAll('tr.file').length;
+        } catch (_) { /* A partial/stale preview is not a ready attachment. */ }
+    }
+    const uploading = conversation && (window.chuanhuAgentUploading || window.chuanhuAgentUploadStaging ||
+        app.querySelector('#agent-upload-files .uploading, #agent-upload-files .file-preview-holder'));
+    // Gradio hides Send while a turn is running, including remote states that
+    // can outlive the local busy flag. Never undo that state on an input event.
+    const blocked = textarea.disabled || button.hidden || button.classList.contains('hidden') ||
+        window.chuanhuInputBusy?.() || uploading;
+    const disabled = Boolean(blocked || !(textarea.value.trim() || hasAttachments));
+    if (button.disabled !== disabled) button.disabled = disabled;
+    return !disabled;
 }
+
+function guardComposerSubmit(event) {
+    const path = event.composedPath ? event.composedPath() : [event.target];
+    const target = path.find(node => node?.matches?.(event.type === 'click' ? '#submit-btn' : '#user-input-tb textarea'));
+    if (!target) return;
+    if (event.type !== 'click' && (event.key !== 'Enter' || event.shiftKey || event.isComposing)) return;
+    if (!refreshSendButton()) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+    }
+    // Keep Gradio's native keypress -> Textbox.submit path. Clicking Send here
+    // as well would send an attachment-only message twice.
+}
+
+function disableSendBtn() {
+    const app = gradioApp();
+    if (sendControlsRoot !== app) {
+        if (sendControlsRoot) {
+            sendControlsRoot.removeEventListener('input', refreshSendButton);
+            for (const type of ['click', 'keydown', 'keypress'])
+                sendControlsRoot.removeEventListener(type, guardComposerSubmit, true);
+            sendControlsObserver.disconnect();
+        }
+        sendControlsRoot = app;
+        app.addEventListener('input', refreshSendButton);
+        for (const type of ['click', 'keydown', 'keypress'])
+            app.addEventListener(type, guardComposerSubmit, true);
+        sendControlsObserver = new MutationObserver(refreshSendButton);
+        sendControlsObserver.observe(app, {childList: true, subtree: true, characterData: true,
+            attributes: true, attributeFilter: ['class', 'hidden', 'disabled', 'data-model-capabilities']});
+    }
+    refreshSendButton();
+}
+// Upload callbacks also change flags without necessarily changing the DOM.
+window.chuanhuRefreshSendButton = refreshSendButton;
 
 function checkModel() {
     const model = gradioApp().querySelector('#model-select-dropdown input');
@@ -288,7 +347,7 @@ function bindChatbotPlaceholderButtons() {
             user_input_ta.dispatchEvent(input_event);
 
             // 创建并触发回车键事件
-            sendBtn.disabled = false;
+            refreshSendButton();
             sendBtn.click();
             // const enterEvent = new KeyboardEvent('keydown', { 'key': 'Enter' });
             // userInput.dispatchEvent(enterEvent);

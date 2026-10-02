@@ -26,7 +26,7 @@ function setUploader() {
             fileCountSpan.innerText = fileCount;
         } else {
             chatbotArea.classList.remove('with-file');
-            statusDisplayMessage("");
+            if (window.chuanhuSupports?.('knowledge') !== false) statusDisplayMessage("");
             fileCount = 0;
             transUpload();
         }

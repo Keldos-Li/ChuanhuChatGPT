@@ -140,7 +140,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                             placeholder=setPlaceholder(model_name=MODELS[DEFAULT_MODEL]),
                         )
                     with gr.Column(elem_id="model-output-panels", min_width=0, scale=0):
-                        agent_panel = AgentPanel()
+                        agent_panel = AgentPanel(convert_user_before_marked, convert_bot_before_marked)
                         agent_panel.output_components()
                 with gr.Row(elem_id="chatbot-footer"):
                     with gr.Column(elem_id="chatbot-input-box"):
@@ -198,7 +198,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                     gr.HTML(get_html("close_btn.html").format(
                         obj="toolbox"), elem_classes="close-btn")
                 with gr.Tabs(elem_id="chuanhu-toolbox-tabs"):
-                    with gr.Tab(label=i18n("ui.toolbox.tab.conversation")):
+                    with gr.Tab(label=i18n("ui.toolbox.tab.conversation")) as conversation_tab:
                         with gr.Accordion(label=i18n("ui.toolbox.model.title"), open=not HIDE_MY_KEY, visible=not HIDE_MY_KEY):
                             modelDescription = gr.Markdown(
                                 elem_id="gr-model-description",
@@ -221,7 +221,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                         agent_panel.selectors()
                         agent_panel.settings_components()
                         gr.Markdown("---", elem_classes="hr-line", visible=not HIDE_MY_KEY)
-                        with gr.Accordion(label="Prompt", open=True):
+                        with gr.Accordion(label="Prompt", open=True) as prompt_group:
                             systemPromptTxt = gr.Textbox(
                                 show_label=True,
                                 placeholder=i18n("ui.toolbox.prompt.system_placeholder"),
@@ -508,6 +508,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         ('sampling', logit_bias_txt, None), ('sampling', user_identifier_txt, None),
         ('billing', usageTxt, None), ('reply_language', language_select_dropdown, None),
     ], model_select_dropdown, capability_marker, submitBtn, cancelBtn)
+    agent_panel.bind_sidebar(conversation_tab, systemPromptTxt, templateSelectDropdown, prompt_group, i18n("ui.toolbox.tab.conversation"))
     capability_ui.wire(current_model, chatbot)
     agent_panel.wire(current_model, chatbot, status_display, capability_ui)
 
@@ -530,7 +531,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             loaded_stuff = [gr.update(), gr.update(), gr.Chatbot(label=MODELS[DEFAULT_MODEL]), current_model.single_turn, current_model.temperature, current_model.top_p, current_model.n_choices, current_model.stop_sequence, current_model.token_upper_limit, current_model.max_generation_token, current_model.presence_penalty, current_model.frequency_penalty, current_model.logit_bias, current_model.user_identifier, current_model.stream, gr.DownloadButton(), gr.DownloadButton()]
         return user_info, user_name, current_model, toggle_like_btn_visibility(DEFAULT_MODEL), *loaded_stuff, init_history_list(user_name, prepend=current_model.history_file_path.rstrip(".json"))
     demo.load(create_greeting, inputs=None, outputs=[
-              user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load").then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
+              user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load").then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
     chatgpt_predict_args = dict(
         fn=agent_panel.wrap_predict(predict, capability_ui),
         inputs=[
@@ -557,6 +558,9 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     end_outputing_args = dict(
         fn=capability_ui.values, inputs=[current_model], outputs=capability_ui.outputs
     )
+
+    finish_submission_args = dict(fn=agent_panel.finish_submission,
+        inputs=[current_model, user_question, user_input], outputs=[user_input, status_display])
 
     reset_textbox_args = dict(
         fn=reset_textbox, inputs=[], outputs=[user_input]
@@ -601,13 +605,13 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     cancelBtn.click(interrupt, [current_model], [status_display], queue=False, concurrency_limit=None)
 
     user_input.submit(**transfer_input_args).then(**
-                                                  chatgpt_predict_args).then(**end_outputing_args).then(**auto_name_chat_history_args)
+                                                  chatgpt_predict_args).then(**finish_submission_args).then(**end_outputing_args).then(**auto_name_chat_history_args)
     user_input.submit(**get_usage_args)
 
     # user_input.submit(auto_name_chat_history, [current_model, user_question, chatbot, user_name], [historySelectList], show_progress=False)
 
     submitBtn.click(**transfer_input_args).then(**chatgpt_predict_args,
-                                                api_name="predict").then(**end_outputing_args).then(**auto_name_chat_history_args)
+                                                api_name="predict").then(**finish_submission_args).then(**end_outputing_args).then(**auto_name_chat_history_args)
     submitBtn.click(**get_usage_args)
 
     # submitBtn.click(auto_name_chat_history, [current_model, user_question, chatbot, user_name], [historySelectList], show_progress=False)
@@ -623,7 +627,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         outputs=[chatbot, status_display, historySelectList, systemPromptTxt, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox],
         show_progress=True,
         js='(a,b)=>{return clearChatbot(a,b);}',
-    ).then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
+    ).then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
 
     retryBtn.click(**start_outputing_args).then(
         retry,
@@ -676,7 +680,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         set_single_turn, [current_model, single_turn_checkbox], None, show_progress=False)
     use_streaming_checkbox.input(set_streaming, [current_model, use_streaming_checkbox], None, show_progress=False)
     model_select_dropdown.input(change_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
-                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model").then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
+                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model").then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
     model_select_dropdown.change(toggle_like_btn_visibility, [model_select_dropdown], [
                                  like_dislike_area], show_progress=False)
     # model_select_dropdown.change(
@@ -718,7 +722,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         show_progress=True,
         js='(a,b)=>{return clearChatbot(a,b);}',
     )
-    historySelectList.select(**load_history_from_file_args).then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
+    historySelectList.select(**load_history_from_file_args).then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
     uploadHistoryBtn.upload(upload_chat_history, [current_model, uploadHistoryBtn], [
                         saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList]).then(**refresh_history_args)
     historySearchTextbox.input(

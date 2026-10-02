@@ -31,6 +31,8 @@
         const more = app.querySelector('#chatbot-input-more-btn-div');
         const hasMore = ['input_attachments','knowledge','single_turn','external_websearch'].some(window.chuanhuSupports);
         if (more && more.hidden === hasMore) more.hidden = !hasMore;
+        window.chuanhuRefreshSendButton?.();
+        window.chuanhuRefreshArtifactCards?.();
     }
     function schedule() {
         if (!queued) { queued = true; queueMicrotask(apply); }

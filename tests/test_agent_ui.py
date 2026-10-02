@@ -11,7 +11,7 @@ from test_agent_model import env, select, send, complete, request
 
 
 def artifact_rows(markup):
-    return [[card.find('.//span[@class="model-file-name"]').text or '', '', card.find('.//span[@class="model-file-size"]').text or '', (card.find('.//span[@class="model-file-state"]').text or '') + (card.find('.//span[@class="model-file-error"]').text or '')] for card in ET.fromstring(markup).findall('button')]
+    return [[card.find('.//span[@class="model-file-name"]').text or '', '', card.find('.//span[@class="model-file-size"]').text or '', (card.findtext('.//span[@class="model-file-state"]') or '') + (card.find('.//span[@class="model-file-error"]').text or '')] for card in ET.fromstring(markup).findall('button')]
 
 
 def panel_app(model):
@@ -206,7 +206,8 @@ process.stdout.write(JSON.stringify(visible));
 '''
     result=subprocess.run([shutil.which('node') or 'node','-e',script],input=json.dumps(frames),text=True,capture_output=True)
     assert result.returncode==0,result.stderr
-    assert json.loads(result.stdout)==expected
+    from modules.agent_message_files import decode_rows
+    assert [decode_rows(rows,model._conversation_id) for rows in json.loads(result.stdout)]==expected
     assert expected[-1]==[['reference and new request','completed answer']]
 
 
@@ -257,7 +258,8 @@ def test_live_updates_do_not_overwrite_unsaved_tool_form(env):
     app,panel,state=panel_app(model)
     values=panel.values(model,include_config=False)
     for component in panel.config_inputs:
-        assert values[panel.outputs.index(component)]==gr.update()
+        assert 'value' not in values[panel.outputs.index(component)]
+        assert values[panel.outputs.index(component)]['interactive'] is True
     app.close()
 
 
@@ -338,7 +340,7 @@ def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypat
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'files',[]],state=state,request=req,iterator=result['iterator'])
         assert any(len(r)==2 and all(row[3]=='准备中' for row in r) for r in rows)
-        assert any(len(r)==2 and r[0][3]=='可下载' and r[1][3]=='准备中' for r in rows)
+        assert any(len(r)==2 and r[0][3]=='' and r[1][3]=='准备中' for r in rows)
     try:asyncio.run(exercise())
     finally:app.close()
 
@@ -358,14 +360,16 @@ def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypat
     app.close()
 
 
-def test_prompt_change_reports_new_session_requirement_in_visible_status(env,monkeypatch):
+def test_prompt_change_after_session_is_rejected_and_effective_value_kept(env,monkeypatch):
     complete(env,monkeypatch);model=select(env);send(env,model)
     with gr.Blocks(analytics_enabled=False) as app:
         current=gr.State();prompt=gr.Textbox();status=gr.Markdown()
         prompt.change(env.wrappers['set_system_prompt'],[current,prompt],[status])
     state=SessionState(app);state[current._id]=model
-    result=asyncio.run(app.process_api(0,[None,'new instructions'],state=state,request=gr.Request(session_hash='ui')))
-    assert '变更需要新会话' in result['data'][0] and '仍使用原设置' in result['data'][0]
+    before=model.system_prompt
+    with pytest.raises(gr.Error,match='已固定'):
+        asyncio.run(app.process_api(0,[None,'new instructions'],state=state,request=gr.Request(session_hash='ui')))
+    assert model.system_prompt==before
     app.close()
 
 
@@ -395,11 +399,11 @@ def test_single_file_retry_streams_preparing_and_result_without_losing_other_fil
         while True:
             update=result['data'][1+panel.outputs.index(panel.artifacts.list)]
             if isinstance(update,dict) and update.get('value'):
-                rows=artifact_rows(update['value']);assert rows[0][0]=='other.txt' and rows[0][3]=='可下载';statuses.append(rows[1][3])
+                rows=artifact_rows(update['value']);assert rows[0][0]=='other.txt' and rows[0][3]=='';statuses.append(rows[1][3])
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'retry'],state=state,request=req,iterator=result['iterator'])
         assert '准备中' in statuses
-        assert any(status.startswith('可下载' if final_status=='ready' else '下载失败') for status in statuses)
+        assert any((status == '' if final_status=='ready' else status.startswith('下载失败')) for status in statuses)
     try:asyncio.run(exercise())
     finally:app.close()
     assert len(calls)==1 and model._state['session_id']=='sess_test'

@@ -66,6 +66,8 @@ def reserve_submission(model, text, files=None):
         if hasattr(model, 'freeze_input_files'): model._reserved_inputs = model.freeze_input_files(files)
         token = uuid4().hex
         model._pending_send = token
+        if getattr(model, 'is_hosted_agent', False):
+            model._draft_token, model._draft_submitted = token, False
         return {'text': text, 'target': id(model), 'token': token}
 
 

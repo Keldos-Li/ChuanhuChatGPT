@@ -1,6 +1,56 @@
 // Delegate from rerendered cards to the mounted native Gradio controls.
 (function () {
     const root = () => typeof gradioApp === 'function' ? gradioApp() : document;
+    let scheduled = false;
+    function mountCards() {
+        scheduled = false;
+        const app = root();
+        const chat = app.querySelector('#chuanhu-chatbot');
+        const source = app.querySelector('#model-output-cards');
+        if (!chat) return;
+        const groups = new Map();
+        const activeConversation = globalThis.chuanhuInputConversation?.();
+        for (const card of source?.querySelectorAll('.model-file-card') || []) {
+            const key = card.dataset.messageKey, conversation = card.dataset.conversationId;
+            if (!key || !conversation || (activeConversation !== undefined && conversation !== activeConversation)) continue;
+            const identity = conversation + ':' + key;
+            if (!groups.has(identity)) groups.set(identity, {key, conversation, cards: []});
+            groups.get(identity).cards.push(card);
+        }
+        const used = new Set();
+        for (const [identity, group] of groups) {
+            const anchors = Array.from(chat.querySelectorAll('.agent-message-anchor')).filter(anchor =>
+                anchor.dataset.messageKey === group.key && anchor.dataset.conversationId === group.conversation && !anchor.closest('.history-message'));
+            if (anchors.length !== 1) continue;
+            const row = anchors[0].closest('.message-row.bot-row');
+            if (!row) continue;
+            let holder = Array.from(chat.querySelectorAll('.agent-message-files')).find(node => node.dataset.fileOwner === identity);
+            if (!holder) {
+                holder = document.createElement('div');
+                holder.className = 'agent-message-files model-file-cards';
+                holder.dataset.fileOwner = identity;
+                holder.setAttribute('role', 'group');
+                holder.setAttribute('aria-label', '此回复生成的文件');
+            }
+            const markup = group.cards.map(card => card.outerHTML).join('');
+            if (holder._sourceMarkup !== markup) { holder.innerHTML = markup; holder._sourceMarkup = markup; }
+            if (row.nextElementSibling !== holder) row.after(holder);
+            let fileOnly = false;
+            try { const raw = JSON.parse(atob(anchors[0].dataset.agentMessageRaw)).raw; fileOnly = raw === null || raw === ''; } catch (_) {}
+            row.classList.toggle('agent-file-only-message', fileOnly);
+            used.add(holder);
+        }
+        for (const holder of chat.querySelectorAll('.agent-message-files')) if (!used.has(holder)) holder.remove();
+        for (const row of chat.querySelectorAll('.agent-file-only-message'))
+            if (!row.nextElementSibling?.classList.contains('agent-message-files')) row.classList.remove('agent-file-only-message');
+    }
+    function scheduleMount() {
+        if (!scheduled) { scheduled = true; queueMicrotask(mountCards); }
+    }
+    globalThis.chuanhuRefreshArtifactCards = scheduleMount;
+    const observer = new MutationObserver(scheduleMount);
+    function start() { observer.observe(document.documentElement, {childList:true, subtree:true, characterData:true}); mountCards(); }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
     document.addEventListener('click', event => {
         const card = (event.composedPath ? event.composedPath() : [event.target])
             .find(node => node?.matches?.('.model-file-card'));

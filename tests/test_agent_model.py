@@ -201,17 +201,17 @@ def test_queued_send_freezes_next_model_choice(env,monkeypatch):
     assert model.model_name=='gpt-6-sol'
 
 
-def test_config_saved_during_run_only_applies_after_explicit_new_session(env,monkeypatch):
+def test_session_config_is_locked_until_a_new_conversation(env,monkeypatch):
     calls,_=complete(env,monkeypatch);model=select(env)
     generator=model.predict('first',[]);next(generator)
     value=dict(model._tool_settings,network=False,web_search=False)
-    model.save_agent_tools(value)
+    with pytest.raises(gr.Error):model.save_agent_tools(value)
     with pytest.raises(gr.Error):model.set_agent_model('gpt-6-sol','high')
     list(generator)
     assert model._session_settings['tools']['network'] is True
     send(env,model,'original session')
     assert [c for c in calls if c['action']=='run'][-1]['tool_settings']['network'] is True
-    old_path=model.history_file_path;model.new_session_from_history();send(env,model,'new config')
+    old_path=model.history_file_path;model.new_session_from_history();model.save_agent_tools(value);send(env,model,'new config')
     latest=[c for c in calls if c['action']=='run'][-1]
     assert latest['session_id'] is None and latest['tool_settings']['network'] is False and latest['history_reference']
     assert model.history_file_path!=old_path and (env.history_dir/old_path).exists()
@@ -400,11 +400,11 @@ def test_ordinary_retry_reserves_before_rewind_and_close_restores_history(env,mo
 def test_failed_explicit_fork_returns_original_session(env,monkeypatch):
     complete(env,monkeypatch);model=select(env);send(env,model)
     original=(model.history_file_path,deepcopy(model.chatbot),model._state['session_id'])
-    model.save_agent_tools(dict(model._tool_settings,network=False));model.new_session_from_history()
+    model.new_session_from_history();model.save_agent_tools(dict(model._tool_settings,network=False))
     monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([dict(type='error',outcome='not_started',message='unsupported API')]))
     send(env,model,'new attempted request')
     assert (model.history_file_path,model.chatbot,model._state['session_id'])==original
-    assert model._tool_settings['network'] is False and '已回到原会话' in model._notice
+    assert model._tool_settings['network'] is True and '已回到原会话' in model._notice
     assert len(list(env.history_dir.glob('*.json')))==2
 
 
@@ -517,13 +517,13 @@ def test_failed_fork_keeps_original_title_state(env,monkeypatch):
     assert model.history_file_path==old and model._first_prompt=='original question' and model._auto_named
 
 
-def test_explicit_network_chat_command_requires_fork_and_keeps_session(env,monkeypatch):
+def test_explicit_network_chat_command_keeps_fixed_session_configuration(env,monkeypatch):
     calls,_=complete(env,monkeypatch);model=select(env);send(env,model)
     before=len(calls);send(env,model,'请关闭联网')
     assert len(calls)==before and model._state['session_id']=='sess_test'
-    assert model._pending_network is False and model._session_settings['tools']['network'] is True
-    assert '请选择' in model._notice
-    model.new_session_from_history();send(env,model,'continue task')
+    assert model._pending_network is None and model._session_settings['tools']['network'] is True
+    assert '已固定' in model._notice
+    model.new_session_from_history();model.save_agent_tools(dict(model._tool_settings,network=False));send(env,model,'continue task')
     command=[c for c in calls if c['action']=='run'][-1]
     assert command['session_id'] is None and command['tool_settings']['network'] is False
     assert command['tool_settings']['web_search'] is True

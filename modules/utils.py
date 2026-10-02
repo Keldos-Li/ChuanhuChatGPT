@@ -141,9 +141,7 @@ def set_system_prompt(current_model, new_system_prompt, request: gr.Request = No
         current_model.bind_owner(request)
     current_model.set_system_prompt(new_system_prompt)
     if getattr(current_model, 'is_hosted_agent', False):
-        if current_model._session_settings and new_system_prompt != current_model._session_settings.get('instructions'):
-            return '系统提示词变更需要新会话；当前会话仍使用原设置。可继续原会话，或在工具与能力中按新配置新建并继续'
-        return '系统提示词将用于新建的 Agent 会话' if not current_model._session_settings else gr.update()
+        return '系统提示词已保存' if not current_model._session_settings else gr.update()
     return gr.update()
 
 
@@ -500,6 +498,15 @@ def save_file(filename, model):
     history = model.history
     chatbot = []
     i = 0
+    if getattr(model, 'is_hosted_agent', False):
+        # Agent turns may contain multiple assistant messages or only files.
+        # Persist roles faithfully instead of pairing adjacent messages.
+        for message in history:
+            if message['role'] == 'user': chatbot.append([message['content'], None])
+            elif message['role'] == 'assistant':
+                if chatbot and chatbot[-1][1] is None: chatbot[-1][1] = message['content']
+                else: chatbot.append([None, message['content']])
+        i = len(history)
     while i < len(history):
         if history[i]["role"] == "image":
             # Handle image

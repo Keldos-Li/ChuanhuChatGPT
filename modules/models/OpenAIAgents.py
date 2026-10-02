@@ -20,6 +20,7 @@ from modules.presets import i18n
 from .base_model import BaseLLMModel, HISTORY_DIR
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'not_started'}
+SESSION_CONFIG_LOCKED = '会话创建后工具、联网和系统提示词已固定，请新建聊天后修改'
 STATUS = {'starting': '正在连接', 'in_progress': '正在运行', 'requires_action': '等待授权或登录',
           'restoring': '正在恢复历史', 'cancel_requested': '正在停止', 'cancelled': '已停止',
           'completed': '已完成', 'failed': '执行失败', 'not_started': '准备就绪',
@@ -184,6 +185,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self.model_name = self._session_settings['model']
                 self._reasoning = self._session_settings.get('reasoning')
                 self.system_prompt = self._session_settings.get('instructions', self.system_prompt)
+                self._tool_settings = deepcopy(self._session_settings.get('tools', self._tool_settings))
             self._notice = self._notice or '已找到原会话，发送前将按云端记录恢复历史'
         else:
             self._fresh()
@@ -221,7 +223,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         return ' · '.join(part for part in (STATUS.get(self._state.get('outcome'), '暂时无法确认状态'), detail or self._notice) if part)
 
     def _current_settings(self):
-        return {'model': self.model_name, 'reasoning': self._reasoning, 'instructions': self.system_prompt, 'tools': deepcopy(self._tool_settings)}
+        snapshot = self._session_settings if self._state.get('session_id') else None
+        return {'model': self.model_name, 'reasoning': self._reasoning,
+                'instructions': (snapshot or {}).get('instructions', self.system_prompt),
+                'tools': deepcopy((snapshot or {}).get('tools', self._tool_settings))}
 
     def _reserve_input_session(self, session):
         key = (self._owner, session)
@@ -285,21 +290,40 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self._session_settings.update(model=model, reasoning=self._reasoning)
             self._remember()
 
-    def save_agent_tools(self, settings):
-        # Saving new defaults never changes the running session's tool set.
+    def _assert_configuration_owner(self):
+        if not self._owner: raise gr.Error('需要在当前登录会话中修改配置')
+        if self._retired: raise gr.Error('聊天已切换，请在当前聊天中修改配置')
+
+    def set_system_prompt(self, new_system_prompt):
         with self._lock:
+            self._assert_configuration_owner()
+            if self._state.get('session_id'):
+                if new_system_prompt != self._current_settings()['instructions']:
+                    raise gr.Error(SESSION_CONFIG_LOCKED)
+                return
+            self._assert_idle()
+            self.system_prompt = new_system_prompt
+            self.auto_save()
+
+    def save_agent_tools(self, settings):
+        with self._lock:
+            self._assert_configuration_owner()
+            settings = validate_settings(settings)
+            if self._state.get('session_id'):
+                if settings != self._current_settings()['tools']:
+                    raise gr.Error(SESSION_CONFIG_LOCKED)
+                return '当前会话配置未变化'
+            self._assert_idle()
             self._tool_settings = save_settings(shared.chuanhu_path, self._owner, settings)
-            return '新会话配置已保存。当前会话仍使用原设置；需按新配置新建并继续后生效' if self._state.get('session_id') else '新会话配置已保存'
+            return '新会话配置已保存'
 
     def new_session_from_history(self):
         with self._lock:
             if self._running or getattr(self, '_pending_send', None) or (not self._unavailable and (self._state.get('outcome') not in TERMINAL or self._needs_sync)):
                 raise gr.Error('请先停止或确认当前任务状态，再创建独立会话')
-            if self._pending_network is not None:
-                self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=self._pending_network))
             self.auto_save(self.chatbot)
             backup = {name: deepcopy(getattr(self, name)) for name in
-                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch', 'model_name', '_reasoning', '_pending_model_settings', '_input_context', '_installed_inputs', '_input_seed_reference', '_input_messages')}
+                ('history_file_path', '_state', '_session_settings', '_tool_settings', 'system_prompt', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch', 'model_name', '_reasoning', '_pending_model_settings', '_input_context', '_installed_inputs', '_input_seed_reference', '_input_messages')}
             self.new_auto_history_filename()
             self._fresh()
             self._fork_previous = backup
@@ -379,6 +403,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         for key in ('session_id', 'turn_id', 'baseline_turn_ids', 'submission_started'):
             if key in message and message[key] is not None: self._state[key] = message[key]
         if message.get('submission_started') is True:
+            self._draft_submitted = True
             if self._input_stager is not None:
                 # Any turn can edit earlier sandbox files, including uploads
                 # whose own message was cancelled before submission.
@@ -465,22 +490,21 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         normalized = inputs.strip().strip('。！!').removeprefix('请')
         if normalized not in commands: return None
         with self._lock:
-            if self._retired: raise gr.Error('聊天已切换，未修改旧会话设置')
-            self._assert_idle()
+            self._assert_configuration_owner()
             desired = commands[normalized]
-            effective = (self._session_settings or {}).get('tools', self._tool_settings)['network']
             word = '开启' if desired else '关闭'
-            if self._state.get('session_id') and effective != desired:
-                self._pending_network = desired
-                self._notice = f'现有会话无法直接{word}云端执行环境联网。请选择“按新配置新建并继续”确认；只携带文字历史，原会话保持原设置。内置网页搜索单独配置'
-            elif not self._state.get('session_id'):
+            self._pending_network = None
+            if self._state.get('session_id'):
+                self._notice = SESSION_CONFIG_LOCKED
+            else:
+                self._assert_idle()
                 self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=desired))
                 self._notice = f'新会话的云端执行环境联网已设为{word}；请输入任务。内置网页搜索单独配置'
-            else:
-                self._notice = f'当前会话的云端执行环境联网已经{word}；内置网页搜索单独配置'
             return deepcopy(self._display), self._status()
 
     def predict(self, inputs, chatbot, use_websearch=False, files=None, reply_language=None, should_check_token_count=True):
+        from modules.agent_message_files import decode_rows
+        chatbot = decode_rows(chatbot, self._conversation_id)
         if not self._owner: raise gr.Error('需要在当前登录会话中发送')
         input_records = self._take_input_files(files)
         if not isinstance(inputs, str) or (not inputs.strip() and not input_records): raise gr.Error('请输入文字任务或添加附件')
@@ -492,6 +516,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             chatbot = self.chatbot
         network_result = self._network_request(inputs) if not input_records else None
         if network_result is not None:
+            self._draft_submitted = True  # A local configuration command was handled.
             yield network_result
             return
         with self._lock:
@@ -646,6 +671,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def retry(self, chatbot, *args, **kwargs):
         raise gr.Error('Agent 不支持重新生成。需要恢复断线时请重新连接原会话')
         yield  # Keep the ordinary model protocol, without a regenerate action.
+
+    def export_markdown(self, filename, chatbot):
+        from modules.agent_message_files import decode_rows
+        return super().export_markdown(filename, decode_rows(chatbot, self._conversation_id))
 
     def respond_browser(self, request_id, response):
         with self._lock:

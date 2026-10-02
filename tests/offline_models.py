@@ -3,6 +3,7 @@
 No config files, credentials, provider SDKs or network endpoints are imported.
 The main layout preview may supply its real offline-initialized presets module.
 """
+import html
 import ast
 import __future__
 from copy import deepcopy
@@ -74,7 +75,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     shared.API_HOST = 'api.openai.com'
     shared.state = SimpleNamespace(multi_api_key=False)
     sys.modules['modules.shared'] = shared
-    helpers = dict(vars(presets), capabilities=capabilities, require_capability=require_capability, model_lock=model_lock, reserve_submission=reserve_submission, consume_submission=consume_submission, gr=gr, os=os, re=re, json=json, logging=logging, time=time,
+    helpers = dict(vars(presets), html=html, capabilities=capabilities, require_capability=require_capability, model_lock=model_lock, reserve_submission=reserve_submission, consume_submission=consume_submission, gr=gr, os=os, re=re, json=json, logging=logging, time=time,
                    traceback=traceback, Enum=Enum, shared=shared, RLock=RLock, deepcopy=deepcopy,
                    HISTORY_DIR=str(history_dir), GRADIO_CACHE=str(history_dir/'cache'),
                    hide_history_when_not_logged_in=False,
@@ -88,7 +89,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
                    colorama=SimpleNamespace(Fore=SimpleNamespace(BLUE=''),Style=SimpleNamespace(RESET_ALL='')),
                    TOKEN_OFFSET=1000,REDUCE_TOKEN_FACTOR=.5, STANDARD_ERROR_MSG='Error: ',
                    NO_APIKEY_MSG='No key', NO_INPUT_MSG='No input', beautify_err_msg=lambda text:text)
-    definitions(root/'modules/utils.py', {'save_file','save_md_file','replace_special_symbols',
+    definitions(root/'modules/utils.py', {'save_file','save_md_file','replace_special_symbols', 'escape_markdown', 'clip_rawtext', 'convert_user_before_marked', 'convert_bot_before_marked',
                                         'init_history_list','get_history_list','get_history_names',
                                         'get_file_names_by_last_modified_time','get_file_names_by_type',
                                         'sorted_by_last_modified_time'}, helpers)

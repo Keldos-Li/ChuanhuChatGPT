@@ -18,6 +18,13 @@ def _agent(model):
     return model is not None and getattr(model, 'is_hosted_agent', False)
 
 
+def message_file_projection(model, rows=None):
+    from modules.agent_message_files import project_message_files
+    return project_message_files(deepcopy(model._display if rows is None else rows), model._cloud_items, model._artifacts,
+        session_id=model._state.get('session_id'), conversation_id=model._conversation_id,
+        current_turn_id=model._state.get('turn_id'), answer_row=model._answer_row)
+
+
 def _chat_frames(updates):
     """Rebase shrinking histories instead of emitting index-shifting diffs.
 
@@ -53,8 +60,9 @@ class ArtifactPanel:
     @staticmethod
     def values(model):
         records = getattr(model, '_artifacts', []) if capabilities(model).output_artifacts else []
+        anchors = message_file_projection(model).artifact_anchors if _agent(model) else {}
         cards, paths, ready_ids = [], [], []
-        labels = {'preparing': '准备中', 'ready': '可下载', 'failed': '下载失败'}
+        labels = {'preparing': '准备中', 'ready': '', 'failed': '下载失败'}
         for record in records:
             size = record.get('size')
             size_text = f'{size:,} 字节' if isinstance(size, int) else '大小待确认'
@@ -68,10 +76,10 @@ class ArtifactPanel:
             escape = lambda value: html.escape(str(value), quote=True)
             # Feather's generic file icon, also used by the installed Gradio UI.
             icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>'
-            cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + status_text) + '"' + ('' if action else ' disabled="disabled"') + '>'
+            cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
                          + '<span class="model-file-icon">' + icon + '</span><span class="model-file-content">'
                          + '<span class="model-file-name">' + escape(record['name']) + '</span>'
-                         + '<span class="model-file-meta"><span class="model-file-size">' + size_text + '</span> · <span class="model-file-state">' + escape(status_text) + '</span></span>'
+                         + '<span class="model-file-meta"><span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
                          + '<span class="model-file-error">' + escape(error) + '</span><span class="model-file-feedback" aria-live="polite"></span></span></button>')
         markup = '<div class="model-file-cards" aria-label="生成的文件">' + ''.join(cards) + '</div>' if cards else ''
         # The hidden native label travels with its File value, so the browser
@@ -130,6 +138,23 @@ def browser_form(model, request_id=None, request: gr.Request = None):
 
 
 class AgentPanel:
+    def __init__(self, format_user=None, format_assistant=None):
+        self.format_user = format_user or (lambda value: value)
+        self.format_assistant = format_assistant or (lambda value: value)
+
+    def render_chat(self, model, rows):
+        if not _agent(model): return rows
+        from modules.agent_message_files import render_projection
+        if isinstance(rows, dict) and rows.get('__type__') == 'update':
+            if 'value' not in rows: return rows
+            return dict(rows, value=self.render_chat(model, rows['value']))
+        return render_projection(message_file_projection(model, rows), self.format_user, self.format_assistant)
+
+    def chat_value(self, model, request: gr.Request):
+        if not _agent(model): return gr.update()
+        model.bind_owner(request)
+        return gr.update(value=self.render_chat(model, model.chatbot))
+
     def input_components(self):
         with gr.Column(visible=False, elem_id='agent-input-files', min_width=0, scale=0) as self.input_group:
             self.input_picker = gr.File(file_count='multiple', type='filepath', label='添加消息附件', show_label=False,
@@ -153,7 +178,7 @@ class AgentPanel:
 
     def selectors(self):
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
-            self.model = gr.Dropdown(label='Agent 子模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
+            self.model = gr.Dropdown(label='使用模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
             self.reasoning = gr.Dropdown(label='推理强度', choices=REASONING_CHOICES, value='default', info='选择后自动用于下一轮对话', min_width=120)
             self.choice_revision = gr.Number(value=0, precision=0, visible=False)
 
@@ -170,9 +195,8 @@ class AgentPanel:
             self.payload = gr.Textbox(type='password', visible=False)
 
     def settings_components(self):
-        with gr.Accordion('Agent 工具与能力', open=False, visible=False, elem_id='agent-tool-settings') as self.settings_group:
-            gr.Markdown('模型是否可用及推理组合由当前 API 地址和账号权限校验。设置保存后用于新会话。云端执行环境联网和网页搜索分别控制。MCP 只开放明确配置的服务器和工具，凭据使用服务器环境变量引用。')
-            self.settings_status = gr.Markdown()
+        with gr.Column(visible=False, elem_id='agent-tool-settings', min_width=0) as self.settings_group:
+            self.settings_status = gr.Markdown(visible=False)
             self.network = gr.Checkbox(label='云端执行环境联网', value=True)
             self.code = gr.Checkbox(label='代码与文件执行', value=True)
             self.search = gr.Checkbox(label='内置网页搜索', value=True)
@@ -183,11 +207,33 @@ class AgentPanel:
             self.discovery = gr.Checkbox(label='工具发现（配置可执行函数后生效）', value=True)
             self.programmatic = gr.Checkbox(label='程序化工具调用', value=True)
             self.functions = gr.CheckboxGroup(label='已注册的应用函数', choices=list(FUNCTIONS), value=[])
-            self.mcp = gr.Textbox(label='MCP 服务器配置（JSON，勿填真实凭据）', value='[]', lines=5)
-            self.availability = gr.Dataframe(headers=['能力', '状态', '说明'], datatype=['str'] * 3, interactive=False, wrap=True)
-            self.save = gr.Button('保存新会话配置')
-            self.fork = gr.Button('按新配置新建并继续')
+            self.mcp = gr.Textbox(label='MCP 服务器', value='[]', lines=5)
+            self.availability = gr.Dataframe(headers=['能力', '状态', '说明'], datatype=['str'] * 3, interactive=False, wrap=True, visible=False)
+            self.save = gr.Button('保存配置')
+            self.fork = gr.Button('按新配置新建并继续', visible=False)
             self.reconnect = gr.Button('重新连接原会话')
+
+    def bind_sidebar(self, tab, prompt, template, prompt_group, ordinary_label):
+        self.sidebar = (tab, prompt, template, prompt_group, ordinary_label)
+
+    def sidebar_values(self, model):
+        if not hasattr(self, 'sidebar'): return []
+        enabled = _agent(model)
+        locked = enabled and (bool(model._state.get('session_id')) or model._running or model._needs_sync
+                              or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed')
+                              or bool(getattr(model, '_pending_send', None)))
+        return [gr.update(label='Agent' if enabled else self.sidebar[-1]),
+                gr.update(**({'value':model.system_prompt} if locked else {}), interactive=not locked, label='系统提示词' if enabled else 'System prompt', lines=4 if enabled else 8),
+                gr.update(interactive=not locked), gr.update(label='系统提示词' if enabled else 'Prompt')]
+
+    def finish_submission(self, model, envelope, draft, request: gr.Request):
+        if not _agent(model): return gr.update(), gr.update()
+        model.bind_owner(request)
+        with model._lock:
+            if not isinstance(envelope, dict) or envelope.get('target') != id(model) or envelope.get('token') != getattr(model, '_draft_token', None):
+                return gr.update(), gr.update()
+            restore = not getattr(model, '_draft_submitted', False) and not draft
+            return gr.update(value=envelope['text']) if restore else gr.update(), model._status()
 
     @property
     def config_inputs(self):
@@ -197,7 +243,7 @@ class AgentPanel:
     def outputs(self):
         return [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
                 self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit,
-                *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else [])
+                *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else []) + (list(self.sidebar[:4]) if hasattr(self, 'sidebar') else []) + [self.save]
 
     def values(self, model, request: gr.Request = None, include_config=True):
         enabled = _agent(model)
@@ -205,27 +251,29 @@ class AgentPanel:
         if not enabled:
             return [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
-                    *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else [])
+                    *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [gr.update(interactive=True)]
         busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
         next_model, next_reasoning = model.agent_model_choice
         cards = model._pending_actions
         chosen = cards[0]['request_id'] if cards else None
         browser = browser_form(model, chosen)
-        settings = model._tool_settings
+        session_locked = bool(model._state.get('session_id'))
+        settings = (model._session_settings or {}).get('tools', model._tool_settings) if session_locked else model._tool_settings
         config = [settings['network'], settings['code_execution'], settings['web_search'], settings['search_mode'], '\n'.join(settings['search_domains']),
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
         return [gr.update(visible=True), gr.update(visible=True), describe_settings(model),
                 gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
-                *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else [])
+                *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked) for value in config], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [gr.update(interactive=not busy and not session_locked)]
 
     def wrap_predict(self, predict, capability_ui):
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
             if _agent(model): files = agent_files
-            for chat, status in _chat_frames(predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request)):
+            projected = ((self.render_chat(model, chat), status) for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request))
+            for chat, status in _chat_frames(projected):
                 yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
-            final_chat = gr.update(value=deepcopy(model.chatbot)) if _agent(model) else gr.update()
+            final_chat = gr.update(value=self.render_chat(model, model.chatbot)) if _agent(model) else gr.update()
             yield final_chat, (model._status() if _agent(model) else gr.update()), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
         return predict_with_ui
 
@@ -262,8 +310,8 @@ class AgentPanel:
                 return message, gr.update(value=[]), self.input_value(model)
             upload_event = self.input_picker.upload(upload_files, [current_model, self.input_picker, self.input_target],
                                      [status_display, self.input_picker, self.input_files], queue=False,
-                js='(model, files, target) => { window.chuanhuAgentUploadStaging = true; return [model, files, window.chuanhuAgentUploadTarget || target]; }')
-            upload_event.then(None, [], [], queue=False, js='() => { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; }')
+                js='(model, files, target) => { window.chuanhuAgentUploadStaging = true; window.chuanhuRefreshSendButton?.(); return [model, files, window.chuanhuAgentUploadTarget || target]; }')
+            upload_event.then(None, [], [], queue=False, js='() => { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; window.chuanhuRefreshSendButton?.(); }')
         def choose_settings(model, name, effort, revision, request: gr.Request):
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort, revision)
@@ -289,18 +337,19 @@ class AgentPanel:
         def fork(model, request: gr.Request):
             model.bind_owner(request)
             return model.new_session_from_history()
-        fork_event = self.fork.click(fork, [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs)
+        fork_event = self.fork.click(fork, [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs).then(self.chat_value, [current_model], [chatbot])
         if capability_ui is not None: fork_event.then(capability_ui.values, [current_model], capability_ui.outputs)
         def reconnect(model, request: gr.Request):
             if _agent(model):
                 model.bind_owner(request)
-                for chat, status in _chat_frames(model.reconnect()):
+                projected = ((self.render_chat(model, chat), status) for chat, status in model.reconnect())
+                for chat, status in _chat_frames(projected):
                     if capability_ui is None: yield chat, status
                     else: yield chat, status, *capability_ui.values(model), *self.values(model, request=request, include_config=False)
                 # Generator cleanup clears the observer's running state only
                 # after its last yield; update the one main Stop/Send pair now.
                 if capability_ui is not None:
-                    yield gr.update(value=deepcopy(model.chatbot)), model._status(), *capability_ui.values(model), *self.values(model, request=request, include_config=False)
+                    yield gr.update(value=self.render_chat(model, model.chatbot)), model._status(), *capability_ui.values(model), *self.values(model, request=request, include_config=False)
         reconnect_outputs = [chatbot, status_display] + (capability_ui.outputs + self.outputs if capability_ui is not None else [])
         self.reconnect.click(reconnect, [current_model], reconnect_outputs)
         def retry_file(model, identifier, request: gr.Request):

@@ -69,9 +69,9 @@ async def exercise():
         assert model.chatbot[-1][0] == 'files'
         # The browser's actual new-settings flow must reconcile the provisional
         # local row with the authoritative cloud message without a blank tail.
+        await call('fork', [None])
         await call('save', [None, False, True, True, 'live', '', True, False,
                             True, True, ['text_statistics'], '[]'])
-        await call('fork', [None])
         await call('transfer_input', ['new-settings-followup', None])
         await call('predict_with_ui', [None, None, model.chatbot, False, [], 'English'])
         assert len(model.chatbot) == 1, model.chatbot
