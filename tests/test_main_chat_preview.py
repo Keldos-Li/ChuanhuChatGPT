@@ -21,6 +21,7 @@ async def exercise():
     state = SessionState(app)
     functions = {fn.fn.__name__: i for i, fn in enumerate(app.fns) if fn.fn}
     request = gr.Request(session_hash='preview-history')
+    chat_frames = []
 
     async def call(name, inputs):
         index = functions[name]
@@ -37,7 +38,12 @@ async def exercise():
             else: inputs.extend(component.value for component in app.fns[index].inputs[6:])
         if name=='predict_with_ui' and len(inputs)==6: inputs=[*inputs,[]]
         result = await app.process_api(index, inputs, state=state, request=request)
-        while result['is_generating']:
+        while True:
+            if name == 'predict_with_ui':
+                frame = result['data'][0]
+                if isinstance(frame, list) or (isinstance(frame, dict) and 'value' in frame):
+                    chat_frames.append(frame)
+            if not result['is_generating']: break
             result = await app.process_api(index, inputs, state=state, request=request,
                                            iterator=result['iterator'])
         return result['data']
@@ -49,6 +55,11 @@ async def exercise():
         # Ordinary automatic titles previously failed on a missing real helper.
         await call('transfer_input', ['Ordinary: title!', None])
         await call('predict_with_ui', [None, None, [], False, [], 'English'])
+        ordinary_chat = chat_frames[-1]
+        if isinstance(ordinary_chat, dict): ordinary_chat = ordinary_chat['value']
+        assert 'class="raw-message hideM"' in ordinary_chat[0][1]
+        assert 'class="md-message"' in ordinary_chat[0][1]
+        assert 'Ordinary synthetic response' in ordinary_chat[0][1]
         title = await call('auto_name_chat_history', [None, i18n('naming.by_first_question'), None, False])
         saved = model.history_file_path
         assert saved == 'Ordinary  title.json'
@@ -56,7 +67,9 @@ async def exercise():
         reset = await call('reset', [None, False])
         assert reset[0] == [] and model.history == []
         restored = await call('load_chat_history', [None, saved[:-5]])
-        assert restored[2]['value'][0][0] == 'Ordinary: title!'
+        assert model.chatbot[0][0] == 'Ordinary: title!'
+        assert 'class="user-message"' in restored[2]['value'][0][0]
+        assert 'class="raw-message hideM"' in restored[2]['value'][0][1]
 
         await call('change_model', ['OpenAI Agent', None, '', 1, 1, 'QA', '', None])
         model = state[current_id]

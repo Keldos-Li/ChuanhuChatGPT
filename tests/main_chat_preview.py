@@ -15,6 +15,9 @@ for name in ('ALL_PROXY','all_proxy','HTTP_PROXY','http_proxy','HTTPS_PROXY','ht
 os.environ['GRADIO_ANALYTICS_ENABLED']='False'
 os.environ['MPLCONFIGDIR']=tempfile.mkdtemp(prefix='chuanhu-mpl-')
 import gradio as gr
+from gradio.components.chatbot import ChatbotData, FileMessage
+from gradio.data_classes import FileData
+from gradio_client import utils as client_utils
 from offline_models import OfflineLocale, install
 from modules.agent_ui import AgentPanel
 from modules.model_capabilities import CapabilityUI
@@ -58,10 +61,18 @@ def build(language='zh_CN'):
         get_geoip=lambda:'Offline acceptance: actual main chat; synthetic Agent. No API requests.',
         get_history_list=lambda *a:gr.update())
     overwrite=ast.parse((ROOT/'modules/overwrites.py').read_text())
-    wrapper=next(node for node in overwrite.body if isinstance(node,ast.FunctionDef) and node.name=='init_with_class_name_as_elem_classes')
-    scope={};exec(compile(ast.Module(body=[wrapper],type_ignores=[]),str(ROOT/'modules/overwrites.py'),'exec'),scope)
-    gr.components.Component.__init__=scope[wrapper.name](gr.components.Component.__init__)
-    gr.blocks.BlockContext.__init__=scope[wrapper.name](gr.blocks.BlockContext.__init__)
+    patches=[node for node in overwrite.body if isinstance(node,ast.FunctionDef) and node.name in
+             ('init_with_class_name_as_elem_classes','postprocess','postprocess_chat_messages')]
+    scope=dict(ChatbotData=ChatbotData,FileMessage=FileMessage,FileData=FileData,client_utils=client_utils,
+               convert_user_before_marked=env.wrappers['convert_user_before_marked'],
+               convert_bot_before_marked=env.wrappers['convert_bot_before_marked'])
+    exec(compile(ast.Module(body=patches,type_ignores=[]),str(ROOT/'modules/overwrites.py'),'exec'),scope)
+    gr.components.Component.__init__=scope['init_with_class_name_as_elem_classes'](gr.components.Component.__init__)
+    gr.blocks.BlockContext.__init__=scope['init_with_class_name_as_elem_classes'](gr.blocks.BlockContext.__init__)
+    # Ordinary replies need the same raw/Markdown pair as production. Agent
+    # projection already contains it, and the real postprocessor is idempotent.
+    gr.Chatbot._postprocess_chat_messages=scope['postprocess_chat_messages']
+    gr.Chatbot.postprocess=scope['postprocess']
     # Exact actual event-chain source, no substitute dropdown or chat callbacks.
     event_prefixes=('cancelBtn.click(', 'user_input.submit(', 'submitBtn.click(',
                     'retryBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(',
