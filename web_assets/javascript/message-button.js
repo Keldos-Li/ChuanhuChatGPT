@@ -51,6 +51,24 @@ function convertBotMessage(gradioButtonMsg) {
     insertChild.appendChild(mdMessage);
 }
 
+function botMessageText(botElement, rawMessage) {
+    // Agent projection carries the original text outside rendered/raw markup.
+    // Prefer it to HTML decoding, which can change entities or indentation.
+    const anchors = Array.from(botElement.querySelectorAll('.agent-message-anchor')).reverse();
+    for (const anchor of anchors) {
+        try {
+            const bytes = Uint8Array.from(atob(anchor.dataset.agentMessageRaw), char => char.charCodeAt(0));
+            const payload = JSON.parse(new TextDecoder().decode(bytes));
+            if (payload.v === 1 && payload.role === 'assistant' && typeof payload.raw === 'string'
+                && payload.key === anchor.dataset.messageKey && payload.conversation === anchor.dataset.conversationId
+                && anchor.dataset.agentMessageCell === 'assistant') return payload.raw;
+        } catch (_) {}
+    }
+    const text = document.createElement('div');
+    text.innerHTML = rawMessage.innerHTML.replace(/<br\s*\/?>/gi, '\n');
+    return text.textContent;
+}
+
 function addChuanhuButton(botElement) {
 
     // botElement = botRow.querySelector('.message.bot');
@@ -104,11 +122,7 @@ function addChuanhuButton(botElement) {
     copyButton.addEventListener('click', async () => {
         if (window.chuanhuSupports?.('message_copy') === false) return;
 
-        let textToCopyHTML = rawMessage.innerHTML;
-        let textToCopyTMP = textToCopyHTML.replace(/<br\s*\/?>/gi, '\n');
-        let textToCopyDOM = document.createElement('div');
-        textToCopyDOM.innerHTML = textToCopyTMP;
-        let textToCopy = textToCopyDOM.textContent;
+        let textToCopy = botMessageText(botElement, rawMessage);
 
         try {
             if ("clipboard" in navigator) {
