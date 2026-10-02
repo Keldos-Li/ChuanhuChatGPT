@@ -250,9 +250,9 @@ hr.append-display {
     color: var(--body-text-color); background: #fff;
     cursor: pointer;
 }
-#chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #f5f5f5; border-color: #d4d4d4; }
+#chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #f5f5f5; }
 .dark #chuanhu-chatbot .agent-message-files > .model-file-card { background: var(--message-bot-background-color-dark); border-color: #454545; }
-.dark #chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #353535; border-color: #626262; }
+.dark #chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #353535; }
 #chuanhu-chatbot .agent-message-files > .model-file-card:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 2px; }
 #chuanhu-chatbot .agent-message-files > .model-file-card:disabled { cursor: wait; }
 .model-file-icon { flex: 0 0 28px; height: 32px; color: var(--body-text-color-subdued); }
