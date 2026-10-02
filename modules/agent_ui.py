@@ -348,7 +348,7 @@ class AgentPanel:
         enabled = _agent(model)
         if enabled and request is not None: model.bind_owner(request)
         if not enabled:
-            return ([gr.update(visible=False)] if hasattr(self, 'accordion') else []) + ([gr.update(visible=False)] if hasattr(self, 'separator') else []) + ([gr.update(visible=False)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
+            return ([gr.update(visible=getattr(self, 'model_panel_visible', False), open=getattr(self, 'model_panel_visible', False))] if hasattr(self, 'accordion') else []) + ([gr.update(visible=False)] if hasattr(self, 'separator') else []) + ([gr.update(visible=False)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
                     *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + ['']
         busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
@@ -361,7 +361,7 @@ class AgentPanel:
         config = [settings['network'], settings['code_execution'], settings['web_search'], settings['search_mode'], '\n'.join(settings['search_domains']),
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
-        return ([gr.update(visible=True)] if hasattr(self, 'accordion') else []) + ([gr.update(visible=True)] if hasattr(self, 'separator') else []) + ([gr.update(visible=True)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=True), gr.update(visible=True), '',
+        return ([gr.update(visible=True, open=True)] if hasattr(self, 'accordion') else []) + ([gr.update(visible=True)] if hasattr(self, 'separator') else []) + ([gr.update(visible=True)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=True), gr.update(visible=True), '',
                 gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=reasoning_choices(), interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
                 *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked and component not in (self.discovery, self.programmatic)) for component, value in zip(self.config_inputs, config)], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id]

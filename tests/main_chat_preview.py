@@ -23,7 +23,7 @@ from modules.agent_ui import AgentPanel
 from modules.model_capabilities import CapabilityUI
 
 
-def build(language='zh_CN'):
+def build(language='zh_CN', hide_my_key=True):
     locale_module=ModuleType('modules.webui_locale')
     locale_module.I18nAuto=lambda:OfflineLocale(ROOT,language)
     sys.modules['modules.webui_locale']=locale_module
@@ -58,7 +58,7 @@ def build(language='zh_CN'):
     namespace.update(env.wrappers)
     namespace.update(AgentPanel=AgentPanel,CapabilityUI=CapabilityUI,gr=gr,change_model=env.factory.change_model,CONCURRENT_COUNT=2,
         config=SimpleNamespace(user_avatar=None,bot_avatar=None,http_proxy='',api_host='api.openai.com'),
-        my_api_key='',HIDE_MY_KEY=True,multi_api_key=False,check_update=False,show_api_billing=False,
+        my_api_key='',HIDE_MY_KEY=hide_my_key,multi_api_key=False,check_update=False,show_api_billing=False,
         hide_history_when_not_logged_in=False,advance_docs={'pdf':{}},chat_name_method_index=0,latex_delimiters_set=[],
         get_html=webui.get_html,get_history_names=lambda:[],get_first_history_name=lambda:None,
         get_template_names=lambda:['Offline examples'],load_template=lambda *a,**k:[],hide_middle_chars=lambda value:'',
@@ -98,8 +98,8 @@ def build(language='zh_CN'):
     return demo
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=8893);parser.add_argument('--language',default='zh_CN');parser.add_argument('--build-only',action='store_true');args=parser.parse_args()
-    demo=build(args.language)
+    parser=argparse.ArgumentParser();parser.add_argument('--port',type=int,default=8893);parser.add_argument('--language',default='zh_CN');parser.add_argument('--build-only',action='store_true');parser.add_argument('--show-api-key',action='store_true');args=parser.parse_args()
+    demo=build(args.language, hide_my_key=not args.show_api_key)
     if args.build_only:print('Actual main layout and event chains built:',len(demo.get_config_file()['components']));demo.close()
     else:
         demo.queue().launch(server_name='127.0.0.1',server_port=args.port,share=False,prevent_thread_lock=True,allowed_paths=[str(ROOT/'web_assets')],blocked_paths=[str(ROOT/'config.json'),str(ROOT/'.env.agents'),str(ROOT/'.agents-runtime'),str(ROOT/'agent_data')])

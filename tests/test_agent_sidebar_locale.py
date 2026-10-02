@@ -32,3 +32,24 @@ def test_sidebar_translations_and_internal_values(language):
         app.close()
     finally:
         i18n.change_language(previous)
+
+
+@pytest.mark.parametrize('ordinary_visible', [False, True])
+def test_shared_model_panel_restores_ordinary_key_visibility(ordinary_visible):
+    from types import SimpleNamespace
+    previous = i18n.language
+    with gr.Blocks(analytics_enabled=False):
+        panel = AgentPanel()
+        panel.model_panel_visible = ordinary_visible
+        with gr.Accordion('Model', visible=ordinary_visible) as panel.accordion:
+            key = gr.Textbox(type='password', visible=ordinary_visible)
+            panel.selectors()
+        panel.settings_components()
+        panel.output_components()
+    values = panel.values(SimpleNamespace(is_hosted_agent=False))
+    update = values[panel.outputs.index(panel.accordion)]
+    assert update['visible'] is ordinary_visible
+    assert update['open'] is ordinary_visible
+    assert values[panel.outputs.index(panel.selection_group)]['visible'] is False
+    assert values[panel.outputs.index(panel.settings_group)]['visible'] is False
+    assert key.visible is ordinary_visible

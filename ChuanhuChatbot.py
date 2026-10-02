@@ -199,7 +199,8 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                         obj="toolbox"), elem_classes="close-btn")
                 with gr.Tabs(elem_id="chuanhu-toolbox-tabs"):
                     with gr.Tab(label=i18n("ui.toolbox.tab.conversation")) as conversation_tab:
-                        with gr.Accordion(label=i18n("ui.toolbox.model.title"), open=not HIDE_MY_KEY, visible=not HIDE_MY_KEY):
+                        agent_panel.model_panel_visible = not HIDE_MY_KEY
+                        with gr.Accordion(label=i18n("ui.toolbox.model.title"), open=not HIDE_MY_KEY, visible=not HIDE_MY_KEY, elem_id="agent-settings-accordion") as agent_panel.accordion:
                             modelDescription = gr.Markdown(
                                 elem_id="gr-model-description",
                                 value=i18n(MODEL_METADATA[MODELS[DEFAULT_MODEL]]["description"]),
@@ -218,7 +219,6 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.multi_account_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
                             else:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.usage_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
-                        with gr.Accordion(label=i18n("ui.toolbox.model.title"), open=True, visible=False, elem_id="agent-settings-accordion") as agent_panel.accordion:
                             agent_panel.selectors()
                         agent_panel.settings_components()
                         prompt_separator = gr.Markdown("---", elem_classes="hr-line", visible=not HIDE_MY_KEY)
