@@ -13,7 +13,7 @@ from modules import shared
 from modules.agent_transport import worker_messages, connection_for_model
 from modules.agent_store import BindingStore, owner_identity
 from modules.model_capabilities import AGENT_CAPABILITIES, require_capability
-from modules.agent_settings import load_settings, save_settings
+from modules.agent_settings import load_settings
 from modules.agent_input_state import AgentInputState, InputPreparationStopped
 from optional.agents.tools import validate_settings, tool_availability
 from modules.presets import i18n
@@ -96,6 +96,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._pending_network = None
         self._pending_model_settings = None
         self._choice_revision = 0
+        self._tool_revision = 0
         self._active_file_retries = set()
         self._initialize_inputs()
         self.metadata = {}
@@ -156,6 +157,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._restore_binding()
 
     def _restore_binding(self):
+        self._draft_token = self._draft_conversation = None
+        self._draft_submitted = self._draft_acknowledged = False
+        self._tool_ui_patch = None
         self._fork_previous = None
         binding = None if self._importing or not self._owner else self._store().get(self._owner, self.history_file_path)
         self._pending_actions = []
@@ -192,7 +196,11 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             if self.history: self._notice = '将根据这份历史创建新的 Agent 会话：带入全部可用文字；不继承旧工具状态、沙盒文件和任务'
 
     def _fresh(self):
+        self._tool_ui_patch = None
+        self._draft_token = self._draft_conversation = None
+        self._draft_submitted = self._draft_acknowledged = False
         self._reset_inputs()
+        self._tool_revision = 0
         self._fork_previous = None
         self._auto_named = False
         self._first_prompt = None
@@ -294,6 +302,51 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         if not self._owner: raise gr.Error('需要在当前登录会话中修改配置')
         if self._retired: raise gr.Error('聊天已切换，请在当前聊天中修改配置')
 
+    def _configuration_revision(self, revision, target):
+        self._assert_configuration_owner()
+        if target != self._conversation_id:
+            raise gr.Error('聊天已切换，未修改旧会话配置')
+        if (type(revision) not in (int, float) or revision < 0
+                or (isinstance(revision, float) and not revision.is_integer())):
+            raise gr.Error('无效的工具设置版本')
+        return int(revision)
+
+    def stage_agent_tools(self, value, revision, target):
+        with self._lock:
+            revision = self._configuration_revision(revision, target)
+            if revision <= getattr(self, '_tool_revision', 0): return None
+            settings = validate_settings(value)
+            if self._state.get('session_id') and settings != self._current_settings()['tools']:
+                raise gr.Error(SESSION_CONFIG_LOCKED)
+            self._assert_idle()
+            if not self._state.get('session_id'):
+                self._tool_settings = settings
+            self._tool_revision = revision
+            return '当前会话配置未变化' if self._state.get('session_id') else '已选择，创建会话时生效'
+
+    def freeze_agent_configuration(self, value, instructions, revision, target):
+        # The caller holds this lock through reserve_submission. The complete
+        # Send snapshot wins over input callbacks still waiting to be handled.
+        with self._lock:
+            revision = self._configuration_revision(revision, target)
+            if revision < getattr(self, '_tool_revision', 0):
+                raise gr.Error('工具配置已变化，请重新发送')
+            settings = validate_settings(value)
+            if not isinstance(instructions, str): raise gr.Error('系统提示词必须为文字')
+            if self._state.get('session_id'):
+                current = self._current_settings()
+                if settings != current['tools'] or instructions != current['instructions']:
+                    raise gr.Error(SESSION_CONFIG_LOCKED)
+                # An unchanged restored session can still use Send's existing
+                # reconnect path. Active or queued local sends stay exclusive.
+                if self._running or getattr(self, '_pending_send', None):
+                    raise gr.Error('当前会话正在提交或生成，请等待完成或先停止')
+            else:
+                self._assert_idle()
+                self._tool_settings = settings
+                self.system_prompt = instructions
+            self._tool_revision = revision
+
     def set_system_prompt(self, new_system_prompt):
         with self._lock:
             self._assert_configuration_owner()
@@ -314,8 +367,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     raise gr.Error(SESSION_CONFIG_LOCKED)
                 return '当前会话配置未变化'
             self._assert_idle()
-            self._tool_settings = save_settings(shared.chuanhu_path, self._owner, settings)
-            return '新会话配置已保存'
+            self._tool_settings = settings
+            return '已选择，创建会话时生效'
 
     def new_session_from_history(self):
         with self._lock:
@@ -408,6 +461,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 # Any turn can edit earlier sandbox files, including uploads
                 # whose own message was cancelled before submission.
                 self._input_stager.mark_submitted(self._installed_inputs)
+        if getattr(self, '_draft_submitted', False) and message.get('turn_id'):
+            self._draft_acknowledged = True
             self._clear_input_selection()
             self._input_context = None
         outcome = message.get('outcome')
@@ -498,7 +553,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self._notice = SESSION_CONFIG_LOCKED
             else:
                 self._assert_idle()
-                self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=desired))
+                self._tool_settings = validate_settings(dict(self._tool_settings, network=desired))
+                self._tool_ui_patch = {'token': uuid4().hex, 'conversation': self._conversation_id,
+                                       'revision': self._tool_revision, 'network': desired}
                 self._notice = f'新会话的云端执行环境联网已设为{word}；请输入任务。内置网页搜索单独配置'
             return deepcopy(self._display), self._status()
 
@@ -517,6 +574,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         network_result = self._network_request(inputs) if not input_records else None
         if network_result is not None:
             self._draft_submitted = True  # A local configuration command was handled.
+            self._draft_acknowledged = True
             yield network_result
             return
         with self._lock:

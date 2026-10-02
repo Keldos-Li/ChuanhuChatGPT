@@ -9,11 +9,11 @@ from test_agent_model import env,select
 def test_network_command_generator_does_not_keep_thread_owned_lock(env,monkeypatch):
     model=select(env)
     ownership=[]
-    save=env.agents.save_settings
-    def record_save(*args,**kwargs):
+    validate=env.agents.validate_settings
+    def record_validate(*args,**kwargs):
         ownership.append(threading.get_ident())
-        return save(*args,**kwargs)
-    monkeypatch.setattr(env.agents,'save_settings',record_save)
+        return validate(*args,**kwargs)
+    monkeypatch.setattr(env.agents,'validate_settings',record_validate)
     with gr.Blocks(analytics_enabled=False) as app:
         current=gr.State();prompt=gr.Textbox();chat=gr.Chatbot();status=gr.Markdown()
         gr.Button().click(env.wrappers['predict'],[current,prompt,chat],[chat,status])

@@ -26,12 +26,13 @@ def forbid_network(monkeypatch):
 def test_new_chat_settings_apply_when_session_is_created(env, monkeypatch):
     calls, _ = complete(env, monkeypatch)
     model = select(env)
+    defaults = load_settings(env.agents.shared.chuanhu_path, model._owner)
     settings = dict(model._tool_settings, network=False, web_search=False)
     model.save_agent_tools(settings)
     env.wrappers['set_system_prompt'](model, 'Instructions for this session', request=request())
     settings['network'] = True
     assert model._tool_settings['network'] is False
-    assert load_settings(env.agents.shared.chuanhu_path, model._owner) == model._tool_settings
+    assert load_settings(env.agents.shared.chuanhu_path, model._owner) == defaults
     assert load_settings(env.agents.shared.chuanhu_path, owner_identity('other'))['network'] is True
 
     send(env, model)
@@ -98,6 +99,10 @@ def test_precreated_file_session_locks_configuration_before_first_turn(env, tmp_
         model.save_agent_tools(dict(model._tool_settings, network=True))
     with pytest.raises(gr.Error, match='会话创建后'):
         model.set_system_prompt('A different instruction')
+    with pytest.raises(gr.Error, match='会话创建后'):
+        model.stage_agent_tools(dict(model._tool_settings, network=True), 1, model._conversation_id)
+    with pytest.raises(gr.Error, match='会话创建后'):
+        model.freeze_agent_configuration(snapshot['tools'], 'Different instructions', 1, model._conversation_id)
     model._network_request('开启联网')
     assert model._pending_network is None
     assert model._session_settings == snapshot
@@ -128,7 +133,7 @@ def test_network_commands_configure_new_chat_without_creating_session(env):
     assert model._tool_settings['network'] is False
     assert model._tool_settings['web_search'] is True
     assert not model._state.get('session_id') and not model.history
-    assert load_settings(env.agents.shared.chuanhu_path, model._owner)['network'] is False
+    assert load_settings(env.agents.shared.chuanhu_path, model._owner)['network'] is True
     send(env, model, '开启联网')
     assert model._tool_settings['network'] is True and model._pending_network is None
 
@@ -144,7 +149,7 @@ def test_idempotent_existing_setters_do_not_overwrite_new_chat_defaults(env, mon
     def fail_save(*args, **kwargs):
         raise AssertionError('An unchanged existing session must not rewrite saved settings')
 
-    monkeypatch.setattr(env.agents, 'save_settings', fail_save)
+    monkeypatch.setattr('modules.agent_settings.save_settings', fail_save)
     model.save_agent_tools(deepcopy(snapshot['tools']))
     model.set_system_prompt(snapshot['instructions'])
     assert load_settings(env.agents.shared.chuanhu_path, model._owner) == new_defaults
@@ -212,6 +217,8 @@ def test_configuration_setters_require_current_owned_model(env, unavailable):
         lambda: model.save_agent_tools(dict(model._tool_settings, network=False)),
         lambda: model.set_system_prompt('Not authorized'),
         lambda: model._network_request('关闭联网'),
+        lambda: model.stage_agent_tools(model._tool_settings, 1, model._conversation_id),
+        lambda: model.freeze_agent_configuration(model._tool_settings, 'Not authorized', 1, model._conversation_id),
     ):
         with pytest.raises(gr.Error):
             action()
@@ -278,3 +285,149 @@ def test_legacy_fork_does_not_apply_obsolete_pending_configuration(env, monkeypa
     assert model._state.get('session_id') and model._current_settings() == snapshot
     assert model._tool_settings == snapshot['tools']
     assert model.system_prompt == snapshot['instructions']
+
+
+def test_tool_inputs_apply_locally_and_ignore_older_callbacks(env):
+    model = select(env)
+    target = model._conversation_id
+    settings = dict(model._tool_settings, network=False)
+    model.stage_agent_tools(settings, 2, target)
+    latest = dict(settings, web_search=False)
+    model.stage_agent_tools(latest, 4, target)
+    assert model.stage_agent_tools(settings, 3, target) is None
+    assert model.stage_agent_tools(settings, 4, target) is None
+    assert model._tool_settings == latest and model._tool_revision == 4
+    settings['search_domains'].append('late-edit.example.com')
+    latest['search_domains'].append('also-late.example.com')
+    assert model._tool_settings['search_domains'] == []
+    assert load_settings(env.agents.shared.chuanhu_path, model._owner)['network'] is True
+
+
+def test_tool_inputs_preserve_existing_account_defaults(env):
+    model = select(env)
+    existing = dict(model._tool_settings, network=False, web_search=False)
+    save_settings(env.agents.shared.chuanhu_path, model._owner, existing)
+    preferences_path = model._store().path.parent / model._owner / 'settings.json'
+    before = preferences_path.read_bytes()
+    model.stage_agent_tools(dict(model._tool_settings, include_screenshots=True), 1, model._conversation_id)
+    model.save_agent_tools(dict(model._tool_settings, search_mode='cached'))
+    model._network_request('关闭联网')
+    model.freeze_agent_configuration(model._tool_settings, 'Local instructions', 1, model._conversation_id)
+    assert preferences_path.read_bytes() == before
+    assert load_settings(env.agents.shared.chuanhu_path, model._owner) == existing
+
+
+@pytest.mark.parametrize('revision', [None, -1, 0.5, '2', True, float('nan'), float('inf')])
+def test_tool_events_require_valid_integer_revision(env, revision):
+    model = select(env)
+    snapshot = model._current_settings()
+    for action in (
+        lambda: model.stage_agent_tools(dict(model._tool_settings, network=False), revision, model._conversation_id),
+        lambda: model.freeze_agent_configuration(model._tool_settings, 'Changed', revision, model._conversation_id),
+    ):
+        with pytest.raises(gr.Error, match='版本'):
+            action()
+    assert model._current_settings() == snapshot
+
+
+def test_old_conversation_tool_events_cannot_modify_reset_chat(env):
+    model = select(env)
+    target = model._conversation_id
+    model.stage_agent_tools(dict(model._tool_settings, network=False), 10, target)
+    model.reset()
+    snapshot = model._current_settings()
+    for action in (
+        lambda: model.stage_agent_tools(dict(model._tool_settings, network=True), 11, target),
+        lambda: model.freeze_agent_configuration(model._tool_settings, 'Old instructions', 11, target),
+    ):
+        with pytest.raises(gr.Error, match='聊天已切换'):
+            action()
+    assert model._current_settings() == snapshot and model._tool_revision == 0
+    model.stage_agent_tools(dict(model._tool_settings, network=True), 1, model._conversation_id)
+    assert model._tool_settings['network'] is True
+
+
+@pytest.mark.parametrize('callback_before_send', [False, True])
+def test_send_snapshot_wins_over_same_revision_input_callback(env, monkeypatch, callback_before_send):
+    calls, _ = complete(env, monkeypatch)
+    model = select(env)
+    target = model._conversation_id
+    earlier = dict(model._tool_settings, network=False)
+    latest = dict(earlier, web_search=False, search_domains=['example.com'])
+    if callback_before_send:
+        model.stage_agent_tools(earlier, 1, target)
+    with model._lock:
+        model.freeze_agent_configuration(latest, 'Send-time instructions', 1, target)
+        envelope = reserve_submission(model, 'Use exactly these settings')
+    assert model.stage_agent_tools(earlier, 1, target) is None
+    with pytest.raises(gr.Error):
+        model.stage_agent_tools(earlier, 2, target)
+    with pytest.raises(gr.Error):
+        model.set_system_prompt('Late instructions')
+    with pytest.raises(gr.Error):
+        model.freeze_agent_configuration(earlier, 'Late send', 2, target)
+    assert model._tool_revision == 1
+    list(env.wrappers['predict'](model, envelope, [], request=request()))
+    command = next(call for call in calls if call['action'] == 'run')
+    assert command['tool_settings'] == latest
+    assert command['instructions'] == 'Send-time instructions'
+    assert model._session_settings['tools'] == latest
+    assert model._session_settings['instructions'] == 'Send-time instructions'
+    with pytest.raises(gr.Error, match='会话创建后'):
+        model.stage_agent_tools(earlier, 2, target)
+    with pytest.raises(gr.Error, match='会话创建后'):
+        model.freeze_agent_configuration(earlier, 'Send-time instructions', 2, target)
+
+
+def test_freeze_rejects_stale_send_and_validates_atomically(env):
+    model = select(env)
+    target = model._conversation_id
+    model.stage_agent_tools(dict(model._tool_settings, network=False), 5, target)
+    snapshot = model._current_settings()
+    for tools, instructions, revision in (
+        (dict(model._tool_settings, network=True), 'Old snapshot', 4),
+        (dict(model._tool_settings, network='invalid'), 'Invalid tools', 6),
+        (dict(model._tool_settings, network=True), None, 6),
+    ):
+        with pytest.raises((gr.Error, ValueError)):
+            model.freeze_agent_configuration(tools, instructions, revision, target)
+        assert model._current_settings() == snapshot and model._tool_revision == 5
+
+
+@pytest.mark.parametrize('state', ['running', 'queued', 'uncertain', 'needs_sync'])
+def test_tool_callbacks_and_freeze_reject_unsettled_new_session(env, state):
+    model = select(env)
+    snapshot = model._current_settings()
+    if state == 'running': model._running = True
+    elif state == 'queued': reserve_submission(model, 'Queued')
+    elif state == 'uncertain': model._state['outcome'] = 'uncertain'
+    else: model._needs_sync = True
+    for action in (
+        lambda: model.stage_agent_tools(dict(model._tool_settings, network=False), 1, model._conversation_id),
+        lambda: model.freeze_agent_configuration(model._tool_settings, 'Late change', 1, model._conversation_id),
+    ):
+        with pytest.raises(gr.Error):
+            action()
+    assert model._current_settings() == snapshot and model._tool_revision == 0
+
+
+def test_existing_snapshot_is_idempotent_and_still_allows_next_model(env, monkeypatch):
+    calls, _ = complete(env, monkeypatch)
+    model = select(env)
+    send(env, model)
+    snapshot = deepcopy(model._session_settings)
+    session = model._state['session_id']
+    model.stage_agent_tools(snapshot['tools'], 1, model._conversation_id)
+    model._needs_sync = True
+    model.freeze_agent_configuration(snapshot['tools'], snapshot['instructions'], 1, model._conversation_id)
+    model._needs_sync = False
+    model.set_agent_model('gpt-6-sol', 'high')
+    with model._lock:
+        model.freeze_agent_configuration(snapshot['tools'], snapshot['instructions'], 1, model._conversation_id)
+        envelope = reserve_submission(model, 'Next model')
+    list(env.wrappers['predict'](model, envelope, model.chatbot, request=request()))
+    assert model._state['session_id'] == session
+    assert model._session_settings['tools'] == snapshot['tools']
+    assert model._session_settings['instructions'] == snapshot['instructions']
+    assert model.agent_model_choice == ('gpt-6-sol', 'high')
+    assert [call['action'] for call in calls][-3:] == ['update', 'run', 'download']

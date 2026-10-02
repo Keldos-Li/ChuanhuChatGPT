@@ -567,15 +567,19 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     transfer_input_args = dict(
-        fn=transfer_input, inputs=[user_input, current_model, agent_panel.model, agent_panel.reasoning, agent_panel.choice_revision, agent_panel.input_files], outputs=[
+        fn=agent_panel.wrap_transfer(transfer_input), inputs=[user_input, current_model, agent_panel.model, agent_panel.reasoning, agent_panel.choice_revision, agent_panel.input_files,
+            *agent_panel.config_inputs, systemPromptTxt, agent_panel.config_target, agent_panel.tool_revision], outputs=[
             user_question, user_input, submitBtn, cancelBtn], show_progress=True,
-        js='''(text, model, name, effort, unused, files) => {
+        js='''(text, model, name, effort, unused, files, ...configuration) => {
             const root = typeof gradioApp === 'function' ? gradioApp() : document;
             if (window.chuanhuInputConversation?.() &&
                 ((window.chuanhuAgentUploading && window.chuanhuAgentUploadTarget === window.chuanhuInputConversation()) ||
                  root.querySelector('#agent-upload-files .uploading, #agent-upload-files .file-preview-holder')))
                 throw new Error('附件仍在上传，请等待完成后发送');
-            return [text, model, name, effort, window.chuanhuAgentChoiceRevision || 0, files];
+            if (window.chuanhuInputConversation?.())
+                window.chuanhuAgentPendingDraft = {conversation: window.chuanhuInputConversation(), text, revision: window.chuanhuDraftEditRevision || 0};
+            configuration[configuration.length - 1] = window.chuanhuAgentToolRevision || 0;
+            return [text, model, name, effort, window.chuanhuAgentChoiceRevision || 0, files, ...configuration];
         }'''
     )
 
@@ -586,6 +590,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
 
     load_history_from_file_args = dict(
         fn=load_chat_history,
+        js='(...args) => { window.chuanhuAgentPendingDraft = null; return args; }',
         inputs=[current_model, historySelectList],
         outputs=[saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn],
     )
@@ -680,7 +685,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         set_single_turn, [current_model, single_turn_checkbox], None, show_progress=False)
     use_streaming_checkbox.input(set_streaming, [current_model, use_streaming_checkbox], None, show_progress=False)
     model_select_dropdown.input(change_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
-                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model").then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
+                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model", js="(...args) => { window.chuanhuAgentPendingDraft = null; return args; }").then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
     model_select_dropdown.change(toggle_like_btn_visibility, [model_select_dropdown], [
                                  like_dislike_area], show_progress=False)
     # model_select_dropdown.change(

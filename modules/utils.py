@@ -502,7 +502,8 @@ def save_file(filename, model):
         # Agent turns may contain multiple assistant messages or only files.
         # Persist roles faithfully instead of pairing adjacent messages.
         for message in history:
-            if message['role'] == 'user': chatbot.append([message['content'], None])
+            if message['role'] == 'image': chatbot.append([(message['content'], None), None])
+            elif message['role'] == 'user': chatbot.append([message['content'], None])
             elif message['role'] == 'assistant':
                 if chatbot and chatbot[-1][1] is None: chatbot[-1][1] = message['content']
                 else: chatbot.append([None, message['content']])

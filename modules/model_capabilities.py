@@ -68,6 +68,8 @@ def reserve_submission(model, text, files=None):
         model._pending_send = token
         if getattr(model, 'is_hosted_agent', False):
             model._draft_token, model._draft_submitted = token, False
+            model._draft_acknowledged = False
+            model._draft_text, model._draft_conversation = text, model._conversation_id
         return {'text': text, 'target': id(model), 'token': token}
 
 
@@ -100,6 +102,9 @@ class CapabilityUI:
             results.append(gr.update(**update))
         payload=dict(asdict(caps), busy=is_busy(model))
         payload['input_target'] = getattr(model, '_conversation_id', '') if caps.sandbox_attachments else ''
+        if caps.sandbox_attachments and getattr(model, '_draft_acknowledged', False) and getattr(model, '_draft_token', None):
+            payload['submitted_draft'] = {'token': model._draft_token, 'conversation': model._draft_conversation, 'text': model._draft_text}
+        if caps.agent_tools and getattr(model, '_tool_ui_patch', None): payload['tool_patch'] = model._tool_ui_patch
         results.extend([gr.update(interactive=not is_busy(model)),
             '<span data-model-capabilities="'+html.escape(json.dumps(payload),quote=True)+'"></span>'])
         if self.submit is not None and self.cancel is not None:

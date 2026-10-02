@@ -215,7 +215,7 @@ def test_session_config_is_locked_until_a_new_conversation(env,monkeypatch):
     latest=[c for c in calls if c['action']=='run'][-1]
     assert latest['session_id'] is None and latest['tool_settings']['network'] is False and latest['history_reference']
     assert model.history_file_path!=old_path and (env.history_dir/old_path).exists()
-    restored=select(env);assert restored._tool_settings['network'] is False
+    restored=select(env);assert restored._tool_settings['network'] is True
 
 
 def test_cross_browser_restart_binding_and_authoritative_history(env,monkeypatch):

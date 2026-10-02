@@ -58,3 +58,28 @@ def test_real_rendered_roundtrip_keeps_files_with_their_turn_after_restore(env,m
         assert ordinary.chatbot==model.chatbot and 'agent-message-anchor' not in json.dumps(ordinary.history)
     try:asyncio.run(exercise())
     finally:app.close()
+
+
+def test_agent_export_of_adopted_image_history_does_not_drop_user_turn_on_reload(env, tmp_path):
+    ordinary = select(env, name='GPT3.5 Turbo')
+    image_messages = []
+    for i in range(3):
+        path = tmp_path / ('photo' + str(i) + '.png')
+        path.write_bytes(b'synthetic image')
+        image_messages.append({'role': 'image', 'content': str(path)})
+    ordinary.history = image_messages + [
+        {'role': 'user', 'content': 'Compare these three images'},
+        {'role': 'assistant', 'content': 'They differ'},
+    ]
+    ordinary.auto_save([])
+    ordinary.load_chat_history(ordinary.history_file_path)
+    agent = select(env, ordinary)
+    agent.export_markdown('exported', agent.chatbot)
+    exported = json.loads((env.history_dir / 'exported.json').read_text())
+    assert exported['history'] == ordinary.history
+    restored = select(env, browser='restored')
+    restored.load_chat_history('exported')
+    assert restored.history == [
+        {'role': 'user', 'content': 'Compare these three images'},
+        {'role': 'assistant', 'content': 'They differ'},
+    ]

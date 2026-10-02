@@ -3,6 +3,7 @@
 
 // buttons
 function newChatClick() {
+    window.chuanhuAgentPendingDraft = null;
     gradioApp().querySelector('#empty-btn').click();
 }
 function jsonDownloadClick() {

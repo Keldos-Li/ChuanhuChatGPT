@@ -197,7 +197,7 @@ class AgentPanel:
     def settings_components(self):
         with gr.Column(visible=False, elem_id='agent-tool-settings', min_width=0) as self.settings_group:
             self.settings_status = gr.Markdown(visible=False)
-            self.network = gr.Checkbox(label='云端执行环境联网', value=True)
+            self.network = gr.Checkbox(label='云端执行环境联网', value=True, elem_id='agent-network-access')
             self.code = gr.Checkbox(label='代码与文件执行', value=True)
             self.search = gr.Checkbox(label='内置网页搜索', value=True)
             self.search_mode = gr.Dropdown(label='搜索模式', choices=['live', 'cached', 'disabled'], value='live')
@@ -209,9 +209,37 @@ class AgentPanel:
             self.functions = gr.CheckboxGroup(label='已注册的应用函数', choices=list(FUNCTIONS), value=[])
             self.mcp = gr.Textbox(label='MCP 服务器', value='[]', lines=5)
             self.availability = gr.Dataframe(headers=['能力', '状态', '说明'], datatype=['str'] * 3, interactive=False, wrap=True, visible=False)
-            self.save = gr.Button('保存配置')
             self.fork = gr.Button('按新配置新建并继续', visible=False)
             self.reconnect = gr.Button('重新连接原会话')
+            self.tool_revision = gr.Number(value=0, precision=0, visible=False)
+            self.config_target = gr.Textbox(visible=False)
+
+    @staticmethod
+    def config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp):
+        return {'network': network, 'code_execution': code, 'web_search': search, 'search_mode': mode,
+                'search_domains': [s.strip() for s in domains.splitlines() if s.strip()],
+                'computer_use': browser, 'include_screenshots': screenshots, 'tool_search': discovery,
+                'programmatic_tool_calling': programmatic, 'functions': functions, 'mcp_servers': json.loads(mcp)}
+
+    def wrap_transfer(self, transfer):
+        def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning='default', agent_choice_revision=None, agent_files=None,
+                           network=None, code=None, search=None, mode=None, domains=None, browser=None, screenshots=None,
+                           discovery=None, programmatic=None, functions=None, mcp=None, instructions=None, target=None, tool_revision=None,
+                           request: gr.Request = None):
+            if _agent(current_model):
+                current_model.bind_owner(request)
+                with current_model._lock:
+                    if network is not None:
+                        try: config = self.config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp)
+                        except (TypeError, ValueError, AttributeError): raise gr.Error('工具配置格式无效，请检查后发送') from None
+                        current_model.freeze_agent_configuration(config, instructions, tool_revision, target)
+                    result = list(transfer(inputs, current_model, agent_model, agent_reasoning, agent_choice_revision, agent_files, request=request))
+                    # Keep the draft until the browser sees submission accepted.
+                    # Failed preparation never needs a delayed server writeback.
+                    result[1] = gr.update()
+                    return tuple(result)
+            return transfer(inputs, current_model, agent_model, agent_reasoning, agent_choice_revision, agent_files, request=request)
+        return transfer_input
 
     def bind_sidebar(self, tab, prompt, template, prompt_group, ordinary_label):
         self.sidebar = (tab, prompt, template, prompt_group, ordinary_label)
@@ -230,10 +258,9 @@ class AgentPanel:
         if not _agent(model): return gr.update(), gr.update()
         model.bind_owner(request)
         with model._lock:
-            if not isinstance(envelope, dict) or envelope.get('target') != id(model) or envelope.get('token') != getattr(model, '_draft_token', None):
+            if not isinstance(envelope, dict) or envelope.get('target') != id(model) or envelope.get('token') != getattr(model, '_draft_token', None) or getattr(model, '_draft_conversation', None) != model._conversation_id:
                 return gr.update(), gr.update()
-            restore = not getattr(model, '_draft_submitted', False) and not draft
-            return gr.update(value=envelope['text']) if restore else gr.update(), model._status()
+            return gr.update(), model._status()
 
     @property
     def config_inputs(self):
@@ -243,7 +270,7 @@ class AgentPanel:
     def outputs(self):
         return [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
                 self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit,
-                *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else []) + (list(self.sidebar[:4]) if hasattr(self, 'sidebar') else []) + [self.save]
+                *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else []) + (list(self.sidebar[:4]) if hasattr(self, 'sidebar') else []) + [self.config_target]
 
     def values(self, model, request: gr.Request = None, include_config=True):
         enabled = _agent(model)
@@ -251,7 +278,7 @@ class AgentPanel:
         if not enabled:
             return [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
-                    *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [gr.update(interactive=True)]
+                    *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + ['']
         busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
         next_model, next_reasoning = model.agent_model_choice
         cards = model._pending_actions
@@ -265,7 +292,7 @@ class AgentPanel:
         return [gr.update(visible=True), gr.update(visible=True), describe_settings(model),
                 gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
-                *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked) for value in config], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [gr.update(interactive=not busy and not session_locked)]
+                *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked) for value in config], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id]
 
     def wrap_predict(self, predict, capability_ui):
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
@@ -325,15 +352,21 @@ class AgentPanel:
         }'''
         for selector in (self.model, self.reasoning):
             selector.input(choose_settings, [current_model, self.model, self.reasoning, self.choice_revision], [status_display], queue=False, js=choice_js)
-        def save(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, request: gr.Request):
+        def choose_tools(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, revision, target, request: gr.Request):
             model.bind_owner(request)
             try:
-                value = {'network': network, 'code_execution': code, 'web_search': search, 'search_mode': mode, 'search_domains': [s.strip() for s in domains.splitlines() if s.strip()],
-                         'computer_use': browser, 'include_screenshots': screenshots, 'tool_search': discovery, 'programmatic_tool_calling': programmatic, 'functions': functions, 'mcp_servers': json.loads(mcp)}
-                message = model.save_agent_tools(value)
-            except Exception as error: message = str(error) if not isinstance(error, json.JSONDecodeError) else 'MCP 配置不是有效 JSON'
-            return message, *self.values(model)
-        self.save.click(save, [current_model, *self.config_inputs], [status_display, *self.outputs], queue=False)
+                value = self.config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp)
+                model.stage_agent_tools(value, revision, target)
+                return gr.update()
+            except Exception as error: return str(error) if not isinstance(error, json.JSONDecodeError) else 'MCP 配置不是有效 JSON'
+        tools_js = '''(model, ...values) => {
+            window.chuanhuAgentToolRevision = (window.chuanhuAgentToolRevision || 0) + 1;
+            values[values.length - 2] = window.chuanhuAgentToolRevision;
+            return [model, ...values];
+        }'''
+        for component in self.config_inputs:
+            component.input(choose_tools, [current_model, *self.config_inputs, self.tool_revision, self.config_target],
+                            [status_display], queue=False, js=tools_js)
         def fork(model, request: gr.Request):
             model.bind_owner(request)
             return model.new_session_from_history()

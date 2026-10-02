@@ -33,6 +33,8 @@
         if (more && more.hidden === hasMore) more.hidden = !hasMore;
         window.chuanhuRefreshSendButton?.();
         window.chuanhuRefreshArtifactCards?.();
+        window.chuanhuClearSubmittedDraft?.(snapshot.submitted_draft);
+        window.chuanhuApplyToolPatch?.(snapshot.tool_patch);
     }
     function schedule() {
         if (!queued) { queued = true; queueMicrotask(apply); }

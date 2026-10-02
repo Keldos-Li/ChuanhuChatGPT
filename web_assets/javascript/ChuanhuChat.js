@@ -460,6 +460,7 @@ function setAutocomplete() {
 }
 
 function clearChatbot(a, b) {
+    window.chuanhuAgentPendingDraft = null;
     clearHistoryHtml();
     // clearMessageRows();
     return [a, b]

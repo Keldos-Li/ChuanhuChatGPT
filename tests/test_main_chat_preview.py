@@ -1,5 +1,6 @@
 """Exercise the actual main-page preview's wired history callbacks offline."""
 from pathlib import Path
+import json
 import subprocess
 import sys
 
@@ -28,6 +29,12 @@ async def exercise():
             choice=getattr(current,'agent_model_choice',('gpt-6-astra',None))
             file_values=[{'path':path,'orig_name':Path(path).name,'meta':{'_type':'gradio.FileData'}} for path in getattr(current,'_pending_upload_paths',())]
             inputs=[*inputs,choice[0],choice[1] or 'default',getattr(current,'_choice_revision',0),file_values]
+            if getattr(current,'is_hosted_agent',False):
+                tools=current._current_settings()['tools']
+                inputs.extend([tools['network'],tools['code_execution'],tools['web_search'],tools['search_mode'],'\n'.join(tools['search_domains']),
+                    tools['computer_use'],tools['include_screenshots'],tools['tool_search'],tools['programmatic_tool_calling'],tools['functions'],
+                    json.dumps(tools['mcp_servers']),current.system_prompt,current._conversation_id,current._tool_revision])
+            else: inputs.extend(component.value for component in app.fns[index].inputs[6:])
         if name=='predict_with_ui' and len(inputs)==6: inputs=[*inputs,[]]
         result = await app.process_api(index, inputs, state=state, request=request)
         while result['is_generating']:
@@ -70,8 +77,8 @@ async def exercise():
         # The browser's actual new-settings flow must reconcile the provisional
         # local row with the authoritative cloud message without a blank tail.
         await call('fork', [None])
-        await call('save', [None, False, True, True, 'live', '', True, False,
-                            True, True, ['text_statistics'], '[]'])
+        await call('choose_tools', [None, False, True, True, 'live', '', True, False,
+                            True, True, ['text_statistics'], '[]', 1, model._conversation_id])
         await call('transfer_input', ['new-settings-followup', None])
         await call('predict_with_ui', [None, None, model.chatbot, False, [], 'English'])
         assert len(model.chatbot) == 1, model.chatbot

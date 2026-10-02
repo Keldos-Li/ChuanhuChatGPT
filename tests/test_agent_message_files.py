@@ -269,7 +269,7 @@ def test_conversation_identifier_is_escaped_and_validated():
 
 def test_projection_validates_raw_cell_types_and_does_not_accept_boolean_row_index():
     with pytest.raises(TypeError):
-        project([['q', ('file', 'name')]])
+        project([['q', {'path': 'file', 'name': 'name'}]])
     result = project([['q', 'a']], [], [artifact('f', 'current')], current_turn_id='current', answer_row=False)
     assert result.view_only_rows == {1}
 
@@ -384,3 +384,122 @@ def test_true_repeated_subset_still_preserves_ambiguity_after_fast_path(monkeypa
     assert calls == [True]
     assert result.view_only_rows == {1, 2}
     assert result.row_anchors[0] not in result.artifact_anchors.values()
+
+
+@pytest.mark.parametrize('file_cell', [['/unused/photo.png'], ['/unused/photo.png', None],
+                                     ['/unused/photo.png', '图片 👋'], ('/unused/photo.png',),
+                                     ('/unused/photo.png', None), ('/unused/photo.png', 'image')])
+def test_native_file_cell_formats_pass_through_without_text_conversion(file_cell, monkeypatch):
+    import builtins
+    rows = [[file_cell, None], ['question', 'answer'], [None, file_cell], [file_cell, 'caption']]
+    before = deepcopy(rows)
+    calls = []
+    def formatter(value):
+        assert isinstance(value, str)
+        calls.append(value)
+        return '<div>' + value + '</div>'
+    def no_file_reads(*args, **kwargs):
+        pytest.fail('Projection must not open native file-cell paths')
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, 'open', no_file_reads)
+        result = project(rows)
+        rendered = render_projection(result, formatter, formatter)
+        decoded = decode_rows(rendered, 'conversation')
+    assert decoded == rows == before
+    assert calls == ['question', 'answer', 'caption']
+    assert set(result.row_anchors) == {1, 3}
+    assert rendered[0][0] == file_cell and type(rendered[0][0]) is type(file_cell)
+    assert rendered[2][1] == file_cell and type(decoded[2][1]) is type(file_cell)
+    assert not result.view_only_rows
+    if isinstance(file_cell, list):
+        assert result.rows[0][0] is not file_cell
+        assert rendered[0][0] is not result.rows[0][0]
+        assert decoded[0][0] is not rendered[0][0]
+
+
+def test_native_files_before_between_and_after_messages_preserve_official_anchors():
+    ordinary = [['first?', 'first!'], ['second?', 'second!']]
+    files = [[['/unused/before.png', None], None],
+             [None, ('/unused/between.pdf', 'PDF')],
+             [['/unused/after.png'], None]]
+    rows = [files[0], ordinary[0], files[1], ordinary[1], files[2]]
+    records = [artifact('first', 't1'), artifact('second', 't2')]
+    baseline = project(ordinary, two_turns(), records)
+    mixed = project(rows, two_turns(), records)
+    assert mixed.artifact_anchors == baseline.artifact_anchors
+    assert mixed.artifact_anchors['first'] == mixed.row_anchors[1]
+    assert mixed.artifact_anchors['second'] == mixed.row_anchors[3]
+    assert set(mixed.row_anchors) == {1, 3}
+    assert not mixed.view_only_rows
+    assert decode_rows(render(mixed), 'conversation') == rows
+
+
+def test_native_file_cells_are_not_cloud_text_candidates_even_when_path_text_matches():
+    items = [item('u', 'user', '/unused/photo.png', 't'), item('a', 'assistant', 'caption', 't')]
+    rows = [[['/unused/photo.png', None], 'caption'], [None, ('/unused/answer.txt',)]]
+    result = project(rows, items, [artifact('file', 't')])
+    assert result.view_only_rows == {2}
+    assert result.artifact_anchors['file'] == result.row_anchors[2]
+    assert result.artifact_anchors['file'] != result.row_anchors[0]
+    assert 1 not in result.row_anchors
+    assert decode_rows(render(result), 'conversation') == rows
+
+
+def test_current_turn_does_not_replace_assistant_native_file_cell_with_text_marker():
+    rows = [['question', ('/unused/answer.pdf', 'Answer')]]
+    result = project(rows, [], [artifact('file', 'current')], current_turn_id='current', answer_row=0)
+    assert result.view_only_rows == {1}
+    assert 0 not in result.row_anchors
+    assert render(result)[0][1] == rows[0][1]
+    assert decode_rows(render(result), 'conversation') == rows
+
+
+def test_file_only_placeholder_and_native_files_roundtrip_together():
+    rows = [[['/unused/image.png', None], None], ['make a file', None]]
+    items = [item('u', 'user', 'make a file', 't')]
+    result = project(rows, items, [artifact('known', 't'), artifact('unknown', 'missing')])
+    assert result.artifact_anchors['known'] == result.row_anchors[1]
+    assert result.view_only_rows == {2}
+    assert decode_rows(render(result), 'conversation') == rows
+    assert result.rows[0] == rows[0]
+
+
+@pytest.mark.parametrize('invalid', [{'path': '/unused/image.png'}, {'not': 'file'}, [], [3],
+                                    ['/unused/image.png', 3], ['/unused/image.png', None, 'extra'],
+                                    [None, 'alt'], [['nested path'], None], object()])
+def test_projection_still_rejects_dicts_and_invalid_native_file_shapes(invalid):
+    with pytest.raises(TypeError):
+        project([[invalid, None]])
+    with pytest.raises(TypeError):
+        project([[None, invalid]])
+
+
+def test_real_ordinary_image_history_switch_preserves_native_file_view(tmp_path, monkeypatch):
+    # Reproduce the independent review's first compatibility test through the
+    # real ordinary save/load and model-switch branches, with offline providers.
+    from pathlib import Path
+    from offline_models import install
+    from test_agent_model import select
+    from modules.agent_ui import AgentPanel
+    environment = install(Path(__file__).resolve().parents[1], tmp_path / 'history')
+    environment.agents.shared.chuanhu_path = str(tmp_path)
+    monkeypatch.setattr(environment.agents, 'worker_messages',
+                        lambda command: (_ for _ in ()).throw(AssertionError('Unmocked worker')))
+    image = tmp_path / 'photo.png'
+    image.write_bytes(b'synthetic local image bytes')
+    ordinary = select(environment, name='GPT3.5 Turbo')
+    ordinary.history = [
+        {'role': 'image', 'content': str(image)},
+        {'role': 'user', 'content': 'Describe this image'},
+        {'role': 'assistant', 'content': 'An ordinary image answer'},
+    ]
+    ordinary.auto_save([])
+    ordinary.load_chat_history(ordinary.history_file_path)
+    assert ordinary.chatbot == [[[str(image), None], None],
+                                ['Describe this image', 'An ordinary image answer']]
+    original = deepcopy(ordinary.chatbot)
+    agent = select(environment, ordinary)
+    assert agent.is_hosted_agent and agent.chatbot == original
+    rendered = AgentPanel().render_chat(agent, agent.chatbot)
+    assert rendered[0] == original[0]
+    assert decode_rows(rendered, agent._conversation_id) == original

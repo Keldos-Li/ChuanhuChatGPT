@@ -42,6 +42,17 @@ def _identifier(value):
     return value if isinstance(value, str) and value else None
 
 
+def _is_file_cell(value):
+    """Recognize raw Gradio file cells structurally, without opening paths."""
+    return (isinstance(value, (list, tuple)) and len(value) in (1, 2)
+            and isinstance(value[0], str) and bool(value[0])
+            and (len(value) == 1 or value[1] is None or isinstance(value[1], str)))
+
+
+def _is_text_cell(value):
+    return value is None or isinstance(value, str)
+
+
 def _cloud_rows(items):
     unique = {}
     for item in items or []:
@@ -82,6 +93,9 @@ def _align_rows(source, raw, source_indices, raw_indices):
     paths. Other subsets and previews use sequence alignment; indistinguishable
     repeated rows remain unassigned rather than borrowing a historical message.
     """
+    # Adopted ordinary histories may include native Gradio image/file rows.
+    # They are preserved in the view, but have no cloud text-message identity.
+    raw_indices = [j for j in raw_indices if all(_is_text_cell(value) for value in raw[j])]
     m, n = len(source_indices), len(raw_indices)
     if not m or not n:
         return {}
@@ -174,21 +188,22 @@ def _align_rows_dynamic(source_indices, raw_indices, score):
 
 def project_message_files(rows, cloud_items, artifacts, *, session_id, conversation_id,
                           current_turn_id=None, answer_row=None):
-    """Build a raw-text view plus stable assistant and artifact anchor maps.
+    """Build a raw view plus stable text-assistant and artifact anchor maps.
 
     ``answer_row`` is an explicit raw-row index for the current turn, supplied
     by the model while its newest answer has not yet reached cloud history.
     Artifacts from another session are ignored. Missing or ambiguous history
     produces a deterministic, view-only placeholder; artifact order and names
     never decide ownership. Missing artifact session IDs inherit this scope.
+    Native Gradio file cells pass through without reading or resolving paths.
     """
     if not isinstance(conversation_id, str):
         raise TypeError('conversation_id must be a string')
     original = deepcopy(list(rows or []))
     if any(not isinstance(row, (list, tuple)) or len(row) != 2
-           or any(value is not None and not isinstance(value, str) for value in row)
+           or any(not _is_text_cell(value) and not _is_file_cell(value) for value in row)
            for row in original):
-        raise TypeError('rows must contain pairs of string or None cells')
+        raise TypeError('rows must contain pairs of string, None, or native file cells')
     original = [list(row) for row in original]
     projected = deepcopy(original)
     source = _cloud_rows(cloud_items)
@@ -200,7 +215,8 @@ def project_message_files(rows, cloud_items, artifacts, *, session_id, conversat
             if item and _identifier(item.get('turn_id')):
                 by_turn[item['turn_id']] = i
     current_turn_id = _identifier(current_turn_id)
-    current_row = answer_row if type(answer_row) is int and 0 <= answer_row < len(original) and current_turn_id else None
+    current_row = (answer_row if type(answer_row) is int and 0 <= answer_row < len(original)
+                   and current_turn_id and _is_text_cell(original[answer_row][1]) else None)
     current_source = assistant_turns.get(current_turn_id, user_turns.get(current_turn_id)) if current_row is not None else None
     if current_source is not None:
         # Explicit model state also covers changed streaming text and a local
@@ -284,7 +300,7 @@ def project_message_files(rows, cloud_items, artifacts, *, session_id, conversat
     # deliberately never used to assign a file without an explicit turn match.
     occurrences = {}
     for i, row in enumerate(projected):
-        if row[1] is not None and i not in anchors:
+        if isinstance(row[1], str) and i not in anchors:
             identity = _json(row)
             occurrence = occurrences.get(identity, 0)
             occurrences[identity] = occurrence + 1
@@ -323,8 +339,8 @@ def render_projection(projection, format_user: Callable[[str], str], format_assi
         key = projection.row_anchors.get(index) or _anchor(['conversation', projection.conversation_id], 'raw-user', original)
         for cell, (role, formatter) in enumerate((('user', format_user), ('assistant', format_assistant))):
             value = row[cell]
-            if value is None:
-                rendered.append(None)
+            if value is None or _is_file_cell(value):
+                rendered.append(deepcopy(value))
                 continue
             prefix = formatter(value)
             if not isinstance(prefix, str):
@@ -339,7 +355,7 @@ def render_projection(projection, format_user: Callable[[str], str], format_assi
 
 def _decode_cell(value, conversation_id, role):
     if not isinstance(value, str):
-        return value, None
+        return deepcopy(value), None
     match = _MARKER.search(value)
     if match is None:
         return value, None

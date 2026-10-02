@@ -2,6 +2,38 @@
 // upload completion must not attach files to a different model or new chat.
 (function () {
     const root = () => typeof gradioApp === 'function' ? gradioApp() : document;
+    const handledDrafts = new Set();
+    const handledToolPatches = new Set();
+    window.chuanhuApplyToolPatch = patch => {
+        if (!patch || handledToolPatches.has(patch.token) || patch.conversation !== window.chuanhuInputConversation?.()) return;
+        const revision = window.chuanhuAgentToolRevision || 0;
+        if (patch.revision < revision) { handledToolPatches.add(patch.token); return; }
+        if (patch.revision !== revision) return;
+        const input = root().querySelector('#agent-network-access input[type=checkbox]');
+        if (!input) return;
+        handledToolPatches.add(patch.token);
+        if (input.checked !== patch.network) {
+            input.checked = patch.network;
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+        }
+    };
+    document.addEventListener('input', event => {
+        if (event.target?.matches?.('#user-input-tb textarea'))
+            window.chuanhuDraftEditRevision = (window.chuanhuDraftEditRevision || 0) + 1;
+    }, true);
+    window.chuanhuClearSubmittedDraft = draft => {
+        if (!draft || handledDrafts.has(draft.token)) return;
+        const pending = window.chuanhuAgentPendingDraft;
+        if (!pending || pending.conversation !== draft.conversation || pending.text !== draft.text
+            || window.chuanhuInputConversation?.() !== draft.conversation) return;
+        handledDrafts.add(draft.token);
+        window.chuanhuAgentPendingDraft = null;
+        const input = root().querySelector('#user-input-tb textarea');
+        if (input && input.value === draft.text && (window.chuanhuDraftEditRevision || 0) === pending.revision) {
+            input.value = '';
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+        }
+    };
     let previousError = null, sawProgress = false;
     document.addEventListener('change', event => {
         const input = (event.composedPath ? event.composedPath() : [event.target])
