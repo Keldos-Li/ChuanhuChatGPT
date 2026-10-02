@@ -246,9 +246,9 @@ def test_error_outbox_cannot_drain_unfinished_operation(env):
     assert model.take_completed_ui_errors()==''
 
 
-def test_agent_placeholder_uses_original_supplied_avatar_and_follows_pro(env):
+def test_agent_placeholder_uses_original_supplied_avatar_and_precedes_chuanhu(env):
     models=env.presets.ONLINE_MODELS
-    assert models.index('OpenAI Agent')==models.index('川虎助理 Pro')+1
+    assert models.index('OpenAI Agent')==models.index('川虎助理')-1
     placeholder=env.presets.MODEL_METADATA['OpenAI Agent']['placeholder']
     assert placeholder['logo']=='file=web_assets/model_logos/codex-color.png'
     import hashlib
