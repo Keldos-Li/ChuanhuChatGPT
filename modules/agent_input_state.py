@@ -68,10 +68,13 @@ class AgentInputState:
             paths = list(dict.fromkeys([*self._pending_upload_paths, *(str(path) for path in files or [])]))
             return self.stage_input_files(paths)
 
-    def remove_input_files(self, files):
+    def remove_input_ids(self, identifiers, target):
         with self._lock:
-            paths = tuple(str(path) for path in files or [])
-            if not set(paths).issubset(self._pending_upload_paths): return '附件正在准备'
+            if target != self._conversation_id: raise gr.Error('聊天已变化，附件未移除')
+            self._assert_idle()
+            records = self._input_stager.snapshot() if self._input_stager is not None else ()
+            selected = set(identifiers)
+            paths = [path for path, record in zip(self._pending_upload_paths, records) if record.input_id not in selected]
             return self.stage_input_files(paths)
 
     def _take_input_files(self, files):

@@ -249,6 +249,18 @@ class AgentInputFiles:
     def clear(self):
         return self.set_pending(())
 
+    def mark_submitted(self, input_ids):
+        """Retain snapshots, but give later selections fresh sandbox paths.
+
+        A running Agent can modify an installed file. The listing API supplies
+        only its size, so a previous upload receipt cannot verify its contents
+        after a turn has used it. Unsent preparation retries still reuse IDs.
+        """
+        with self._lock:
+            self._check_open()
+            used = set(input_ids)
+            self._known = {key: record for key, record in self._known.items() if record.input_id not in used}
+
     def close(self):
         """Delete retained copies only when no in-flight snapshot still uses them."""
         with self._lock:

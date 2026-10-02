@@ -166,12 +166,64 @@ def _remote_files(client, state, item):
 
 def _matching_remote(entries, state, item):
     return (len(entries) == 1 and entries[0].get('environment_id') == state['environment_id']
+            and entries[0].get('path') == item['remote_path']
             and entries[0].get('size_bytes') == item['size'])
 
 
 def _trusted_install(mapping, state, item):
     return (isinstance(mapping, dict) and mapping.get('environment_id') == state['environment_id']
             and all(mapping.get(key) == item[key] for key in ('remote_path', 'size', 'sha256')))
+
+
+def _upload_source(client, state, item, contents, on_progress, should_cancel):
+    uploaded = as_dict(_write(client, state, 'files_upload',
+        lambda writer: writer.files.create(
+            file=(PurePosixPath(item['remote_path']).name, contents), purpose='user_data',
+            expires_after={'anchor': 'created_at', 'seconds': FILE_TTL_SECONDS}),
+        on_progress, should_cancel, item))
+    if not isinstance(uploaded.get('id'), str) or not uploaded['id']:
+        _fail('Files API 上传结果缺少标识，状态待确认；未再次上传', state, item, uncertain=True)
+    item.update(file_id=uploaded['id'], upload_state='confirmed', write_state='none', source_status='uploaded')
+    state['uncertain_operation'] = None
+    _emit(state, on_progress)  # Retain the file ID before any environment copy.
+
+
+def _confirm_missing_source(client, state, item, on_progress, should_cancel):
+    """A copy 404 alone cannot distinguish a missing source from a missing env.
+
+    This function only reads remote state. It retires a previously acknowledged
+    upload ID only after the Files API also returns 404, the same idle session
+    and connected environment are verified, and the target path remains absent.
+    """
+    _cancel(state, should_cancel)
+    # Persist the definitive rejection before further reads; interruption here
+    # must not revive the already-resolved environment-write uncertainty.
+    state['outcome'] = 'preparing'
+    state.pop('error', None)
+    item.update(status='prepared', source_status='checking')
+    item.pop('error', None)
+    _emit(state, on_progress)
+    try:
+        client.files.retrieve(item['file_id'])
+    except Exception as error:
+        if getattr(error, 'status_code', None) != 404:
+            return False
+    else:
+        return False
+    _cancel(state, should_cancel)
+    _verify_session(client, state)
+    environment = as_dict(client.beta.agents.environments.retrieve(state['environment_id']))
+    if environment.get('id') != state['environment_id'] or environment.get('status') != 'connected':
+        _fail('上传源文件已不可用，但执行环境尚未确认可用；未重新上传，请重新连接后恢复', state, item)
+    existing = _remote_files(client, state, item)
+    if existing:
+        item['remote_observation'] = 'path_and_size_match' if _matching_remote(existing, state, item) else 'path_conflict'
+        _fail('远端目标路径已存在，但无法验证内容；未覆盖或重新上传附件', state, item, uncertain=True)
+    _cancel(state, should_cancel)
+    item.update(expired_file_id=item.pop('file_id'), source_status='missing_confirmed',
+                upload_state='none', write_state='none')
+    _emit(state, on_progress)
+    return True
 
 
 def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_id=None,
@@ -232,7 +284,7 @@ def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_
             if old:
                 if any(old.get(key) != item[key] for key in ('remote_path', 'size', 'sha256')):
                     _fail('恢复的附件内容或路径已变化，不能复用旧上传状态', state)
-                for key in ('file_id', 'upload_state', 'write_state'):
+                for key in ('file_id', 'upload_state', 'write_state', 'expired_file_id'):
                     if key in old:
                         item[key] = old[key]
             state['files'].append(item)
@@ -325,22 +377,30 @@ def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_
                         del encoded
                 else:
                     if not current.get('file_id'):
-                        uploaded = as_dict(_write(client, state, 'files_upload',
-                            lambda writer: writer.files.create(
-                                file=(PurePosixPath(current['remote_path']).name, contents), purpose='user_data',
-                                expires_after={'anchor': 'created_at', 'seconds': FILE_TTL_SECONDS}),
-                            on_progress, should_cancel, current))
-                        if not isinstance(uploaded.get('id'), str) or not uploaded['id']:
-                            _fail('Files API 上传结果缺少标识，状态待确认；未再次上传', state, current, uncertain=True)
-                        current.update(file_id=uploaded['id'], upload_state='confirmed', write_state='none')
-                        state['uncertain_operation'] = None
-                        _emit(state, on_progress)  # Retain the file ID before copy.
+                        _upload_source(client, state, current, contents, on_progress, should_cancel)
                     _cancel(state, should_cancel)
                     _verify_session(client, state)
-                    copied = as_dict(_write(client, state, 'environment_copy',
-                        lambda writer: writer.beta.agents.environments.files.create(
-                            state['environment_id'], type='file_id', file_id=current['file_id'], path=current['remote_path']),
-                        on_progress, should_cancel, current))
+                    try:
+                        copied = as_dict(_write(client, state, 'environment_copy',
+                            lambda writer: writer.beta.agents.environments.files.create(
+                                state['environment_id'], type='file_id', file_id=current['file_id'], path=current['remote_path']),
+                            on_progress, should_cancel, current))
+                    except InputPreparationError as error:
+                        if (error.diagnostics.get('status_code') != 404
+                                or state['uncertain_operation'] or current.get('upload_state') != 'confirmed'
+                                or not _confirm_missing_source(client, state, current, on_progress, should_cancel)):
+                            raise
+                        # Refresh once in this invocation, only after definitive
+                        # source-404 and environment checks. Unknown upload/copy
+                        # outcomes and a second copy failure never enter a loop.
+                        contents = read_snapshot_file(record, staging_root=staging_root)
+                        _upload_source(client, state, current, contents, on_progress, should_cancel)
+                        _cancel(state, should_cancel)
+                        _verify_session(client, state)
+                        copied = as_dict(_write(client, state, 'environment_copy',
+                            lambda writer: writer.beta.agents.environments.files.create(
+                                state['environment_id'], type='file_id', file_id=current['file_id'], path=current['remote_path']),
+                            on_progress, should_cancel, current))
             finally:
                 del contents
             if not _matching_remote([copied], state, current):

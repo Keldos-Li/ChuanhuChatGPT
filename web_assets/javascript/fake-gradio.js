@@ -39,6 +39,7 @@ var chatbotUploader;
 var handleClick = function() {
     if (window.chuanhuSupports?.('input_attachments') === false || window.chuanhuInputBusy?.()) return;
     const selector = window.chuanhuInputTarget?.() || '#upload-index-file';
+    if (selector === '#agent-upload-files' && window.chuanhuAgentUploading) return;
     gradioApp().querySelector(selector + ' input[type=file]')?.click();
 
 };

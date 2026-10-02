@@ -59,6 +59,17 @@ def test_same_name_different_content_and_replaced_upload_stay_independent(stager
     assert read_snapshot_file(first, staging_root=stager.staging_root) == b'one'
 
 
+def test_submitted_selection_gets_new_id_without_deleting_retained_snapshot(stager):
+    source = upload(stager)
+    first, = stager.set_pending([source])
+    stager.mark_submitted([first.input_id])
+    stager.clear()
+    second, = stager.set_pending([source])
+    assert second.input_id != first.input_id and second.remote_path != first.remote_path
+    assert read_snapshot_file(first, staging_root=stager.staging_root) == source.read_bytes()
+    assert stager.set_pending([source]) == (second,)
+
+
 def test_remove_and_clear_preserve_inflight_snapshot(stager):
     one, two = stager.set_pending([upload(stager), upload(stager, folder='two')])
     in_flight = stager.snapshot()

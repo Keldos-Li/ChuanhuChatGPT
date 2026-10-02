@@ -134,9 +134,22 @@ class AgentPanel:
         with gr.Column(visible=False, elem_id='agent-input-files', min_width=0, scale=0) as self.input_group:
             self.input_picker = gr.File(file_count='multiple', type='filepath', label='添加消息附件', show_label=False,
                                         elem_id='agent-upload-files')
-            self.input_files = gr.File(file_count='multiple', type='filepath', label='消息附件', show_label=False,
+            self.input_files = gr.File(file_count='multiple', type='filepath', label='{}', show_label=True,
                                        elem_id='agent-pending-files')
             self.input_target = gr.Textbox(visible=False)
+            self.input_remove_payload = gr.Textbox(elem_id='agent-input-remove-payload', show_label=False)
+            self.input_remove = gr.Button('移除附件', elem_id='agent-input-remove')
+
+    @staticmethod
+    def input_value(model, interactive=None):
+        if not _agent(model): return gr.update(value=[], label='{}', interactive=False)
+        with model._lock:
+            if interactive is None:
+                interactive = not (model._running or bool(getattr(model, '_pending_send', None)) or model._needs_sync
+                                   or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed'))
+            records = model._input_stager.snapshot() if model._input_stager is not None else ()
+            metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records]}
+            return gr.update(value=list(model._pending_upload_paths), label=json.dumps(metadata), interactive=interactive)
 
     def selectors(self):
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
@@ -205,7 +218,7 @@ class AgentPanel:
         return [gr.update(visible=True), gr.update(visible=True), describe_settings(model),
                 gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
-                *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), gr.update(value=list(model._pending_upload_paths), interactive=not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else [])
+                *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else [])
 
     def wrap_predict(self, predict, capability_ui):
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
@@ -219,19 +232,38 @@ class AgentPanel:
     def wire(self, current_model, chatbot, status_display, capability_ui=None):
         if hasattr(self, 'input_files'):
             def stage_files(model, files, request: gr.Request):
-                if not _agent(model): return gr.update()
+                if not _agent(model): return self.input_value(model)
                 model.bind_owner(request)
-                return model.remove_input_files(files)
-            self.input_files.change(stage_files, [current_model, self.input_files], [status_display], queue=False)
+                # File.change also fires for server renders. A stale response
+                # may show an old subset; restore it, never interpret it as a
+                # user removing newer attachments.
+                with model._lock:
+                    update = self.input_value(model)
+                    if tuple(str(path) for path in files or []) == model._pending_upload_paths:
+                        update.pop('value', None)
+                    return update
+            self.input_files.change(stage_files, [current_model, self.input_files], [self.input_files], queue=False)
+            def remove_files(model, payload, request: gr.Request):
+                if not _agent(model): return '', '聊天已变化，附件未移除', self.input_value(model)
+                model.bind_owner(request)
+                try:
+                    removal = json.loads(payload)
+                    if not isinstance(removal.get('ids'), list): raise ValueError()
+                    message = model.remove_input_ids(removal['ids'], removal.get('target'))
+                except Exception as error: message = str(error) if isinstance(error, gr.Error) else '无法移除附件，请重试'
+                return '', message, self.input_value(model)
+            self.input_remove.click(remove_files, [current_model, self.input_remove_payload],
+                                    [self.input_remove_payload, status_display, self.input_files], queue=False)
             def upload_files(model, files, target, request: gr.Request):
                 if not _agent(model): return '聊天已变化，附件未添加', gr.update(value=[]), gr.update()
                 model.bind_owner(request)
                 try: message = model.add_input_files(files, target)
                 except Exception as error: message = str(error)
-                return message, gr.update(value=[]), gr.update(value=list(model._pending_upload_paths))
-            self.input_picker.upload(upload_files, [current_model, self.input_picker, self.input_target],
+                return message, gr.update(value=[]), self.input_value(model)
+            upload_event = self.input_picker.upload(upload_files, [current_model, self.input_picker, self.input_target],
                                      [status_display, self.input_picker, self.input_files], queue=False,
-                js='(model, files, target) => { window.chuanhuAgentUploading = false; return [model, files, window.chuanhuAgentUploadTarget || target]; }')
+                js='(model, files, target) => { window.chuanhuAgentUploadStaging = true; return [model, files, window.chuanhuAgentUploadTarget || target]; }')
+            upload_event.then(None, [], [], queue=False, js='() => { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; }')
         def choose_settings(model, name, effort, revision, request: gr.Request):
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort, revision)

@@ -501,3 +501,34 @@ def test_real_sdk_mock_transport_serialization_and_no_post_retries(stage, failur
     posts = [request for request in requests if request.method == 'POST']
     assert len(posts) == (1 if failure_at == 'session_create' else 2)
     assert all('/events' not in request.url.path for request in requests)
+
+
+def test_reattach_after_agent_edits_same_length_input_installs_original_again(tmp_path):
+    upload = tmp_path / 'uploads'
+    upload.mkdir()
+    source = upload / 'notes.txt'
+    source.write_bytes(b'ORIGINAL')
+    store = AgentInputFiles((upload,), staging_parent=tmp_path)
+    client = FakeClient()
+    contents = {}
+    copy = client.copy_file
+    def copy_content(identifier, **kwargs):
+        result = copy(identifier, **kwargs)
+        contents[kwargs['path']] = base64.b64decode(kwargs['data'])
+        return result
+    client.beta.agents.environments.files.create = copy_content
+    try:
+        first, = store.set_pending([source])
+        result = run(client, first, store.staging_root)
+        store.mark_submitted([first.input_id])
+        client.turns.append({'id': 'turn_previous', 'status': 'completed'})
+        contents[first.remote_path] = b'MODIFIED'
+        store.clear()
+        second, = store.set_pending([source])
+        result = run(client, second, store.staging_root, session_id='sess_test', installed=result['installed'])
+        assert result['outcome'] == 'ready'
+        assert second.remote_path != first.remote_path
+        assert contents[second.remote_path] == source.read_bytes()
+        assert contents[first.remote_path] == b'MODIFIED'
+    finally:
+        store.close()

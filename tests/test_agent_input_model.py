@@ -38,7 +38,9 @@ def test_first_file_only_and_existing_session_file_inputs(env,tmp_path,monkeypat
     assert 'one.txt' in model.chatbot[0][0] and not model._pending_upload_paths
     model.stage_input_files(paths);submit(env,model,'read again',paths)
     assert model._state['session_id']==session
-    assert len(service.sessions[session]['inputs'])==1
+    assert len(service.sessions[session]['inputs'])==2
+    assert calls[0]['inputs'][0]['input_id'] != calls[3]['inputs'][0]['input_id']
+    assert calls[0]['inputs'][0]['remote_path'] != calls[3]['inputs'][0]['remote_path']
     assert calls[3]['installed'] and len(model.history)==4
 
 

@@ -77,6 +77,7 @@ function setDragUploader() {
 async function upload_files(files) {
     if (window.chuanhuSupports?.('input_attachments') === false || window.chuanhuInputBusy?.()) return;
     const selector = window.chuanhuInputTarget?.() || '#upload-index-file';
+    if (selector === '#agent-upload-files' && window.chuanhuAgentUploading) return;
     const uploadInputElement = gradioApp().querySelector(selector + ' input[type=file]');
     if (!files || !files.length) return;
     if (!uploadInputElement || uploadInputElement.disabled) return;
