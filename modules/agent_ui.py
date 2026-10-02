@@ -17,12 +17,32 @@ def _agent(model):
     return model is not None and getattr(model, 'is_hosted_agent', False)
 
 
+def _chat_frames(updates):
+    """Rebase shrinking histories instead of emitting index-shifting diffs.
+
+    Gradio 4.29 deletes list entries in ascending index order while its client
+    applies them with splice. A local preview can have more rows than the
+    authoritative session. Changing the update envelope forces a root replace.
+    """
+    previous_count = None
+    wrapped = False
+    for chat, status in updates:
+        if isinstance(chat, (list, tuple)):
+            count = len(chat)
+            wrapped = previous_count is not None and count < previous_count and not wrapped
+            previous_count = count
+            if wrapped: chat = gr.update(value=deepcopy(chat))
+        yield chat, status
+
+
 class ArtifactPanel:
     """Output files independent from input attachments and text chat bubbles."""
     def __init__(self):
         with gr.Column(visible=False, elem_id='model-output-files', min_width=0, scale=0) as self.group:
             gr.Markdown('### 生成的文件')
-            self.list = gr.Dataframe(headers=['文件', '类型', '大小', '状态'], datatype=['str'] * 4, interactive=False, wrap=True)
+            # A readonly status surface needs no Dataframe's separate virtual
+            # display state. Replace the visible markup on every progress event.
+            self.list = gr.HTML(elem_id='model-output-status')
             self.files = gr.File(file_count='multiple', interactive=False, label='下载文件')
             with gr.Row():
                 self.retry_id = gr.Dropdown(label='重新获取文件', choices=[])
@@ -41,7 +61,12 @@ class ArtifactPanel:
             rows.append([record['name'], record.get('type', ''), f'{size:,} 字节' if isinstance(size, int) else '待确认',
                          labels.get(record.get('status'), '准备中') + (('：' + record['error']) if record.get('error') else '')])
             if record.get('status') == 'ready' and record.get('path'): paths.append(record['path'])
-        return [gr.update(visible=bool(records)), gr.update(value=rows), gr.update(value=paths),
+        table = '<table aria-label="生成文件状态"><thead><tr>'
+        table += ''.join('<th scope="col">' + label + '</th>' for label in ('文件', '类型', '大小', '状态'))
+        table += '</tr></thead><tbody>'
+        table += ''.join('<tr>' + ''.join('<td>' + html.escape(str(cell)) + '</td>' for cell in row) + '</tr>' for row in rows)
+        table += '</tbody></table>'
+        return [gr.update(visible=bool(records)), gr.update(value=table if rows else ''), gr.update(value=paths),
                 gr.update(choices=[(record['name'] + ' · ' + record['id'], record['id']) for record in records], value=None)]
 
 
@@ -167,9 +192,10 @@ class AgentPanel:
 
     def wrap_predict(self, predict, capability_ui):
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
-            for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request):
+            for chat, status in _chat_frames(predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request)):
                 yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
-            yield gr.update(), gr.update(), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+            final_chat = gr.update(value=deepcopy(model.chatbot)) if _agent(model) else gr.update()
+            yield final_chat, gr.update(), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
         return predict_with_ui
 
     def wire(self, current_model, chatbot, status_display, capability_ui=None):
@@ -196,13 +222,13 @@ class AgentPanel:
         def reconnect(model, request: gr.Request):
             if _agent(model):
                 model.bind_owner(request)
-                for chat, status in model.reconnect():
+                for chat, status in _chat_frames(model.reconnect()):
                     if capability_ui is None: yield chat, status
                     else: yield chat, status, *capability_ui.values(model), *self.values(model, request=request, include_config=False)
                 # Generator cleanup clears the observer's running state only
                 # after its last yield; update the one main Stop/Send pair now.
                 if capability_ui is not None:
-                    yield gr.update(), model._status(), *capability_ui.values(model), *self.values(model, request=request, include_config=False)
+                    yield gr.update(value=deepcopy(model.chatbot)), model._status(), *capability_ui.values(model), *self.values(model, request=request, include_config=False)
         reconnect_outputs = [chatbot, status_display] + (capability_ui.outputs + self.outputs if capability_ui is not None else [])
         self.reconnect.click(reconnect, [current_model], reconnect_outputs)
         def retry_file(model, identifier, request: gr.Request):

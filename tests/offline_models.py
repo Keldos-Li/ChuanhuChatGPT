@@ -77,9 +77,9 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     helpers = dict(vars(presets), capabilities=capabilities, require_capability=require_capability, model_lock=model_lock, reserve_submission=reserve_submission, consume_submission=consume_submission, gr=gr, os=os, re=re, json=json, logging=logging, time=time,
                    traceback=traceback, Enum=Enum, shared=shared, RLock=RLock, deepcopy=deepcopy,
                    HISTORY_DIR=str(history_dir), GRADIO_CACHE=str(history_dir/'cache'),
+                   hide_history_when_not_logged_in=False,
                    get_first_history_name=lambda user='':uuid4().hex+'.json',
                    new_auto_history_filename=lambda user='':uuid4().hex+'.json',
-                   get_history_names=lambda user='':[p.stem for p in history_dir.glob('*.json')],
                    init_history_list=lambda *a,**k:gr.update(),
                    get_history_list=lambda *a,**k:gr.update(),
                    construct_user=lambda text:{'role':'user','content':text},
@@ -89,7 +89,9 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
                    TOKEN_OFFSET=1000,REDUCE_TOKEN_FACTOR=.5, STANDARD_ERROR_MSG='Error: ',
                    NO_APIKEY_MSG='No key', NO_INPUT_MSG='No input', beautify_err_msg=lambda text:text)
     definitions(root/'modules/utils.py', {'save_file','save_md_file','replace_special_symbols',
-                                        'init_history_list','get_history_list'}, helpers)
+                                        'init_history_list','get_history_list','get_history_names',
+                                        'get_file_names_by_last_modified_time','get_file_names_by_type',
+                                        'sorted_by_last_modified_time'}, helpers)
     base = ModuleType('modules.models.base_model')
     vars(base).update(helpers)
     base.__name__ = 'modules.models.base_model'

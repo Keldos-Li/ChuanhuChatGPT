@@ -222,6 +222,19 @@ hr.append-display {
     padding: 12px 20px;
     min-width: 0;
 }
+#model-output-status table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+#model-output-status th,
+#model-output-status td {
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+    padding: 6px;
+    border-bottom: 1px solid var(--border-color-primary);
+}
 #agent-browser-form {
     overflow-wrap: anywhere;
 }

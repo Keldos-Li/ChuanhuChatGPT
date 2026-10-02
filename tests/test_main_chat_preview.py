@@ -61,6 +61,21 @@ async def exercise():
         await call('reconnect', [None])
         assert len(model._artifacts) == 3
         assert model.chatbot[-1][0] == 'files'
+        # The browser's actual new-settings flow must reconcile the provisional
+        # local row with the authoritative cloud message without a blank tail.
+        await call('save', [None, False, True, True, 'live', '', True, False,
+                            True, True, ['text_statistics'], '[]'])
+        await call('fork', [None])
+        await call('transfer_input', ['new-settings-followup', None])
+        await call('predict_with_ui', [None, None, model.chatbot, False, [], 'English'])
+        assert len(model.chatbot) == 1, model.chatbot
+        assert model.chatbot[0][1] == '模拟 Agent 回答：new-settings-followup'
+        assert len(model.history) == 2, model.history
+        assert model._session_settings['tools']['network'] is False
+        await call('change_model', ['GPT3.5 Turbo', None, '', 1, 1, 'QA', '', None])
+        ordinary = state[current_id]
+        assert ordinary.chatbot == model.chatbot
+        assert len(ordinary.chatbot) == 1 and ordinary.chatbot[0][1]
     finally:
         app.close()
 

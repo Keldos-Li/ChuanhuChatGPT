@@ -1,12 +1,17 @@
 """Gradio component and callback integration; no browser or live API claimed."""
 import asyncio
 import json
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 import gradio as gr
 import pytest
 from gradio.state_holder import SessionState
 from modules.agent_ui import AgentPanel, ArtifactPanel, browser_form
 from test_agent_model import env, select, send, complete, request
+
+
+def artifact_rows(markup):
+    return [[cell.text or '' for cell in row] for row in ET.fromstring(markup).findall('tbody/tr')]
 
 
 def panel_app(model):
@@ -28,6 +33,7 @@ def test_actual_component_output_shapes_and_no_input_file_bubbles(env,monkeypatc
     files=ArtifactPanel.values(model)
     assert len(files[2]['value'])==1 and model.chatbot==[['hello','Agent synthetic answer']]
     assert panel.artifacts.files.interactive is False
+    assert isinstance(panel.artifacts.list, gr.HTML)
     assert panel.payload.type=='password' and panel.payload.visible is False
     app.close()
 
@@ -41,6 +47,84 @@ def test_login_form_escapes_external_labels_and_masks_every_field(env):
     assert '<script>' not in form and '<img src=' not in form and '&lt;script&gt;' in form
     assert form.count('type="password"')==2 and 'value="secret' not in form
     assert buttons[-1]['visible'] is True
+
+
+def test_file_status_markup_escapes_names_types_and_errors(env):
+    model=select(env)
+    model._artifacts=[{'id':'one','name':'<img src=x onerror="bad()">&.txt',
+                       'type':'<script>bad()</script>','status':'failed',
+                       'error':'<svg onload="bad()"> & error','size':8}]
+    markup=ArtifactPanel.values(model)[1]['value']
+    assert '<img' not in markup and '<script' not in markup and '<svg' not in markup
+    rows=artifact_rows(markup)
+    assert rows[0][0]==model._artifacts[0]['name']
+    assert rows[0][1]==model._artifacts[0]['type']
+    assert rows[0][3]=='下载失败：'+model._artifacts[0]['error']
+
+
+def test_actual_gradio_diff_stream_removes_provisional_reference_rows(env,monkeypatch):
+    from copy import deepcopy
+    from pathlib import Path
+    import shutil
+    import subprocess
+    from modules.model_capabilities import CapabilityUI
+    ordinary=select(env,name='GPT3.5 Turbo')
+    send(env,ordinary,'old one');send(env,ordinary,'old two')
+    model=select(env,ordinary)
+    user={'id':'u','type':'message','role':'user','content':[{'type':'input_text','text':'reference and new request'}]}
+    answer={'id':'a','type':'message','role':'assistant','content':[{'type':'output_text','text':'completed answer'}]}
+    def worker(command):
+        if command['action']=='run':
+            assert len(command['history_reference'])==4
+            yield {'type':'progress','session_id':'s','turn_id':'t','outcome':'in_progress','history_authoritative':True,'items':[user]}
+            yield {'type':'result','session_id':'s','turn_id':'t','outcome':'completed','sync_complete':True,'items':[user,answer]}
+        elif command['action']=='download':yield {'type':'result','artifacts':[]}
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    with gr.Blocks(analytics_enabled=False) as app:
+        current=gr.State();prompt=gr.Textbox();chat=gr.Chatbot();status=gr.Markdown();selector=gr.Dropdown();marker=gr.HTML();button=gr.Button()
+        caps=CapabilityUI([],selector,marker)
+        panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components()
+        button.click(panel.wrap_predict(env.wrappers['predict'],caps),[current,prompt,chat],[chat,status,*panel.outputs,*caps.outputs])
+    state=SessionState(app);state[current._id]=model
+    frames=[];expected=[]
+    async def exercise():
+        iterator=None
+        while True:
+            result=await app.process_api(0,[None,'new request',ordinary.chatbot],state=state,
+                request=gr.Request(session_hash='real-stream'),session_hash='real-stream',iterator=iterator)
+            frames.append({'generating':result['is_generating'],'data':deepcopy(result['data'])})
+            expected.append(deepcopy(model._display))
+            if not result['is_generating']:break
+            iterator=result['iterator']
+    try:asyncio.run(exercise())
+    finally:app.close()
+    # Execute the installed Gradio browser client's actual splice-based decoder.
+    client_source=None
+    for path in (Path(gr.__file__).parent/'templates/frontend/assets').glob('index-*.js.map'):
+        source_map=json.loads(path.read_text())
+        for source in source_map.get('sourcesContent',[]):
+            if source and 'function apply_diff_stream(' in source:
+                client_source=source[source.index('function apply_diff_stream('):source.index('function submit(',source.index('function apply_diff_stream('))]
+                break
+        if client_source:break
+    assert client_source,'Installed Gradio client source map is required for the streaming regression'
+    script=client_source+'''
+const frames=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const pending={};const visible=[];let chat=[];
+for(const frame of frames){
+  const data={data:frame.data};
+  if(frame.generating)apply_diff_stream(pending,'event',data);
+  const value=data.data[0];
+  if(Array.isArray(value))chat=value;
+  else if(value && Object.hasOwn(value,'value'))chat=value.value;
+  visible.push(JSON.parse(JSON.stringify(chat)));
+}
+process.stdout.write(JSON.stringify(visible));
+'''
+    result=subprocess.run([shutil.which('node') or 'node','-e',script],input=json.dumps(frames),text=True,capture_output=True)
+    assert result.returncode==0,result.stderr
+    assert json.loads(result.stdout)==expected
+    assert expected[-1]==[['reference and new request','completed answer']]
 
 
 def test_no_login_submit_without_known_origin(env):
@@ -162,7 +246,7 @@ def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypat
         req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'files',[]],state=state,request=req);rows=[]
         while True:
             update=result['data'][2+panel.outputs.index(panel.artifacts.list)]
-            if isinstance(update,dict) and isinstance(update.get('value'),dict):rows.append(update['value']['data'])
+            if isinstance(update,dict) and update.get('value'):rows.append(artifact_rows(update['value']))
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'files',[]],state=state,request=req,iterator=result['iterator'])
         assert any(len(r)==2 and all(row[3]=='准备中' for row in r) for r in rows)
@@ -222,8 +306,8 @@ def test_single_file_retry_streams_preparing_and_result_without_losing_other_fil
         req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'retry'],state=state,request=req);statuses=[]
         while True:
             update=result['data'][1+panel.outputs.index(panel.artifacts.list)]
-            if isinstance(update,dict) and isinstance(update.get('value'),dict):
-                rows=update['value']['data'];assert rows[0][0]=='other.txt' and rows[0][3]=='可下载';statuses.append(rows[1][3])
+            if isinstance(update,dict) and update.get('value'):
+                rows=artifact_rows(update['value']);assert rows[0][0]=='other.txt' and rows[0][3]=='可下载';statuses.append(rows[1][3])
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'retry'],state=state,request=req,iterator=result['iterator'])
         assert '准备中' in statuses

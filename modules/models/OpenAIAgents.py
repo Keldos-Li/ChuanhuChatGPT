@@ -533,7 +533,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         if not accepted: raise gr.Error('提交结果尚待确认，请重新连接，勿重复提交')
         with self._lock:
             self._pending_actions = [card for card in self._pending_actions if card['request_id'] != request_id]
-            self._notice = '已提交网站请求，等待任务继续；这不表示已经登录成功'
+            self._notice = '已提交网站请求，等待继续；登录结果尚未确认'
         return self._status()
 
     def auto_save(self, chatbot=None):
