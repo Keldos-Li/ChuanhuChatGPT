@@ -8,6 +8,7 @@ from copy import deepcopy
 import gradio as gr
 from optional.agents.tools import FUNCTIONS, tool_availability
 from modules.model_capabilities import capabilities
+from modules.presets import i18n
 
 MODEL_EFFORTS = {
     'gpt-6-astra': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
@@ -15,6 +16,10 @@ MODEL_EFFORTS = {
     'gpt-6.1-sol': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
 }
 REASONING_CHOICES = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+def reasoning_choices():
+    return [(i18n('ui.toolbox.agent.' + ('reasoning_default' if value == 'default' else value)), value) for value in REASONING_CHOICES]
+
 
 
 def split_filename(name):
@@ -232,8 +237,8 @@ class AgentPanel:
 
     def selectors(self):
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
-            self.model = gr.Dropdown(label='使用模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
-            self.reasoning = gr.Dropdown(label='推理强度', choices=REASONING_CHOICES, value='default', min_width=120)
+            self.model = gr.Dropdown(label=i18n('ui.toolbox.agent.model'), choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
+            self.reasoning = gr.Dropdown(label=i18n('ui.toolbox.agent.reasoning'), choices=reasoning_choices(), value='default', min_width=120)
             self.choice_revision = gr.Number(value=0, precision=0, visible=False)
 
     def output_components(self):
@@ -251,26 +256,26 @@ class AgentPanel:
 
     def settings_components(self):
         self.tools_separator = gr.Markdown('---', elem_classes='hr-line', elem_id='agent-tools-separator', visible=False)
-        with gr.Accordion('工具配置', open=True, visible=False, elem_id='agent-tools-accordion') as self.settings_group:
+        with gr.Accordion(i18n('ui.toolbox.agent.tools_title'), open=True, visible=False, elem_id='agent-tools-accordion') as self.settings_group:
             self.settings_status = gr.Markdown(visible=False)
-            gr.Markdown('对话开始后无法更改工具配置；如需调整，请在第一轮对话开始前设置。')
-            self.network = gr.Checkbox(label='云端执行环境联网', value=True, elem_id='agent-network-access', elem_classes='switch-checkbox')
-            self.code = gr.Checkbox(label='代码与文件执行', value=True, elem_classes='switch-checkbox')
-            self.search = gr.Checkbox(label='内置网页搜索', value=True, elem_classes='switch-checkbox')
-            self.search_mode = gr.Dropdown(label='搜索模式', choices=['live', 'cached', 'disabled'], value='live')
-            self.domains = gr.Textbox(label='搜索域名范围（每行一个，可留空）', visible=False)
-            self.browser = gr.Checkbox(label='云端浏览器（Computer Use）', value=True, elem_classes='switch-checkbox')
-            self.screenshots = gr.Checkbox(label='返回浏览器截图', value=False, elem_classes='switch-checkbox')
+            gr.Markdown(i18n('ui.toolbox.agent.locked_hint'))
+            self.network = gr.Checkbox(label=i18n('ui.toolbox.agent.network'), value=True, elem_id='agent-network-access', elem_classes='switch-checkbox')
+            self.code = gr.Checkbox(label=i18n('ui.toolbox.agent.code'), value=True, elem_classes='switch-checkbox')
+            self.search = gr.Checkbox(label=i18n('ui.toolbox.agent.search'), value=True, elem_classes='switch-checkbox')
+            self.search_mode = gr.Dropdown(label=i18n('ui.toolbox.agent.search_mode'), choices=[(i18n('ui.toolbox.agent.search_' + value), value) for value in ('live', 'cached', 'disabled')], value='live')
+            self.domains = gr.Textbox(label=i18n('ui.toolbox.agent.domains'), visible=False)
+            self.browser = gr.Checkbox(label=i18n('ui.toolbox.agent.browser'), value=True, elem_classes='switch-checkbox')
+            self.screenshots = gr.Checkbox(label=i18n('ui.toolbox.agent.screenshots'), value=False, elem_classes='switch-checkbox')
             # Deferred until application tools are deliberately exposed in the UI.
             # Keep callback slots and backend implementations for later use.
-            # self.discovery = gr.Checkbox(label='工具发现', value=True, elem_classes='switch-checkbox')
-            # self.programmatic = gr.Checkbox(label='程序化工具调用', value=True, elem_classes='switch-checkbox')
+            # self.discovery = gr.Checkbox(label=i18n('ui.toolbox.agent.discovery'), value=True, elem_classes='switch-checkbox')
+            # self.programmatic = gr.Checkbox(label=i18n('ui.toolbox.agent.programmatic'), value=True, elem_classes='switch-checkbox')
             self.discovery = gr.Checkbox(value=False, visible=False, interactive=False)
             self.programmatic = gr.Checkbox(value=False, visible=False, interactive=False)
-            self.functions = gr.CheckboxGroup(label='已注册的应用函数', choices=list(FUNCTIONS), value=[], visible=False)
-            self.mcp = gr.Textbox(label='MCP 服务器', value='[]', lines=5)
-            self.availability = gr.Dataframe(headers=['能力', '状态', '说明'], datatype=['str'] * 3, interactive=False, wrap=True, visible=False)
-            self.fork = gr.Button('按新配置新建并继续', visible=False)
+            self.functions = gr.CheckboxGroup(label=i18n('ui.toolbox.agent.functions'), choices=list(FUNCTIONS), value=[], visible=False)
+            self.mcp = gr.Textbox(label=i18n('ui.toolbox.agent.mcp'), value='[]', lines=5)
+            self.availability = gr.Dataframe(headers=[i18n('ui.toolbox.agent.' + key) for key in ('capability', 'status', 'description')], datatype=['str'] * 3, interactive=False, wrap=True, visible=False)
+            self.fork = gr.Button(i18n('ui.toolbox.agent.fork'), visible=False)
             self.tool_revision = gr.Number(value=0, precision=0, visible=False)
             self.config_target = gr.Textbox(visible=False)
     @staticmethod
@@ -298,7 +303,7 @@ class AgentPanel:
                 with current_model._lock:
                     if network is not None:
                         try: config = self.config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp)
-                        except (TypeError, ValueError, AttributeError): raise gr.Error('工具配置格式无效，请检查后发送') from None
+                        except (TypeError, ValueError, AttributeError): raise gr.Error(i18n('ui.toolbox.agent.invalid_tools')) from None
                         current_model.freeze_agent_configuration(self.user_tool_config(current_model, config), instructions, tool_revision, target)
                     result = list(transfer(inputs, current_model, agent_model, agent_reasoning, agent_choice_revision, agent_files, request=request))
                     # Keep the draft until the browser sees submission accepted.
@@ -318,8 +323,8 @@ class AgentPanel:
                               or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed')
                               or bool(getattr(model, '_pending_send', None)))
         return [gr.update(label='Agent' if enabled else self.sidebar[-1]),
-                gr.update(**({'value':model.system_prompt} if locked else {}), interactive=not locked, label='系统提示词' if enabled else 'System prompt', lines=4 if enabled else 8),
-                gr.update(interactive=not locked), gr.update(label='系统提示词' if enabled else 'Prompt')]
+                gr.update(**({'value':model.system_prompt} if locked else {}), interactive=not locked, label=i18n('ui.toolbox.agent.system_prompt') if enabled else 'System prompt', lines=4 if enabled else 8),
+                gr.update(interactive=not locked), gr.update(label=i18n('ui.toolbox.agent.system_prompt') if enabled else 'Prompt')]
 
     def finish_submission(self, model, envelope, draft, request: gr.Request):
         if not _agent(model): return gr.update(), gr.update()
@@ -357,7 +362,7 @@ class AgentPanel:
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
         return ([gr.update(visible=True)] if hasattr(self, 'accordion') else []) + ([gr.update(visible=True)] if hasattr(self, 'separator') else []) + ([gr.update(visible=True)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=True), gr.update(visible=True), '',
-                gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
+                gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=reasoning_choices(), interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
                 *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked and component not in (self.discovery, self.programmatic)) for component, value in zip(self.config_inputs, config)], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id]
 
@@ -462,7 +467,7 @@ class AgentPanel:
                 model.stage_agent_tools(self.user_tool_config(model, value), revision, target)
                 return gr.update()
             except Exception as error:
-                raise gr.Error(str(error) if not isinstance(error, json.JSONDecodeError) else 'MCP 配置不是有效 JSON') from None
+                raise gr.Error(str(error) if not isinstance(error, json.JSONDecodeError) else i18n('ui.toolbox.agent.invalid_mcp')) from None
         tools_js = '''(model, ...values) => {
             window.chuanhuAgentToolRevision = (window.chuanhuAgentToolRevision || 0) + 1;
             values[11] = window.chuanhuAgentToolRevision;

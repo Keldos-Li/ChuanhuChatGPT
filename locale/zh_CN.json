@@ -542,7 +542,41 @@
                 "extensions": "拓展",
                 "parameters": "参数"
             },
-            "title": "工具箱"
+            "title": "工具箱",
+            "agent": {
+                "model": "使用模型",
+                "reasoning": "推理强度",
+                "tools_title": "工具配置",
+                "locked_hint": "对话开始后无法更改工具配置；如需调整，请在第一轮对话开始前设置。",
+                "network": "云端执行环境联网",
+                "code": "代码与文件执行",
+                "search": "内置网页搜索",
+                "search_mode": "搜索模式",
+                "domains": "搜索域名范围（每行一个，可留空）",
+                "browser": "云端浏览器（Computer Use）",
+                "screenshots": "返回浏览器截图",
+                "discovery": "工具发现",
+                "programmatic": "程序化工具调用",
+                "functions": "已注册的应用函数",
+                "mcp": "MCP 服务器",
+                "fork": "按新配置新建并继续",
+                "system_prompt": "系统提示词",
+                "search_live": "实时",
+                "search_cached": "缓存",
+                "search_disabled": "禁用",
+                "reasoning_default": "模型默认",
+                "minimal": "最低",
+                "low": "低",
+                "medium": "中",
+                "high": "高",
+                "xhigh": "极高",
+                "max": "最高",
+                "invalid_tools": "工具配置格式无效，请检查后发送",
+                "invalid_mcp": "MCP 配置不是有效 JSON",
+                "capability": "能力",
+                "status": "状态",
+                "description": "说明"
+            }
         },
         "training": {
             "dataset": {

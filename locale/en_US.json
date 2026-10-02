@@ -542,7 +542,41 @@
                 "extensions": "Extensions",
                 "parameters": "Parameters"
             },
-            "title": "Toolbox"
+            "title": "Toolbox",
+            "agent": {
+                "model": "Model to use",
+                "reasoning": "Reasoning effort",
+                "tools_title": "Tool configuration",
+                "locked_hint": "Tool configuration cannot be changed after the conversation starts. Make any changes before sending the first message.",
+                "network": "Cloud environment internet access",
+                "code": "Code and file execution",
+                "search": "Built-in web search",
+                "search_mode": "Search mode",
+                "domains": "Search domains (one per line; optional)",
+                "browser": "Cloud browser (Computer Use)",
+                "screenshots": "Include browser screenshots",
+                "discovery": "Tool discovery",
+                "programmatic": "Programmatic tool calling",
+                "functions": "Registered application functions",
+                "mcp": "MCP servers",
+                "fork": "Start a new conversation with this configuration",
+                "system_prompt": "System prompt",
+                "search_live": "Live",
+                "search_cached": "Cached",
+                "search_disabled": "Disabled",
+                "reasoning_default": "Model default",
+                "minimal": "Minimal",
+                "low": "Low",
+                "medium": "Medium",
+                "high": "High",
+                "xhigh": "Extra high",
+                "max": "Maximum",
+                "invalid_tools": "Invalid tool configuration. Check it before sending.",
+                "invalid_mcp": "The MCP configuration is not valid JSON.",
+                "capability": "Capability",
+                "status": "Status",
+                "description": "Description"
+            }
         },
         "training": {
             "dataset": {

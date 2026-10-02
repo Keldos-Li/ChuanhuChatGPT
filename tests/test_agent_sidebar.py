@@ -1,7 +1,7 @@
 import asyncio
 import gradio as gr
 from gradio.state_holder import SessionState
-from modules.agent_ui import AgentPanel
+from modules.agent_ui import AgentPanel, i18n
 from test_agent_model import env,select,send,complete,request
 
 
@@ -20,7 +20,7 @@ def test_sidebar_uses_session_snapshot_and_restores_ordinary_controls(env,monkey
     def frame():return asyncio.run(app.process_api(0,[None],state=state,request=request()))['data']
     first=frame();assert first[panel.outputs.index(tab)]['label']=='Agent'
     assert not hasattr(panel,'save')
-    assert panel.model.label=='使用模型' and not panel.settings_status.visible and not panel.availability.visible and not panel.fork.visible
+    assert panel.model.label==i18n('ui.toolbox.agent.model') and not panel.settings_status.visible and not panel.availability.visible and not panel.fork.visible
     for component in [panel.network,panel.code,panel.search,panel.browser,panel.screenshots]:
         assert 'switch-checkbox' in component.elem_classes
     assert 'switch-checkbox' not in panel.functions.elem_classes

@@ -534,7 +534,41 @@
                 "extensions": "Mở rộng",
                 "parameters": "Tham số"
             },
-            "title": "Hộp công cụ"
+            "title": "Hộp công cụ",
+            "agent": {
+                "model": "Mô hình sử dụng",
+                "reasoning": "Mức độ suy luận",
+                "tools_title": "Cấu hình công cụ",
+                "locked_hint": "Không thể thay đổi cấu hình công cụ sau khi cuộc trò chuyện bắt đầu. Nếu cần điều chỉnh, hãy thực hiện trước khi gửi tin nhắn đầu tiên.",
+                "network": "Kết nối Internet cho môi trường đám mây",
+                "code": "Thực thi mã và tệp",
+                "search": "Tìm kiếm web tích hợp",
+                "search_mode": "Chế độ tìm kiếm",
+                "domains": "Tên miền tìm kiếm (mỗi dòng một tên, không bắt buộc)",
+                "browser": "Trình duyệt đám mây (Computer Use)",
+                "screenshots": "Kèm ảnh chụp màn hình trình duyệt",
+                "discovery": "Khám phá công cụ",
+                "programmatic": "Gọi công cụ bằng chương trình",
+                "functions": "Hàm ứng dụng đã đăng ký",
+                "mcp": "Máy chủ MCP",
+                "fork": "Bắt đầu cuộc trò chuyện mới với cấu hình này",
+                "system_prompt": "Chỉ dẫn hệ thống",
+                "search_live": "Trực tiếp",
+                "search_cached": "Bộ nhớ đệm",
+                "search_disabled": "Tắt",
+                "reasoning_default": "Mặc định của mô hình",
+                "minimal": "Tối thiểu",
+                "low": "Thấp",
+                "medium": "Trung bình",
+                "high": "Cao",
+                "xhigh": "Rất cao",
+                "max": "Tối đa",
+                "invalid_tools": "Cấu hình công cụ không hợp lệ. Hãy kiểm tra trước khi gửi.",
+                "invalid_mcp": "Cấu hình MCP không phải JSON hợp lệ.",
+                "capability": "Khả năng",
+                "status": "Trạng thái",
+                "description": "Mô tả"
+            }
         },
         "training": {
             "dataset": {

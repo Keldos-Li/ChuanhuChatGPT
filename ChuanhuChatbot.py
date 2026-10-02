@@ -218,7 +218,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.multi_account_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
                             else:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.usage_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
-                        with gr.Accordion(label="模型", open=True, visible=False, elem_id="agent-settings-accordion") as agent_panel.accordion:
+                        with gr.Accordion(label=i18n("ui.toolbox.model.title"), open=True, visible=False, elem_id="agent-settings-accordion") as agent_panel.accordion:
                             agent_panel.selectors()
                         agent_panel.settings_components()
                         prompt_separator = gr.Markdown("---", elem_classes="hr-line", visible=not HIDE_MY_KEY)

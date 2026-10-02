@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 import gradio as gr
 import pytest
-from modules.agent_ui import AgentPanel, ArtifactPanel, REASONING_CHOICES, split_filename
+from modules.agent_ui import AgentPanel, ArtifactPanel, REASONING_CHOICES, split_filename, i18n
 from test_agent_model import env, select, send, complete, request
 
 
@@ -468,7 +468,7 @@ def test_deferred_ui_tools_are_closed_for_new_sessions_but_keep_direct_mcp():
         panel=AgentPanel();panel.selectors();panel.settings_components()
         assert panel.discovery.visible is False and panel.discovery.value is False
         assert panel.programmatic.visible is False and panel.programmatic.value is False
-        assert panel.browser.label=='云端浏览器（Computer Use）'
+        assert panel.browser.label==i18n('ui.toolbox.agent.browser')
 
 
 def test_agent_welcome_slogan_uses_local_language_spacing():
