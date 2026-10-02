@@ -70,6 +70,64 @@ def test_card_native_download_and_retry_dom_contract():
     assert result.returncode==0,result.stderr
 
 
+def test_dropdown_revision_ignores_late_callback_and_send_freezes_visible_pair(env,monkeypatch):
+    import threading
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    app,panel,state=panel_app(model)
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
+    entered=threading.Event();release=threading.Event();original=model.set_agent_model
+    def delayed(name,effort,revision=None):
+        if revision==1:entered.set();assert release.wait(3)
+        return original(name,effort,revision)
+    monkeypatch.setattr(model,'set_agent_model',delayed)
+    async def exercise():
+        req=gr.Request(session_hash='choice-race')
+        early=asyncio.create_task(app.process_api(index,[None,'gpt-6-sol','default',1],state=state,request=req))
+        assert await asyncio.to_thread(entered.wait,3)
+        await app.process_api(index,[None,'gpt-6-sol','high',2],state=state,request=req)
+        release.set();stale=await early
+        assert all(isinstance(value,dict) and value.get('__type__')=='update' and 'value' not in value for value in stale['data'])
+        assert model.agent_model_choice==('gpt-6-sol','high')
+        envelope=env.wrappers['transfer_input']('send current',model,'gpt-6.1-sol','medium',3,request=req)[0]
+        assert original('gpt-6-sol','default',2) is None
+        list(env.wrappers['predict'](model,envelope,model.chatbot,request=req))
+        assert (model.model_name,model._reasoning)==('gpt-6.1-sol','medium')
+    try:asyncio.run(exercise())
+    finally:release.set();app.close()
+
+
+def test_retry_listing_failure_returns_clickable_failed_card_then_can_retry(env,monkeypatch,tmp_path):
+    import tempfile
+    from pathlib import Path
+    model=select(env);model._state={'session_id':'s','turn_id':'t','generation':'g','outcome':'completed'}
+    model._artifacts=[{'id':'file','name':'same.txt','status':'failed','size':1}]
+    path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'same.txt';path.write_text('x')
+    calls=[]
+    def worker(command):
+        calls.append(command)
+        if len(calls)==1:yield {'type':'error','message':'listing unavailable'}
+        else:yield {'type':'result','artifacts':[{'id':'file','name':'same.txt','status':'ready','size':1,'path':str(path)}]}
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    app,panel,state=panel_app(model)
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='retry_file')
+    async def retry():
+        result=await app.process_api(index,[None,'file'],state=state,request=gr.Request(session_hash='retry'))
+        frames=[]
+        while True:
+            update=result['data'][1+panel.outputs.index(panel.artifacts.list)]
+            if isinstance(update,dict) and update.get('value'):frames.append(ET.fromstring(update['value']).find('button'))
+            if not result['is_generating']:break
+            result=await app.process_api(index,[None,'file'],state=state,request=gr.Request(session_hash='retry'),iterator=result['iterator'])
+        return frames
+    try:
+        failed=asyncio.run(retry())
+        assert failed[0].get('disabled')=='disabled'
+        assert failed[-1].get('disabled') is None and failed[-1].get('data-file-action')=='retry'
+        ready=asyncio.run(retry())
+        assert ready[-1].get('data-file-action')=='download' and len(calls)==2
+    finally:app.close()
+
+
 def test_actual_gradio_diff_stream_removes_provisional_reference_rows(env,monkeypatch):
     from copy import deepcopy
     from pathlib import Path
@@ -144,14 +202,14 @@ def test_no_login_submit_without_known_origin(env):
 def test_gradio_callback_updates_same_session_and_restores_on_failure(env,monkeypatch):
     complete(env,monkeypatch);model=select(env);send(env,model)
     app,panel,state=panel_app(model)
-    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_reasoning')
-    result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high'],state=state,request=gr.Request(session_hash='ui-test')))
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
+    result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1],state=state,request=gr.Request(session_hash='ui-test')))
     assert '下一轮' in result['data'][0] and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
     assert model.model_name!='gpt-6-sol'
     send(env,model,'apply on send')
     assert model.model_name=='gpt-6-sol'
     monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([{'type':'error','message':'rejected'}]))
-    result=asyncio.run(app.process_api(index,[None,'bad','low'],state=state,request=gr.Request(session_hash='ui-test')))
+    result=asyncio.run(app.process_api(index,[None,'bad','low',2],state=state,request=gr.Request(session_hash='ui-test')))
     assert '下一轮' in result['data'][0] and model.model_name=='gpt-6-sol'
     output=send(env,model,'must not submit')
     assert '消息未发送' in output[-1][1] and model.model_name=='gpt-6-sol'
@@ -189,9 +247,9 @@ def test_live_updates_do_not_overwrite_unsaved_tool_form(env):
 def test_callback_owner_validation_is_gradio_injected(env,monkeypatch):
     complete(env,monkeypatch);model=select(env,username='alice')
     app,panel,state=panel_app(model)
-    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_reasoning')
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
     with pytest.raises(gr.Error):
-        asyncio.run(app.process_api(index,[None,'gpt-6-sol','high'],state=state,request=gr.Request(username='bob',session_hash='ui-test')))
+        asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1],state=state,request=gr.Request(username='bob',session_hash='ui-test')))
     app.close()
 
 

@@ -829,14 +829,24 @@ def cancel_outputing():
     shared.state.interrupt()
 
 
-def transfer_input(inputs, current_model=None, request: gr.Request = None):
+def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning='default', agent_choice_revision=None, request: gr.Request = None):
     if getattr(current_model, 'is_hosted_agent', False) and request is not None:
         current_model.bind_owner(request)
+    if getattr(current_model, 'is_hosted_agent', False) and agent_model is not None:
+        # Freeze what is actually selected when Send is pressed, even if an
+        # earlier dropdown callback is delayed in transit.
+        with model_lock(current_model):
+            current_model.set_agent_model(agent_model, agent_reasoning)
+            if isinstance(agent_choice_revision, (int, float)) and agent_choice_revision >= 0 and int(agent_choice_revision) == agent_choice_revision:
+                current_model._choice_revision = max(current_model._choice_revision, int(agent_choice_revision))
+            envelope = reserve_submission(current_model, inputs)
+    else:
+        envelope = reserve_submission(current_model, inputs) if current_model is not None else inputs
     # 一次性返回，降低延迟
     textbox = reset_textbox()
     outputing = start_outputing()
     return (
-        reserve_submission(current_model, inputs) if current_model is not None else inputs,
+        envelope,
         gr.update(value=""),
         gr.Button(visible=False),
         gr.Button(visible=True),

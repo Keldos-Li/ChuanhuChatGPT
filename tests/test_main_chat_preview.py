@@ -23,6 +23,10 @@ async def exercise():
 
     async def call(name, inputs):
         index = functions[name]
+        if name=='transfer_input' and len(inputs)==2:
+            current=state[app.fns[functions['initial']].outputs[0]._id]
+            choice=getattr(current,'agent_model_choice',('gpt-6-astra',None))
+            inputs=[*inputs,choice[0],choice[1] or 'default',getattr(current,'_choice_revision',0)]
         result = await app.process_api(index, inputs, state=state, request=request)
         while result['is_generating']:
             result = await app.process_api(index, inputs, state=state, request=request,

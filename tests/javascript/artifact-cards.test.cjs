@@ -22,7 +22,7 @@ assert.deepStrictEqual(hits, ['file-second', 'file-second']);
 ids = ['unrelated']; click(); assert.strictEqual(hits.length, 2);
 assert(feedback.textContent.includes('正在准备'));
 // Retry uses the real hidden input and button, with duplicate-click protection.
-card.dataset.fileAction = 'retry'; click(); click();
+card.dataset.fileAction = 'retry'; click(); card.disabled = true; click();
 assert.deepStrictEqual(hits.slice(2), ['input:second', 'retry:second']);
 assert(card.disabled);
 console.log('Artifact cards: stable IDs, native downloads, stale render guard, retry and rerender delegation passed');

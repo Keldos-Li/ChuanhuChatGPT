@@ -93,6 +93,8 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._first_prompt = None
         self._pending_network = None
         self._pending_model_settings = None
+        self._choice_revision = 0
+        self._active_file_retries = set()
         self.metadata = {}
         self._tool_settings = load_settings(shared.chuanhu_path, owner) if owner else validate_settings({})
 
@@ -220,14 +222,19 @@ class OpenAIAgentsClient(BaseLLMModel):
     def agent_model_choice(self):
         return tuple(self._pending_model_settings or (self.model_name, self._reasoning))
 
-    def set_agent_model(self, model, reasoning):
+    def set_agent_model(self, model, reasoning, revision=None):
         with self._lock:
+            if revision is not None:
+                if not isinstance(revision, (int, float)) or revision < 0 or int(revision) != revision:
+                    raise gr.Error('无效的设置版本')
+                if revision <= self._choice_revision: return None
             if self._retired: raise gr.Error('聊天已切换，请在当前聊天中选择')
             self._assert_idle()
             if reasoning == 'default': reasoning = None
             if not isinstance(model, str) or not model.strip(): raise gr.Error('请选择 Agent 子模型')
             choice = (model.strip(), reasoning)
             self._pending_model_settings = choice if choice != (self.model_name, self._reasoning) else None
+            if revision is not None: self._choice_revision = int(revision)
             self._remember()
         return '已保存，下一轮自动使用'
 
@@ -400,8 +407,29 @@ class OpenAIAgentsClient(BaseLLMModel):
             yield deepcopy(self._display), self._status()
 
     def retry_artifact(self, artifact_id):
-        if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
-        yield from self._download(self._state.get('generation'), [artifact_id])
+        with self._lock:
+            if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
+            generation = self._state.get('generation')
+            retry_key = (self._state.get('session_id'), artifact_id)
+            if retry_key in self._active_file_retries: raise gr.Error('文件正在重新获取')
+            self._active_file_retries.add(retry_key)
+            for record in self._artifacts:
+                if record['id']==artifact_id:
+                    record.update(status='preparing');record.pop('error', None)
+        try:
+            yield deepcopy(self._display), self._status()
+            yield from self._download(generation, [artifact_id])
+        except Exception:
+            self._notice = '文件获取失败，可重试'
+        finally:
+            with self._lock:
+                self._active_file_retries.discard(retry_key)
+                if self._state.get('generation') == generation and self._state.get('session_id') == retry_key[0]:
+                    for record in self._artifacts:
+                        if record['id']==artifact_id and record.get('status')=='preparing':
+                            record.update(status='failed', error='文件获取未完成，请重试')
+                    self._remember()
+        yield deepcopy(self._display), self._status()
 
     def _network_request(self, inputs):
         commands = {'开网': True, '开启联网': True, '允许联网': True, '打开联网': True,

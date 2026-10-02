@@ -25,8 +25,6 @@
             if (!input || !trigger) { feedback('暂时无法重试，请重新连接'); return; }
             input.value = identifier;
             input.dispatchEvent(new Event('input', { bubbles: true }));
-            card.disabled = true;
-            feedback('正在重新获取');
             requestAnimationFrame(() => trigger.click());
         }
     });

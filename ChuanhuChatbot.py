@@ -561,8 +561,9 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     transfer_input_args = dict(
-        fn=transfer_input, inputs=[user_input, current_model], outputs=[
-            user_question, user_input, submitBtn, cancelBtn], show_progress=True
+        fn=transfer_input, inputs=[user_input, current_model, agent_panel.model, agent_panel.reasoning, agent_panel.choice_revision], outputs=[
+            user_question, user_input, submitBtn, cancelBtn], show_progress=True,
+        js='(text, model, name, effort, unused) => [text, model, name, effort, window.chuanhuAgentChoiceRevision || 0]'
     )
 
     get_usage_args = dict(

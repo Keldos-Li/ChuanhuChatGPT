@@ -133,6 +133,7 @@ class AgentPanel:
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
             self.model = gr.Dropdown(label='Agent 子模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
             self.reasoning = gr.Dropdown(label='推理强度', choices=MODEL_EFFORTS['gpt-6-astra'], value='default', info='选择后自动用于下一轮对话', min_width=120)
+            self.choice_revision = gr.Number(value=0, precision=0, visible=False)
 
     def output_components(self):
         self.artifacts = ArtifactPanel()
@@ -207,18 +208,18 @@ class AgentPanel:
         return predict_with_ui
 
     def wire(self, current_model, chatbot, status_display, capability_ui=None):
-        def choose_model(model, name, request: gr.Request):
+        def choose_settings(model, name, effort, revision, request: gr.Request):
             model.bind_owner(request)
-            try: message = model.set_agent_model(name, 'default')
+            try: message = model.set_agent_model(name, effort, revision)
             except Exception as error: message = str(error)
+            if message is None: return [gr.update()] * (1 + len(self.outputs))
             return message, *self.values(model)
-        def choose_reasoning(model, name, effort, request: gr.Request):
-            model.bind_owner(request)
-            try: message = model.set_agent_model(name, effort)
-            except Exception as error: message = str(error)
-            return message, *self.values(model)
-        self.model.input(choose_model, [current_model, self.model], [status_display, *self.outputs], queue=False)
-        self.reasoning.input(choose_reasoning, [current_model, self.model, self.reasoning], [status_display, *self.outputs], queue=False)
+        choice_js = '''(state, name, effort, unused) => {
+            window.chuanhuAgentChoiceRevision = (window.chuanhuAgentChoiceRevision || 0) + 1;
+            return [state, name, effort, window.chuanhuAgentChoiceRevision];
+        }'''
+        for selector in (self.model, self.reasoning):
+            selector.input(choose_settings, [current_model, self.model, self.reasoning, self.choice_revision], [status_display, *self.outputs], queue=False, js=choice_js)
         def save(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, request: gr.Request):
             model.bind_owner(request)
             try:
