@@ -121,7 +121,7 @@ def test_default_tools_and_network_enabled_with_no_legacy_plugin_import():
     assert result.text == 'result'
     payload = client.payloads[0]
     assert payload['environment'] == {'type': 'openai_hosted', 'network': {'access': 'enabled'}, 'desktop': {'enabled': True}}
-    assert {tool['type'] for tool in payload['agent']['tools']} == {'computer_use', 'web_search', 'programmatic_tool_calling'}
+    assert {tool['type'] for tool in payload['agent']['tools']} == {'computer_use', 'web_search'}
     assert payload['agent']['model'] == 'explicit-model'
 
 

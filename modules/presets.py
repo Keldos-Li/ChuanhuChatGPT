@@ -160,7 +160,7 @@ MODEL_METADATA = {
         "description": "model.openai_agent.description",
         "system": "Perform only the requested task. Keep your final answer concise. Use files in /workspace for deliverables.",
         "placeholder": {"logo": "file=web_assets/model_logos/codex-color.png",
-                        "logo_rounded": "false", "slogan": "model.openai_agent.slogan"},
+                        "logo_rounded": "true", "slogan": "model.openai_agent.slogan"},
         "metadata": {"allow_text_tool": False},
     },
     "Llama-2-7B":{

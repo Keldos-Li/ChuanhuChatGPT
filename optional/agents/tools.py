@@ -22,7 +22,7 @@ DEFAULT_SETTINGS = {
     'network': True, 'code_execution': True,
     'web_search': True, 'search_mode': 'live', 'search_domains': [],
     'computer_use': True, 'include_screenshots': False,
-    'tool_search': True, 'programmatic_tool_calling': True,
+    'tool_search': False, 'programmatic_tool_calling': False,
     'functions': [], 'mcp_servers': [],
 }
 FUNCTIONS = {}

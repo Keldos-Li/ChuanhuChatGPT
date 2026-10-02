@@ -90,7 +90,8 @@ def test_ready_cards_have_native_button_semantics_and_no_redundant_visible_downl
     assert card.find('.//span[@class="model-file-state"]') is None
     visible = ''.join(card.itertext())
     assert '可下载' not in visible and '下载文件' not in visible
-    assert 'same.txt' in visible and '1,234 字节' in visible
+    assert ''.join(card.find('.//span[@class="model-file-name"]').itertext()) == 'same'
+    assert ''.join(card.find('.//span[@class="model-file-meta"]').itertext()) == 'txt · 1,234 字节'
     assert card.find('.//span[@class="model-file-feedback"]').get('aria-live') == 'polite'
     assert json.loads(values[2]['label']) == ['file"<&\'']
     assert values[2]['value'] == ['/tmp/file/same.txt']
@@ -124,7 +125,7 @@ def test_native_id_list_stays_parallel_to_only_ready_downloadable_paths_for_dupl
     ])
     values = ArtifactPanel.values(current)
     cards = markup_cards(values)
-    assert [''.join(card.find('.//span[@class="model-file-name"]').itertext()) for card in cards] == ['same.txt'] * 5
+    assert [''.join(card.find('.//span[@class="model-file-name"]').itertext()) for card in cards] == ['same'] * 5
     assert json.loads(values[2]['label']) == ['second', 'first']
     assert values[2]['value'] == ['/tmp/second/same.txt', '/tmp/first/same.txt']
     assert cards[3].get('data-file-action') == '' and cards[3].get('disabled') is not None
@@ -150,6 +151,6 @@ def test_bot_column_stays_fixed_against_gradio_mobile_auto_without_resizing_user
         return '\n'.join(body for selectors, body in rules if selector in [item.strip() for item in selectors.split(',')])
     assert re.search(r'(?<!max-)\bwidth\s*:\s*100%\s*!important', bodies('.message.bot'))
     assert 'max-width: calc(85% - 40px)' in bodies('.message.bot')
-    assert 'max-width: calc(100% - 84px) !important' in bodies('.message.bot')
+    assert 'max-width: calc(100% - 23px) !important' in bodies('.message.bot')
     assert re.search(r'(?<!max-)\bwidth\s*:\s*auto\s*!important', bodies('.message.user'))
     assert '#chuanhu-chatbot .agent-message-has-files > .message.bot' not in css

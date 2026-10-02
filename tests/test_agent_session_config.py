@@ -46,8 +46,8 @@ def test_new_chat_settings_apply_when_session_is_created(env, monkeypatch):
 @pytest.mark.parametrize('change', [
     {'network': False}, {'web_search': False}, {'search_mode': 'cached'},
     {'search_domains': ['example.com']}, {'computer_use': False},
-    {'include_screenshots': True}, {'tool_search': False},
-    {'programmatic_tool_calling': False}, {'functions': ['text_statistics']},
+    {'include_screenshots': True}, {'tool_search': True},
+    {'programmatic_tool_calling': True}, {'functions': ['text_statistics']},
     {'mcp_servers': [{'server_label': 'reader', 'server_url': 'https://mcp.example.com',
                       'allowed_tools': ['read_issue']}]},
     {'code_execution': False, 'computer_use': False, 'programmatic_tool_calling': False},
@@ -84,7 +84,7 @@ def test_existing_instructions_reject_direct_and_wrapped_setters(env, monkeypatc
     assert model._store().get(model._owner, model.history_file_path)['settings'] == snapshot
 
 
-def test_precreated_file_session_locks_configuration_before_first_turn(env, tmp_path, monkeypatch):
+def test_first_send_preparation_failure_locks_configuration_after_submission(env, tmp_path, monkeypatch):
     model, paths, service, calls = staged(env, tmp_path, monkeypatch, ('upload-fail.txt',))
     model.set_system_prompt('Prepared session instructions')
     model.save_agent_tools(dict(model._tool_settings, network=False))
@@ -431,3 +431,33 @@ def test_existing_snapshot_is_idempotent_and_still_allows_next_model(env, monkey
     assert model._session_settings['instructions'] == snapshot['instructions']
     assert model.agent_model_choice == ('gpt-6-sol', 'high')
     assert [call['action'] for call in calls][-3:] == ['update', 'run', 'download']
+
+
+def test_attachment_selection_keeps_configuration_editable_until_first_send(env,tmp_path,monkeypatch):
+    model,paths,service,calls=staged(env,tmp_path,monkeypatch)
+    assert calls==[] and service.sessions=={} and model._state.get('session_id') is None
+    records=model.freeze_input_files(paths)
+    chosen=dict(model._tool_settings,network=False,include_screenshots=True)
+    model.stage_agent_tools(chosen,1,model._conversation_id)
+    model.set_system_prompt('Instructions chosen after selecting attachments')
+    assert model.freeze_input_files(paths)==records and not calls
+    submit(env,model,'First send after configuration change',paths)
+    assert [call['action'] for call in calls]==['prepare_inputs','run','download']
+    for call in calls[:2]:
+        assert call['tool_settings']==chosen
+        assert call['instructions']=='Instructions chosen after selecting attachments'
+    assert calls[0]['inputs'][0]['input_id']==records[0].input_id
+    assert calls[1]['input_files'][0]['input_id']==records[0].input_id
+    session=model._state['session_id']
+    assert service.sessions[session]['tools']==chosen
+    with pytest.raises(gr.Error):
+        model.stage_agent_tools(dict(chosen,network=True),2,model._conversation_id)
+
+
+def test_remove_selected_upload_before_first_send_leaves_no_remote_session(env,tmp_path,monkeypatch):
+    model,paths,service,calls=staged(env,tmp_path,monkeypatch)
+    records=model.freeze_input_files(paths)
+    model.remove_input_ids([records[0].input_id],model._conversation_id)
+    model.stage_agent_tools(dict(model._tool_settings,network=False),1,model._conversation_id)
+    assert not model._pending_upload_paths and not model.freeze_input_files([])
+    assert not calls and not service.sessions and model._state.get('session_id') is None

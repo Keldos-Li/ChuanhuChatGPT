@@ -13,18 +13,22 @@ from test_agent_model import env, select, send, complete, request
     ('很长的文件名😊.txt', '很长的文件名😊', '.txt'),
     ('archive.TAR.GZ', 'archive', '.TAR.GZ'),
     ('definition.d.ts', 'definition', '.d.ts'),
+    ('report.final.v2.pdf','report.final.v2','.pdf'),
     ('.env', '.env', ''), ('.config.json', '.config', '.json'),
     ('无后缀', '无后缀', ''), ('trailing.', 'trailing.', ''),
 ])
-def test_single_line_filename_keeps_complete_extension_and_full_accessibility(env,name,stem,suffix):
+def test_single_line_basename_and_extension_size_metadata_preserve_download_identity(env,name,stem,suffix):
     assert split_filename(name)==(stem,suffix)
     model=select(env);model._artifacts=[dict(id='stable-file',name=name,status='ready',path='/tmp/synthetic',size=1)]
     card=ET.fromstring(ArtifactPanel.values(model)[1]['value']).find('button')
     assert card.get('data-artifact-id')=='stable-file' and name in card.get('aria-label')
     label=card.find('.//span[@class="model-file-name"]')
-    assert label.get('title')==name and ''.join(label.itertext())==name
+    assert label.get('title')==name and ''.join(label.itertext())==stem
     assert label.find('span[@class="model-file-basename"]').text==stem
-    assert (label.find('span[@class="model-file-extension"]').text or '')==suffix
+    assert label.find('span[@class="model-file-extension"]') is None
+    meta=card.find('.//span[@class="model-file-meta"]')
+    assert ''.join(meta.itertext())==(suffix[1:]+' · ' if suffix else '')+'1 字节'
+    assert ArtifactPanel.values(model)[2]['value']==['/tmp/synthetic']
 
 
 def test_legacy_none_restored_and_send_snapshot_never_sends_string_none(env,monkeypatch):
@@ -444,3 +448,45 @@ def test_agent_fork_precondition_preserves_chat_and_error_is_posted_once(env):
     with pytest.raises(gr.Error,match='请先停止或确认当前任务状态'):panel.emit_ui_error(model,request())
     panel.emit_ui_error(model,request());assert model._running
     app.close()
+
+
+def test_deferred_ui_tools_are_closed_for_new_sessions_but_keep_direct_mcp():
+    from optional.agents.tools import build_tool_config, validate_settings
+    server={'server_label':'synthetic','server_url':'https://example.invalid/mcp','allowed_tools':['read_document']}
+    value=validate_settings({'mcp_servers':[server],'tool_search':True,'programmatic_tool_calling':True})
+    new=SimpleNamespace(_state={'session_id':None})
+    config=AgentPanel.user_tool_config(new,value)
+    assert config['tool_search'] is False and config['programmatic_tool_calling'] is False
+    assert config['mcp_servers']==[server]
+    built=build_tool_config(config,verify_connections=False)
+    assert {'tool_search','programmatic_tool_calling'}.isdisjoint(t['type'] for t in built['tools'])
+    mcp=next(t for t in built['tools'] if t['type']=='mcp')
+    assert mcp['allowed_tools']==['read_document']
+    frozen=SimpleNamespace(_state={'session_id':'existing-synthetic'})
+    assert AgentPanel.user_tool_config(frozen,value)==value
+    with gr.Blocks():
+        panel=AgentPanel();panel.selectors();panel.settings_components()
+        assert panel.discovery.visible is False and panel.discovery.value is False
+        assert panel.programmatic.visible is False and panel.programmatic.value is False
+        assert panel.browser.label=='云端浏览器（Computer Use）'
+
+
+def test_agent_welcome_slogan_uses_local_language_spacing():
+    import json
+    root=Path(__file__).resolve().parents[1]
+    assert json.loads((root/'locale/zh_CN.json').read_text())['model']['openai_agent']['slogan']=='把任务交给 Agent 完成'
+    assert json.loads((root/'locale/en_US.json').read_text())['model']['openai_agent']['slogan']=='Let Agent complete the task.'
+
+
+def test_empty_local_chat_can_configure_tools_before_first_submission(env,monkeypatch):
+    model=select(env)
+    assert model._state.get('session_id') is None
+    def forbidden(command):
+        raise AssertionError('Empty local chat configuration must not create a remote session')
+    monkeypatch.setattr(env.agents,'worker_messages',forbidden)
+    settings=dict(model._tool_settings,network=False)
+    model.stage_agent_tools(settings,1,model._conversation_id)
+    assert model._tool_settings['network'] is False
+    model.freeze_agent_configuration(settings,'First-round instructions',1,model._conversation_id)
+    assert model._state.get('session_id') is None
+    assert model.system_prompt=='First-round instructions'

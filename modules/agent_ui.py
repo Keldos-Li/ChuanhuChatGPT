@@ -92,8 +92,8 @@ class ArtifactPanel:
             icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>'
             cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
                          + '<span class="model-file-icon">' + icon + '</span><span class="model-file-content">'
-                         + '<span class="model-file-name" title="' + escape(record['name']) + '"><span class="model-file-basename">' + escape(basename) + '</span><span class="model-file-extension">' + escape(extension) + '</span></span>'
-                         + '<span class="model-file-meta"><span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
+                         + '<span class="model-file-name" title="' + escape(record['name']) + '"><span class="model-file-basename">' + escape(basename) + '</span></span>'
+                         + '<span class="model-file-meta">' + ('<span class="model-file-extension">' + escape(extension[1:]) + '</span> · ' if extension else '') + '<span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
                          + '<span class="model-file-error">' + escape(error) + '</span><span class="model-file-feedback" aria-live="polite"></span></span></button>')
         markup = '<div class="model-file-cards" aria-label="生成的文件">' + ''.join(cards) + '</div>' if cards else ''
         # The hidden native label travels with its File value, so the browser
@@ -250,30 +250,43 @@ class AgentPanel:
             self.payload = gr.Textbox(type='password', visible=False)
 
     def settings_components(self):
-        with gr.Column(visible=False, elem_id='agent-tool-settings', min_width=0) as self.settings_group:
+        self.tools_separator = gr.Markdown('---', elem_classes='hr-line', elem_id='agent-tools-separator', visible=False)
+        with gr.Accordion('工具配置', open=True, visible=False, elem_id='agent-tools-accordion') as self.settings_group:
             self.settings_status = gr.Markdown(visible=False)
+            gr.Markdown('对话开始后无法更改工具配置；如需调整，请在第一轮对话开始前设置。')
             self.network = gr.Checkbox(label='云端执行环境联网', value=True, elem_id='agent-network-access', elem_classes='switch-checkbox')
             self.code = gr.Checkbox(label='代码与文件执行', value=True, elem_classes='switch-checkbox')
             self.search = gr.Checkbox(label='内置网页搜索', value=True, elem_classes='switch-checkbox')
             self.search_mode = gr.Dropdown(label='搜索模式', choices=['live', 'cached', 'disabled'], value='live')
             self.domains = gr.Textbox(label='搜索域名范围（每行一个，可留空）', visible=False)
-            self.browser = gr.Checkbox(label='云端浏览器', value=True, elem_classes='switch-checkbox')
+            self.browser = gr.Checkbox(label='云端浏览器（Computer Use）', value=True, elem_classes='switch-checkbox')
             self.screenshots = gr.Checkbox(label='返回浏览器截图', value=False, elem_classes='switch-checkbox')
-            self.discovery = gr.Checkbox(label='工具发现（配置可执行函数后生效）', value=True, elem_classes='switch-checkbox')
-            self.programmatic = gr.Checkbox(label='程序化工具调用', value=True, elem_classes='switch-checkbox')
+            # Deferred until application tools are deliberately exposed in the UI.
+            # Keep callback slots and backend implementations for later use.
+            # self.discovery = gr.Checkbox(label='工具发现', value=True, elem_classes='switch-checkbox')
+            # self.programmatic = gr.Checkbox(label='程序化工具调用', value=True, elem_classes='switch-checkbox')
+            self.discovery = gr.Checkbox(value=False, visible=False, interactive=False)
+            self.programmatic = gr.Checkbox(value=False, visible=False, interactive=False)
             self.functions = gr.CheckboxGroup(label='已注册的应用函数', choices=list(FUNCTIONS), value=[], visible=False)
             self.mcp = gr.Textbox(label='MCP 服务器', value='[]', lines=5)
             self.availability = gr.Dataframe(headers=['能力', '状态', '说明'], datatype=['str'] * 3, interactive=False, wrap=True, visible=False)
             self.fork = gr.Button('按新配置新建并继续', visible=False)
             self.tool_revision = gr.Number(value=0, precision=0, visible=False)
             self.config_target = gr.Textbox(visible=False)
-
     @staticmethod
     def config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp):
         return {'network': network, 'code_execution': code, 'web_search': search, 'search_mode': mode,
                 'search_domains': [s.strip() for s in domains.splitlines() if s.strip()],
                 'computer_use': browser, 'include_screenshots': screenshots, 'tool_search': discovery,
                 'programmatic_tool_calling': programmatic, 'functions': functions, 'mcp_servers': json.loads(mcp)}
+
+    @staticmethod
+    def user_tool_config(model, config):
+        # Existing remote sessions keep their immutable configuration. New UI
+        # sessions cannot enable the two deferred features through stale inputs.
+        if not model._state.get('session_id'):
+            return dict(config, tool_search=False, programmatic_tool_calling=False)
+        return config
 
     def wrap_transfer(self, transfer):
         def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning='default', agent_choice_revision=None, agent_files=None,
@@ -286,7 +299,7 @@ class AgentPanel:
                     if network is not None:
                         try: config = self.config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp)
                         except (TypeError, ValueError, AttributeError): raise gr.Error('工具配置格式无效，请检查后发送') from None
-                        current_model.freeze_agent_configuration(config, instructions, tool_revision, target)
+                        current_model.freeze_agent_configuration(self.user_tool_config(current_model, config), instructions, tool_revision, target)
                     result = list(transfer(inputs, current_model, agent_model, agent_reasoning, agent_choice_revision, agent_files, request=request))
                     # Keep the draft until the browser sees submission accepted.
                     # Failed preparation never needs a delayed server writeback.
@@ -322,7 +335,7 @@ class AgentPanel:
 
     @property
     def outputs(self):
-        return ([self.accordion] if hasattr(self, 'accordion') else []) + [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
+        return ([self.accordion] if hasattr(self, 'accordion') else []) + ([self.separator] if hasattr(self, 'separator') else []) + ([self.tools_separator] if hasattr(self, 'tools_separator') else []) + [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
                 self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit,
                 *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else []) + (list(self.sidebar[:4]) if hasattr(self, 'sidebar') else []) + [self.config_target]
 
@@ -330,7 +343,7 @@ class AgentPanel:
         enabled = _agent(model)
         if enabled and request is not None: model.bind_owner(request)
         if not enabled:
-            return ([gr.update(visible=False)] if hasattr(self, 'accordion') else []) + [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
+            return ([gr.update(visible=False)] if hasattr(self, 'accordion') else []) + ([gr.update(visible=False)] if hasattr(self, 'separator') else []) + ([gr.update(visible=False)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
                     *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + ['']
         busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
@@ -339,14 +352,14 @@ class AgentPanel:
         chosen = cards[0]['request_id'] if cards else None
         browser = browser_form(model, chosen)
         session_locked = bool(model._state.get('session_id'))
-        settings = (model._session_settings or {}).get('tools', model._tool_settings) if session_locked else model._tool_settings
+        settings = (model._session_settings or {}).get('tools', model._tool_settings) if session_locked else self.user_tool_config(model, model._tool_settings)
         config = [settings['network'], settings['code_execution'], settings['web_search'], settings['search_mode'], '\n'.join(settings['search_domains']),
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
-        return ([gr.update(visible=True)] if hasattr(self, 'accordion') else []) + [gr.update(visible=True), gr.update(visible=True), '',
+        return ([gr.update(visible=True)] if hasattr(self, 'accordion') else []) + ([gr.update(visible=True)] if hasattr(self, 'separator') else []) + ([gr.update(visible=True)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=True), gr.update(visible=True), '',
                 gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
-                *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked) for value in config], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id]
+                *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked and component not in (self.discovery, self.programmatic)) for component, value in zip(self.config_inputs, config)], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id]
 
     def wrap_predict(self, predict, capability_ui):
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
@@ -446,7 +459,7 @@ class AgentPanel:
             model.bind_owner(request)
             try:
                 value = self.config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp)
-                model.stage_agent_tools(value, revision, target)
+                model.stage_agent_tools(self.user_tool_config(model, value), revision, target)
                 return gr.update()
             except Exception as error:
                 raise gr.Error(str(error) if not isinstance(error, json.JSONDecodeError) else 'MCP 配置不是有效 JSON') from None

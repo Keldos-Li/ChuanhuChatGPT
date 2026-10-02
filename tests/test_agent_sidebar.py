@@ -15,15 +15,17 @@ def test_sidebar_uses_session_snapshot_and_restores_ordinary_controls(env,monkey
                 prompt=gr.Textbox();template=gr.Dropdown(choices=[])
         panel.bind_sidebar(tab,prompt,template,prompt_group,'对话')
         button.click(panel.values,[current],panel.outputs)
+    assert panel.discovery.visible is False and panel.programmatic.visible is False
     state=SessionState(app);state[current._id]=model
     def frame():return asyncio.run(app.process_api(0,[None],state=state,request=request()))['data']
     first=frame();assert first[panel.outputs.index(tab)]['label']=='Agent'
     assert not hasattr(panel,'save')
     assert panel.model.label=='使用模型' and not panel.settings_status.visible and not panel.availability.visible and not panel.fork.visible
-    for component in [panel.network,panel.code,panel.search,panel.browser,panel.screenshots,panel.discovery,panel.programmatic]:
+    for component in [panel.network,panel.code,panel.search,panel.browser,panel.screenshots]:
         assert 'switch-checkbox' in component.elem_classes
     assert 'switch-checkbox' not in panel.functions.elem_classes
-    for component in [*panel.config_inputs,prompt,template]:assert first[panel.outputs.index(component)]['interactive']
+    for component in [c for c in panel.config_inputs if c not in (panel.discovery,panel.programmatic)]+[prompt,template]:assert first[panel.outputs.index(component)]['interactive']
+    for component in (panel.discovery,panel.programmatic):assert first[panel.outputs.index(component)]['interactive'] is False
     model._state['outcome']='uncertain';model._needs_sync=True
     unknown=frame()
     for component in [*panel.config_inputs,prompt,template]:assert unknown[panel.outputs.index(component)]['interactive'] is False

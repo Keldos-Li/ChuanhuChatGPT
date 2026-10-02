@@ -44,6 +44,10 @@ class AgentInputState:
         self._input_messages = {}
 
     def stage_input_files(self, files):
+        """Stage locally only; cloud preparation starts inside the first Send.
+
+        Selecting attachments must not create a session or freeze its settings.
+        """
         with self._lock:
             paths = tuple(str(path) for path in files or [])
             if not paths and not self._pending_upload_paths: return '附件已清空'

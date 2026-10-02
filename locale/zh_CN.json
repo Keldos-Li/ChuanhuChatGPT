@@ -243,7 +243,7 @@
         },
         "openai_agent": {
             "description": "使用 OpenAI Agent 连续对话、处理文件并执行任务。",
-            "slogan": "把任务交给 Agent，一起完成。",
+            "slogan": "把任务交给 Agent 完成",
             "selection_notice": "Agent 使用现有 OpenAI 连接。普通历史作为文字引用；已绑定的 Agent 会话会先恢复云端状态再继续。",
             "invalid_response": "连接响应无法解析，任务未自动重发；请重新连接原会话确认状态。"
         }

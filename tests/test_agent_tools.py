@@ -35,7 +35,7 @@ def login_action(options=False):
 def test_default_builtins_and_distinct_network_search():
     config=tools.build_tool_config({})
     assert config['environment']=={'type':'openai_hosted','network':{'access':'enabled'},'desktop':{'enabled':True}}
-    assert {x['type'] for x in config['tools']}=={'web_search','computer_use','programmatic_tool_calling'}
+    assert {x['type'] for x in config['tools']}=={'web_search','computer_use'}
     assert not config['snapshot']['functions'] and not config['snapshot']['mcp_servers']
     config=tools.build_tool_config({'network':False})
     assert config['environment']['network']['access']=='disabled'
@@ -47,7 +47,7 @@ def test_default_builtins_and_distinct_network_search():
 def test_disabled_tools_not_discoverable_or_programmatically_exposed():
     config=tools.build_tool_config({'web_search':False,'computer_use':False,'programmatic_tool_calling':False,'functions':[]})
     assert config['tools']==[]
-    config=tools.build_tool_config({'functions':['text_statistics']})
+    config=tools.build_tool_config({'functions':['text_statistics'],'tool_search':True})
     assert next(x for x in config['tools'] if x['type']=='function')['defer_loading']
     assert {'tool_search','function'}<={x['type'] for x in config['tools']}
 

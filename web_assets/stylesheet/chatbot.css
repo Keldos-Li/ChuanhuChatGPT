@@ -168,7 +168,8 @@ hr.append-display {
         max-height: calc(100dvh - 140px - var(--line-sm)*1rem - 2*var(--block-label-margin) );
     } */
     .message.bot {
-        max-width: calc(100% - 84px) !important;
+        /* The existing button column extends 23px beyond the bubble. */
+        max-width: calc(100% - 23px) !important;
     }
     .message.user {
         max-width: calc(100% - 84px) !important;
@@ -616,3 +617,5 @@ img.avatar-image {
 
 #chatbot-area.agent-mode #chuanhu-chatbot { height: 100% !important; min-height: 0; }
 #chatbot-area.agent-mode #chuanhu-chatbot .bubble-wrap { padding-top: 16px; padding-bottom: 16px; }
+
+/* Match the existing sidebar Accordion heading weight for this nested panel. */

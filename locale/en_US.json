@@ -243,7 +243,7 @@
         },
         "openai_agent": {
             "description": "Chat with OpenAI Agent to work with files and complete tasks.",
-            "slogan": "Give Agent a task. Work through it together.",
+            "slogan": "Let Agent complete the task.",
             "selection_notice": "Agent reuses the existing OpenAI connection. Ordinary history is quoted as context; bound Agent conversations restore cloud state before continuing.",
             "invalid_response": "The connection response could not be read. No task was resent; reconnect the original session to confirm its state."
         }

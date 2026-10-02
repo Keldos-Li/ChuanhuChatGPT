@@ -57,7 +57,7 @@ def test_file_status_markup_escapes_names_types_and_errors(env):
     markup=ArtifactPanel.values(model)[1]['value']
     assert '<img' not in markup and '<script' not in markup and '<svg onload' not in markup
     rows=artifact_rows(markup)
-    assert rows[0][0]==model._artifacts[0]['name']
+    assert rows[0][0]==model._artifacts[0]['name'][:-4]
     assert 'data-artifact-id="one"' in markup and 'data-file-action="retry"' in markup
     assert rows[0][3]=='下载失败，点击重试：'+model._artifacts[0]['error']
 
@@ -264,7 +264,7 @@ def test_live_updates_do_not_overwrite_unsaved_tool_form(env):
     values=panel.values(model,include_config=False)
     for component in panel.config_inputs:
         assert 'value' not in values[panel.outputs.index(component)]
-        assert values[panel.outputs.index(component)]['interactive'] is True
+        assert values[panel.outputs.index(component)]['interactive'] is (component not in (panel.discovery, panel.programmatic))
     app.close()
 
 
@@ -406,7 +406,7 @@ def test_single_file_retry_streams_preparing_and_result_without_losing_other_fil
         while True:
             update=result['data'][1+panel.outputs.index(panel.artifacts.list)]
             if isinstance(update,dict) and update.get('value'):
-                rows=artifact_rows(update['value']);assert rows[0][0]=='other.txt' and rows[0][3]=='';statuses.append(rows[1][3])
+                rows=artifact_rows(update['value']);assert rows[0][0]=='other' and rows[0][3]=='';statuses.append(rows[1][3])
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'retry'],state=state,request=req,iterator=result['iterator'])
         if final_status=='failed':
