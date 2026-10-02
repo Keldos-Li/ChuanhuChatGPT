@@ -836,9 +836,10 @@ def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning
         # Freeze what is actually selected when Send is pressed, even if an
         # earlier dropdown callback is delayed in transit.
         with model_lock(current_model):
-            current_model.set_agent_model(agent_model, agent_reasoning)
             if isinstance(agent_choice_revision, (int, float)) and agent_choice_revision >= 0 and int(agent_choice_revision) == agent_choice_revision:
-                current_model._choice_revision = max(current_model._choice_revision, int(agent_choice_revision))
+                current_model.set_agent_model(agent_model, agent_reasoning, int(agent_choice_revision))
+            else:
+                current_model.set_agent_model(agent_model, agent_reasoning)
             envelope = reserve_submission(current_model, inputs)
     else:
         envelope = reserve_submission(current_model, inputs) if current_model is not None else inputs

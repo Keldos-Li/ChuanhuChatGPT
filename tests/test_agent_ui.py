@@ -128,6 +128,23 @@ def test_retry_listing_failure_returns_clickable_failed_card_then_can_retry(env,
     finally:app.close()
 
 
+def test_older_completed_choice_response_cannot_overwrite_widgets_or_same_revision_send(env,monkeypatch):
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    app,panel,state=panel_app(model)
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
+    req=gr.Request(session_hash='late-response')
+    early=asyncio.run(app.process_api(index,[None,'gpt-6-sol','default',1],state=state,request=req))
+    later=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',2],state=state,request=req))
+    assert panel.model not in app.fns[index].outputs and panel.reasoning not in app.fns[index].outputs
+    assert len(early['data'])==len(later['data'])==1
+    # Even a stale visible value submitted with an already-confirmed revision
+    # cannot silently replace the latest pair stored by that revision.
+    envelope=env.wrappers['transfer_input']('send',model,'gpt-6-sol','default',2,request=req)[0]
+    list(env.wrappers['predict'](model,envelope,model.chatbot,request=req))
+    assert (model.model_name,model._reasoning)==('gpt-6-sol','high')
+    app.close()
+
+
 def test_actual_gradio_diff_stream_removes_provisional_reference_rows(env,monkeypatch):
     from copy import deepcopy
     from pathlib import Path

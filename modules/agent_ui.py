@@ -11,6 +11,7 @@ MODEL_EFFORTS = {
     'gpt-6-sol': ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'],
     'gpt-6.1-sol': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
 }
+REASONING_CHOICES = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 
 def _agent(model):
@@ -132,7 +133,7 @@ class AgentPanel:
     def selectors(self):
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
             self.model = gr.Dropdown(label='Agent 子模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
-            self.reasoning = gr.Dropdown(label='推理强度', choices=MODEL_EFFORTS['gpt-6-astra'], value='default', info='选择后自动用于下一轮对话', min_width=120)
+            self.reasoning = gr.Dropdown(label='推理强度', choices=REASONING_CHOICES, value='default', info='选择后自动用于下一轮对话', min_width=120)
             self.choice_revision = gr.Number(value=0, precision=0, visible=False)
 
     def output_components(self):
@@ -195,7 +196,7 @@ class AgentPanel:
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
         return [gr.update(visible=True), gr.update(visible=True), describe_settings(model),
-                gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=MODEL_EFFORTS.get(next_model, ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']), interactive=not busy),
+                gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
                 *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))]
 
@@ -212,14 +213,15 @@ class AgentPanel:
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort, revision)
             except Exception as error: message = str(error)
-            if message is None: return [gr.update()] * (1 + len(self.outputs))
-            return message, *self.values(model)
+            # A response generated before a newer selection may arrive last.
+            # Never write selector values back from this asynchronous event.
+            return message if message is not None else gr.update()
         choice_js = '''(state, name, effort, unused) => {
             window.chuanhuAgentChoiceRevision = (window.chuanhuAgentChoiceRevision || 0) + 1;
             return [state, name, effort, window.chuanhuAgentChoiceRevision];
         }'''
         for selector in (self.model, self.reasoning):
-            selector.input(choose_settings, [current_model, self.model, self.reasoning, self.choice_revision], [status_display, *self.outputs], queue=False, js=choice_js)
+            selector.input(choose_settings, [current_model, self.model, self.reasoning, self.choice_revision], [status_display], queue=False, js=choice_js)
         def save(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, request: gr.Request):
             model.bind_owner(request)
             try:
