@@ -122,6 +122,43 @@ async def exercise():
         await call('predict_with_ui',[None,None,[],False,[],'English',data])
         assert 'synthetic.csv' in model.chatbot[0][0]
         assert '/workspace/inputs/' not in model.chatbot[0][0] and not model._pending_upload_paths
+
+        # Empty native Files become read-only while the real main generator
+        # waits for authorization. Exercise that state and concurrent deny,
+        # rather than testing a substitute button or direct model response.
+        await call('reset', [None, False])
+        await call('transfer_input', ['permission', None])
+        predict_index = functions['predict_with_ui']
+        predict_inputs = [None, None, [], False, [], 'English', []]
+        frame = await app.process_api(predict_index, predict_inputs, state=state, request=request)
+        while not model._pending_actions and frame['is_generating']:
+            frame = await app.process_api(predict_index, predict_inputs, state=state,
+                                          request=request, iterator=frame['iterator'])
+        assert model._state['outcome'] == 'requires_action' and model._pending_actions
+        outputs = {getattr(component, 'elem_id', None): value
+                   for component, value in zip(app.fns[predict_index].outputs, frame['data'])}
+        assert outputs['status-display'] in ('', None)
+        assert outputs['agent-upload-files']['interactive'] is False
+        assert outputs['agent-pending-files']['interactive'] is False
+        deny_index = [i for i, fn in enumerate(app.fns)
+                      if fn.fn and fn.fn.__name__ == 'respond'][1]
+        assert app.config['dependencies'][deny_index]['queue'] is False
+        identifier = model._pending_actions[0]['request_id']
+        denied = await app.process_api(deny_index, [None, identifier], state=state, request=request)
+        assert not model._pending_actions
+        while frame['is_generating']:
+            frame = await app.process_api(predict_index, predict_inputs, state=state,
+                                          request=request, iterator=frame['iterator'])
+        assert model._state['outcome'] == 'completed'
+        assert '未访问网站' in model.chatbot[-1][1]
+        # The exhausted generator returns Gradio's FINISHED/None placeholders;
+        # use the actual live projection to inspect the terminal component state.
+        completed = await call('live_values', [None])
+        outputs = {getattr(component, 'elem_id', None): value
+                   for component, value in zip(app.fns[functions['live_values']].outputs, completed)}
+        assert outputs['agent-activity-feedback']['visible'] is False
+        assert outputs['agent-upload-files']['interactive'] is True
+        assert outputs['agent-pending-files']['interactive'] is True
     finally:
         app.close()
 

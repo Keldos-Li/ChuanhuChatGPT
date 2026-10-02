@@ -267,6 +267,8 @@ hr.append-display {
     -webkit-line-clamp: 2;
     overflow: hidden;
 }
+#chuanhu-chatbot .model-file-content { gap: 0; }
+#chuanhu-chatbot .model-file-meta { font-size: 11px; line-height: 1.35; }
 .model-file-meta, .model-file-error, .model-file-feedback {
     font-size: 0.875em; color: var(--body-text-color-subdued); overflow-wrap: anywhere;
 }
@@ -280,6 +282,9 @@ hr.append-display {
 #agent-input-feedback { padding: 0 20px; }
 #agent-upload-files, #agent-pending-files { min-height: 0 !important; padding: 0 !important; border: 0 !important; background: none; }
 #agent-upload-files > .center.flex { display: none; }
+/* Gradio swaps an empty disabled File to its tall read-only placeholder.
+   These native empty states must not displace conversation/authorization. */
+#agent-upload-files > .empty, #agent-pending-files > .empty { display: none; }
 #agent-pending-files > .center.flex { display: none; }
 #agent-pending-files .file-preview-holder { max-height: 130px !important; overflow: auto; }
 #agent-pending-files [data-testid="block-label"], #agent-input-remove-payload, #agent-input-remove { display: none !important; }
