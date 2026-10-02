@@ -35,14 +35,20 @@
             const markup = group.cards.map(card => card.outerHTML).join('');
             if (holder._sourceMarkup !== markup) { holder.innerHTML = markup; holder._sourceMarkup = markup; }
             if (row.nextElementSibling !== holder) row.after(holder);
+            row.classList.add('agent-message-has-files');
+            holder.classList.toggle('agent-files-with-avatar', !!row.querySelector('.avatar-container'));
             let fileOnly = false;
             try { const raw = JSON.parse(atob(anchors[0].dataset.agentMessageRaw)).raw; fileOnly = raw === null || raw === ''; } catch (_) {}
             row.classList.toggle('agent-file-only-message', fileOnly);
             used.add(holder);
         }
         for (const holder of chat.querySelectorAll('.agent-message-files')) if (!used.has(holder)) holder.remove();
-        for (const row of chat.querySelectorAll('.agent-file-only-message'))
-            if (!row.nextElementSibling?.classList.contains('agent-message-files')) row.classList.remove('agent-file-only-message');
+        for (const row of chat.querySelectorAll('.agent-message-has-files')) {
+            if (!row.nextElementSibling?.classList.contains('agent-message-files')) {
+                row.classList.remove('agent-file-only-message');
+                row.classList.remove('agent-message-has-files');
+            }
+        }
     }
     function scheduleMount() {
         if (!scheduled) { scheduled = true; queueMicrotask(mountCards); }

@@ -20,6 +20,9 @@ def test_sidebar_uses_session_snapshot_and_restores_ordinary_controls(env,monkey
     first=frame();assert first[panel.outputs.index(tab)]['label']=='Agent'
     assert not hasattr(panel,'save')
     assert panel.model.label=='使用模型' and not panel.settings_status.visible and not panel.availability.visible and not panel.fork.visible
+    for component in [panel.network,panel.code,panel.search,panel.browser,panel.screenshots,panel.discovery,panel.programmatic]:
+        assert 'switch-checkbox' in component.elem_classes
+    assert 'switch-checkbox' not in panel.functions.elem_classes
     for component in [*panel.config_inputs,prompt,template]:assert first[panel.outputs.index(component)]['interactive']
     model._state['outcome']='uncertain';model._needs_sync=True
     unknown=frame()

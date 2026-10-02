@@ -195,7 +195,7 @@ function fixture(options = {}) {
     app.append(chat, cards, native, retryBox, retry);
     function row(key, conversation = 'conversation', raw = 'same answer', history = false) {
         const node = element('div', {class: 'message-row bot-row' + (history ? ' history-message' : '')});
-        const bubble = element('div', {class: 'bubble'}, raw ?? '');
+        const bubble = element('div', {class: 'message bot message-bubble-border'}, raw ?? '');
         const anchor = element('span', {class: 'agent-message-anchor', 'data-message-key': key,
             'data-conversation-id': conversation, 'data-agent-message-raw': Buffer.from(JSON.stringify({raw})).toString('base64')});
         bubble.append(anchor); node.append(bubble); return node;
@@ -253,6 +253,8 @@ test('two turns mount cloned cards beside the correct row and settle after obser
     assert.notEqual(f.owned(first)[0], sourceFirst); assert.equal(sourceFirst.parentElement, f.cards);
     assert.equal(first.nextElementSibling.getAttribute('role'), 'group');
     assert.equal(first.nextElementSibling.getAttribute('aria-label'), '此回复生成的文件');
+    assert(first.classList.contains('agent-message-has-files'));
+    assert(second.classList.contains('agent-message-has-files'));
     assert.equal(f.dom.microtasks.length, 0);
     assert.equal(f.dom.observers.length, 1);
     assert.equal(f.dom.observers[0].target, f.document.documentElement);
@@ -295,6 +297,8 @@ test('restored repeated text uses message keys, ignores history clones, and reje
     const ambiguous = f.row('first'); f.chat.append(ambiguous); f.dom.flush();
     assert.equal(f.holders().length, 1); assert.deepEqual(ids(f.owned(second)), ['two']);
     assert.equal(f.owned(first).length, 0); assert.equal(f.owned(ambiguous).length, 0);
+    assert(!first.classList.contains('agent-message-has-files'));
+    assert(!ambiguous.classList.contains('agent-message-has-files'));
     ambiguous.remove(); f.dom.flush(); assert.deepEqual(ids(f.owned(first)), ['one']);
 });
 
@@ -315,6 +319,7 @@ test('unknown, missing, orphaned and non-assistant anchors never borrow a nearby
     f.cards.append(f.card('unknown', 'unknown'), f.card('missing-key', ''), f.card('missing-conversation', 'known', ''),
         f.card('user-file', 'user'), f.card('orphan-file', 'orphan'));
     f.start(); assert.equal(f.holders().length, 0);
+    assert.equal(f.chat.querySelectorAll('.agent-message-has-files').length, 0);
 });
 
 test('active conversation refresh clears even matching stale chat and source without a DOM mutation', () => {
@@ -323,6 +328,7 @@ test('active conversation refresh clears even matching stale chat and source wit
     assert.deepEqual(ids(f.owned(stale)), ['old-file']);
     f.setActiveConversation('new-conversation');
     assert.equal(f.holders().length, 0); assert(!stale.classList.contains('agent-file-only-message'));
+    assert(!stale.classList.contains('agent-message-has-files'));
     // A late render contains mutually matching old cards and rows. They still
     // must not appear in the newly selected model/conversation.
     f.cards.replaceChildren(f.card('old-file', 'same')); f.chat.replaceChildren(f.row('same')); f.dom.flush();
@@ -336,16 +342,20 @@ test('active conversation refresh clears even matching stale chat and source wit
 test('file-only rows hide the empty bubble and recover when files or ownership disappear', () => {
     const f = fixture(); const empty = f.row('empty', 'conversation', ''), none = f.row('none', 'conversation', null);
     const text = f.row('text'), malformed = f.row('malformed', 'conversation', '');
+    const avatar = f.document.createElement('div'); avatar.className = 'avatar-container'; text.append(avatar);
     malformed.querySelector('.agent-message-anchor').dataset.agentMessageRaw = 'not-json';
     f.chat.append(empty, none, text, malformed);
     f.cards.append(f.card('empty-file', 'empty'), f.card('none-file', 'none'), f.card('text-file', 'text'), f.card('bad-file', 'malformed'));
     f.start();
     assert(empty.classList.contains('agent-file-only-message')); assert(none.classList.contains('agent-file-only-message'));
     assert(!text.classList.contains('agent-file-only-message')); assert(!malformed.classList.contains('agent-file-only-message'));
+    assert(text.nextElementSibling.classList.contains('agent-files-with-avatar'));
+    assert(!empty.nextElementSibling.classList.contains('agent-files-with-avatar'));
     const duplicate = f.row('empty', 'conversation', ''); f.chat.append(duplicate); f.dom.flush();
     assert(!empty.classList.contains('agent-file-only-message')); assert(!duplicate.classList.contains('agent-file-only-message'));
     f.cards.replaceChildren(); f.dom.flush();
     assert.equal(f.holders().length, 0); assert.equal(f.chat.querySelectorAll('.agent-file-only-message').length, 0);
+    assert.equal(f.chat.querySelectorAll('.agent-message-has-files').length, 0);
 });
 
 test('duplicate filenames download the real native link by ID across native reordering', () => {

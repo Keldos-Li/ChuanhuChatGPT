@@ -138,4 +138,4 @@ def test_css_hides_source_panel_and_empty_bubble_without_hiding_mounted_file_hol
     assert re.search(r'display\s*:\s*none\s*!important', declarations('#model-output-files'))
     assert re.search(r'display\s*:\s*none\s*!important', declarations('.agent-file-only-message'))
     assert re.search(r'display\s*:\s*none\s*!important', declarations('.agent-message-anchor'))
-    assert not re.search(r'display\s*:\s*none', declarations('.agent-message-files'))
+    assert not re.search(r'display\s*:\s*none', declarations('#chuanhu-chatbot .agent-message-files'))
