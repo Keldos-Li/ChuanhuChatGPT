@@ -4,6 +4,9 @@
     let queued = false;
     const root = () => typeof gradioApp === 'function' ? gradioApp() : document;
     window.chuanhuSupports = capability => snapshot[capability] !== false;
+    window.chuanhuInputTarget = () => snapshot.sandbox_attachments === true ? '#agent-upload-files' : '#upload-index-file';
+    window.chuanhuInputBusy = () => snapshot.busy === true;
+    window.chuanhuInputConversation = () => snapshot.input_target || '';
     function apply() {
         queued = false;
         const app = root();

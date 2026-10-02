@@ -224,9 +224,12 @@ def set_streaming(current_model, *args):
     current_model.set_streaming(*args)
 
 
-def handle_file_upload(current_model, *args):
+def handle_file_upload(current_model, files, chatbot, reply_language=None, request: gr.Request = None):
+    if getattr(current_model, 'is_hosted_agent', False):
+        current_model.bind_owner(request)
+        raise gr.Error('聊天模型已变化，请使用消息附件入口重新上传')
     require_capability(current_model, 'input_attachments')
-    return current_model.handle_file_upload(*args)
+    return current_model.handle_file_upload(files, chatbot, reply_language)
 
 
 def handle_summarize_index(current_model, *args):
@@ -829,7 +832,7 @@ def cancel_outputing():
     shared.state.interrupt()
 
 
-def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning='default', agent_choice_revision=None, request: gr.Request = None):
+def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning='default', agent_choice_revision=None, agent_files=None, request: gr.Request = None):
     if getattr(current_model, 'is_hosted_agent', False) and request is not None:
         current_model.bind_owner(request)
     if getattr(current_model, 'is_hosted_agent', False) and agent_model is not None:
@@ -840,9 +843,9 @@ def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning
                 current_model.set_agent_model(agent_model, agent_reasoning, int(agent_choice_revision))
             else:
                 current_model.set_agent_model(agent_model, agent_reasoning)
-            envelope = reserve_submission(current_model, inputs)
+            envelope = reserve_submission(current_model, inputs, files=agent_files)
     else:
-        envelope = reserve_submission(current_model, inputs) if current_model is not None else inputs
+        envelope = reserve_submission(current_model, inputs, files=agent_files) if current_model is not None else inputs
     # 一次性返回，降低延迟
     textbox = reset_textbox()
     outputing = start_outputing()

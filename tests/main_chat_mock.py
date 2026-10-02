@@ -12,6 +12,8 @@ import time
 from types import SimpleNamespace
 from uuid import uuid4
 from optional.agents.tools import submit_browser_response
+from optional.agents.runtime import format_input_text
+from modules.agent_input_files import read_snapshot_file
 
 
 class MainChatMock:
@@ -25,6 +27,7 @@ class MainChatMock:
             return {'session_id':session,'turn_id':state['turn_id'],'outcome':state['outcome'],
                     'text':state['text'],'items':deepcopy(state['items']),'sync_complete':True,
                     'history_authoritative':True,'required_actions':deepcopy(state['cards']),
+                    'submission_started':state.get('submitted',False),
                     'settings':{'agent':{'model':state['model'],'reasoning':{'effort':state['reasoning']}},
                                 'environment':{'type':'openai_hosted','network':{'access':'enabled' if state['tools']['network'] else 'disabled'}}}}
 
@@ -33,7 +36,7 @@ class MainChatMock:
         while True:
             snapshot=self.snapshot(sid)
             serialized=json.dumps(snapshot,sort_keys=True)
-            final=snapshot['outcome'] in ('completed','cancelled','failed')
+            final=snapshot['outcome'] in ('not_started','completed','cancelled','failed')
             if serialized!=previous or final:
                 yield {'type':'result' if final else 'progress',**snapshot}
                 previous=serialized
@@ -93,7 +96,41 @@ class MainChatMock:
 
     def worker(self,command):
         action=command['action'];sid=command.get('session_id')
-        if action=='run':
+        if action=='prepare_inputs':
+            with self.lock:
+                if sid is None:
+                    sid='sess_synthetic_'+uuid4().hex
+                    self.sessions[sid]={'items':[],'artifacts':[],'tools':deepcopy(command['tool_settings']),
+                        'model':command['model'],'reasoning':command.get('reasoning'),'instructions':command.get('instructions'),
+                        'turn_id':None,'outcome':'not_started','text':'','cards':[],'submitted':False}
+                state=self.sessions[sid]
+                environment=state.setdefault('environment_id','env_synthetic_'+uuid4().hex)
+            preparation={'session_id':sid,'environment_id':environment,'run_id':command['run_id'],
+                'outcome':'preparing','submission_started':False,'session_creation_started':True,
+                'files':[dict(record,status='prepared') for record in command['inputs']],
+                'installed':deepcopy(command.get('installed') or {})}
+            yield {'type':'progress','preparation':deepcopy(preparation)}
+            for record in preparation['files']:
+                marker=Path(command['staging_root'])/('.cancel-'+command['run_id'])
+                delay=5 if 'slow-upload' in record['name'] else .01
+                for _ in range(max(1,int(delay/.05))):
+                    if marker.exists():
+                        preparation['outcome']='cancelled'
+                        yield {'type':'result','preparation':deepcopy(preparation)};return
+                    time.sleep(.05)
+                if 'upload-fail' in record['name']:
+                    record.update(status='failed',error='模拟上传失败')
+                    preparation['outcome']='failed'
+                    yield {'type':'error','message':'模拟上传失败，消息未发送','preparation':deepcopy(preparation)};return
+                read_snapshot_file({key:record[key] for key in ('input_id','name','basename','size','sha256','staged_path','remote_path')},staging_root=command['staging_root'])
+                record['status']='ready'
+                preparation['installed'][record['input_id']]={key:record[key] for key in ('remote_path','size','sha256')}
+                preparation['installed'][record['input_id']]['environment_id']=environment
+                state.setdefault('inputs',{})[record['input_id']]=deepcopy(preparation['installed'][record['input_id']])
+                yield {'type':'progress','preparation':deepcopy(preparation)}
+            preparation['outcome']='ready'
+            yield {'type':'result','preparation':deepcopy(preparation)}
+        elif action=='run':
             with self.lock:
                 if sid is None:
                     sid='sess_synthetic_'+uuid4().hex
@@ -102,9 +139,8 @@ class MainChatMock:
                 state=self.sessions[sid]
                 if state.get('outcome') in ('in_progress','requires_action'):
                     raise ValueError('模拟会话仍在运行；产品发送门应先拒绝重复请求')
-                state.update(turn_id='turn_'+uuid4().hex,outcome='in_progress',text='',cards=[],cancel=Event(),response=Event())
-                text=command['prompt']
-                if command.get('history_reference'):text='历史文字引用：\n'+json.dumps(command['history_reference'],ensure_ascii=False)+'\n本轮新请求：'+text
+                state.update(turn_id='turn_'+uuid4().hex,outcome='in_progress',text='',cards=[],cancel=Event(),response=Event(),submitted=True)
+                text=format_input_text(command['prompt'],command.get('history_reference'),command.get('input_files'))
                 state['items'].append({'id':'msg_'+uuid4().hex,'type':'message','role':'user','turn_id':state['turn_id'],'status':'completed','content':[{'type':'input_text','text':text}]})
             Thread(target=self._execute,args=(sid,command['prompt']),daemon=True).start()
             yield from self._observe(sid)

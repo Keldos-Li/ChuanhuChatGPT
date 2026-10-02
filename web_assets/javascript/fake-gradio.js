@@ -37,7 +37,9 @@ function setUploader() {
 var grUploader;
 var chatbotUploader;
 var handleClick = function() {
-    if (window.chuanhuSupports?.('input_attachments') !== false) grUploader?.click();
+    if (window.chuanhuSupports?.('input_attachments') === false || window.chuanhuInputBusy?.()) return;
+    const selector = window.chuanhuInputTarget?.() || '#upload-index-file';
+    gradioApp().querySelector(selector + ' input[type=file]')?.click();
 
 };
 function transUpload() {

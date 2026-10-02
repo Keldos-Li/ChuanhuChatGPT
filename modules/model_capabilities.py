@@ -21,6 +21,7 @@ class ModelCapabilities:
     history_rollback: bool = True
     output_artifacts: bool = False
     agent_tools: bool = False
+    sandbox_attachments: bool = False
     billing: bool = True
     reply_language: bool = True
 
@@ -28,7 +29,7 @@ class ModelCapabilities:
     def parameters(self): return self.sampling or self.token_limits
 
 
-AGENT_CAPABILITIES = ModelCapabilities(input_attachments=False, knowledge=False, external_websearch=False,
+AGENT_CAPABILITIES = ModelCapabilities(input_attachments=True, sandbox_attachments=True, knowledge=False, external_websearch=False,
     sampling=False, token_limits=False, single_turn=False, output_mode=False, regenerate=False,
     history_delete=False, history_edit=False, history_rollback=False, output_artifacts=True, agent_tools=True, billing=False, reply_language=False)
 
@@ -58,10 +59,11 @@ def is_busy(model):
     return bool(model and (getattr(model,'_running',False) or getattr(model,'_chat_running',False) or getattr(model,'_pending_send',None)))
 
 
-def reserve_submission(model, text):
+def reserve_submission(model, text, files=None):
     with model_lock(model):
         if is_busy(model) or getattr(model,'_retired',False) or getattr(model,'_chat_retired',False):
             raise gr.Error('当前会话正在提交或生成，请等待完成或先停止')
+        if hasattr(model, 'freeze_input_files'): model._reserved_inputs = model.freeze_input_files(files)
         token = uuid4().hex
         model._pending_send = token
         return {'text': text, 'target': id(model), 'token': token}
@@ -72,6 +74,9 @@ def consume_submission(model, inputs):
     if set(inputs) != {'text','target','token'} or inputs.get('target') != id(model) or inputs.get('token') != getattr(model,'_pending_send',None):
         raise gr.Error('这条排队输入的会话已变化或已取消，未发送；请在当前聊天重新提交')
     model._pending_send = None
+    if hasattr(model, '_reserved_inputs'):
+        model._consumed_inputs = model._reserved_inputs
+        model._reserved_inputs = None
     return inputs['text']
 
 
@@ -92,6 +97,7 @@ class CapabilityUI:
             if not supported and clear is not None: update['value']=clear
             results.append(gr.update(**update))
         payload=dict(asdict(caps), busy=is_busy(model))
+        payload['input_target'] = getattr(model, '_conversation_id', '') if caps.sandbox_attachments else ''
         results.extend([gr.update(interactive=not is_busy(model)),
             '<span data-model-capabilities="'+html.escape(json.dumps(payload),quote=True)+'"></span>'])
         if self.submit is not None and self.cancel is not None:

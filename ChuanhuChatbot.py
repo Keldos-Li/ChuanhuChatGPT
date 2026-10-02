@@ -144,6 +144,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                         agent_panel.output_components()
                 with gr.Row(elem_id="chatbot-footer"):
                     with gr.Column(elem_id="chatbot-input-box"):
+                        agent_panel.input_components()
                         with gr.Row(elem_id="chatbot-input-row"):
                             gr.HTML(get_html("chatbot_more.html").format(
                                 single_turn_label=i18n("ui.chat.single_turn"),
@@ -496,7 +497,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
 
     capability_marker = gr.HTML('', elem_id='model-capability-state')
     capability_ui = CapabilityUI([
-        ('input_attachments', index_files, []), ('knowledge', knowledge_group, None),
+        ('knowledge', index_files, []), ('knowledge', knowledge_group, None),
         ('external_websearch', use_websearch_checkbox, False), ('single_turn', single_turn_checkbox, False),
         ('output_mode', use_streaming_checkbox, True), ('regenerate', retryBtn, None),
         ('history_rollback', delFirstBtn, None), ('history_delete', delLastBtn, None),
@@ -539,6 +540,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             use_websearch_checkbox,
             index_files,
             language_select_dropdown,
+            agent_panel.input_files,
         ],
         outputs=[chatbot, status_display, *agent_panel.outputs, *capability_ui.outputs],
         show_progress=True,
@@ -561,9 +563,16 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     transfer_input_args = dict(
-        fn=transfer_input, inputs=[user_input, current_model, agent_panel.model, agent_panel.reasoning, agent_panel.choice_revision], outputs=[
+        fn=transfer_input, inputs=[user_input, current_model, agent_panel.model, agent_panel.reasoning, agent_panel.choice_revision, agent_panel.input_files], outputs=[
             user_question, user_input, submitBtn, cancelBtn], show_progress=True,
-        js='(text, model, name, effort, unused) => [text, model, name, effort, window.chuanhuAgentChoiceRevision || 0]'
+        js='''(text, model, name, effort, unused, files) => {
+            const root = typeof gradioApp === 'function' ? gradioApp() : document;
+            if (window.chuanhuInputConversation?.() &&
+                ((window.chuanhuAgentUploading && window.chuanhuAgentUploadTarget === window.chuanhuInputConversation()) ||
+                 root.querySelector('#agent-upload-files .uploading, #agent-upload-files .file-preview-holder')))
+                throw new Error('附件仍在上传，请等待完成后发送');
+            return [text, model, name, effort, window.chuanhuAgentChoiceRevision || 0, files];
+        }'''
     )
 
     get_usage_args = dict(
@@ -614,7 +623,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         outputs=[chatbot, status_display, historySelectList, systemPromptTxt, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox],
         show_progress=True,
         js='(a,b)=>{return clearChatbot(a,b);}',
-    )
+    ).then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
 
     retryBtn.click(**start_outputing_args).then(
         retry,
@@ -709,7 +718,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         show_progress=True,
         js='(a,b)=>{return clearChatbot(a,b);}',
     )
-    historySelectList.select(**load_history_from_file_args)
+    historySelectList.select(**load_history_from_file_args).then(agent_panel.values, [current_model], agent_panel.outputs).then(capability_ui.values, [current_model], capability_ui.outputs)
     uploadHistoryBtn.upload(upload_chat_history, [current_model, uploadHistoryBtn], [
                         saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList]).then(**refresh_history_args)
     historySearchTextbox.input(

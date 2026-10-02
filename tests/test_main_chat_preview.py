@@ -26,7 +26,9 @@ async def exercise():
         if name=='transfer_input' and len(inputs)==2:
             current=state[app.fns[functions['initial']].outputs[0]._id]
             choice=getattr(current,'agent_model_choice',('gpt-6-astra',None))
-            inputs=[*inputs,choice[0],choice[1] or 'default',getattr(current,'_choice_revision',0)]
+            file_values=[{'path':path,'orig_name':Path(path).name,'meta':{'_type':'gradio.FileData'}} for path in getattr(current,'_pending_upload_paths',())]
+            inputs=[*inputs,choice[0],choice[1] or 'default',getattr(current,'_choice_revision',0),file_values]
+        if name=='predict_with_ui' and len(inputs)==6: inputs=[*inputs,[]]
         result = await app.process_api(index, inputs, state=state, request=request)
         while result['is_generating']:
             result = await app.process_api(index, inputs, state=state, request=request,
@@ -80,6 +82,20 @@ async def exercise():
         ordinary = state[current_id]
         assert ordinary.chatbot == model.chatbot
         assert len(ordinary.chatbot) == 1 and ordinary.chatbot[0][1]
+        await call('change_model', ['OpenAI Agent', None, '', 1, 1, 'QA', '', None])
+        await call('reconnect',[None])
+        await call('reset',[None,False])
+        from uuid import uuid4
+        upload=Path(gr.utils.get_upload_folder())/('qa-'+uuid4().hex)
+        upload.mkdir(parents=True);path=upload/'synthetic.csv';path.write_text('day,value\n1,10\n2,20')
+        data=[{'path':str(path),'orig_name':path.name,'meta':{'_type':'gradio.FileData'}}]
+        model=state[current_id]
+        await call('upload_files',[None,data,model._conversation_id])
+        assert model._pending_upload_paths
+        await call('transfer_input',['',None])
+        await call('predict_with_ui',[None,None,[],False,[],'English',data])
+        assert 'synthetic.csv' in model.chatbot[0][0]
+        assert '/workspace/inputs/' not in model.chatbot[0][0] and not model._pending_upload_paths
     finally:
         app.close()
 

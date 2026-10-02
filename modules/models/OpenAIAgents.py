@@ -14,6 +14,7 @@ from modules.agent_transport import worker_messages, connection_for_model
 from modules.agent_store import BindingStore, owner_identity
 from modules.model_capabilities import AGENT_CAPABILITIES, require_capability
 from modules.agent_settings import load_settings, save_settings
+from modules.agent_input_state import AgentInputState, InputPreparationStopped
 from optional.agents.tools import validate_settings, tool_availability
 from modules.presets import i18n
 from .base_model import BaseLLMModel, HISTORY_DIR
@@ -61,7 +62,7 @@ def _rows(history):
     return rows
 
 
-class OpenAIAgentsClient(BaseLLMModel):
+class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     is_hosted_agent = True
     ui_capabilities = AGENT_CAPABILITIES
 
@@ -95,6 +96,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._pending_model_settings = None
         self._choice_revision = 0
         self._active_file_retries = set()
+        self._initialize_inputs()
         self.metadata = {}
         self._tool_settings = load_settings(shared.chuanhu_path, owner) if owner else validate_settings({})
 
@@ -136,12 +138,13 @@ class OpenAIAgentsClient(BaseLLMModel):
 
     def _remember(self):
         if not self._owner or self._importing: return
-        if not self._state.get('session_id') and self._state.get('outcome') != 'uncertain': return
+        if not self._state.get('session_id') and self._state.get('outcome') != 'uncertain' and not self._input_context: return
         state = {key: deepcopy(value) for key, value in self._state.items() if key not in ('required_actions', 'settings', 'items')}
         record = {'state': state, 'conversation_id': self._conversation_id, 'artifacts': deepcopy(self._artifacts),
                   'settings': deepcopy(self._session_settings), 'connection_ref': self._connection_reference(),
                   'items': deepcopy(self._cloud_items), 'auto_named': self._auto_named, 'first_prompt': self._first_prompt,
                   'next_model_settings': self._pending_model_settings}
+        record.update(self._input_binding())
         self._store().put(self._owner, self.history_file_path, record)
 
     def adopt_local_history(self, original):
@@ -156,6 +159,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         binding = None if self._importing or not self._owner else self._store().get(self._owner, self.history_file_path)
         self._pending_actions = []
         if binding:
+            self._restore_input_binding(binding)
             self._pending_model_settings = binding.get('next_model_settings')
             if binding.get('connection_ref') != self._connection_reference():
                 self._notice = '当前连接配置与原会话不同，未连接云端；可恢复原配置，或明确按现配置新建并继续'
@@ -186,6 +190,7 @@ class OpenAIAgentsClient(BaseLLMModel):
             if self.history: self._notice = '将根据这份历史创建新的 Agent 会话：带入全部可用文字；不继承旧工具状态、沙盒文件和任务'
 
     def _fresh(self):
+        self._reset_inputs()
         self._fork_previous = None
         self._auto_named = False
         self._first_prompt = None
@@ -201,7 +206,7 @@ class OpenAIAgentsClient(BaseLLMModel):
             raise gr.Error('当前任务仍在运行或状态尚待确认，请先停止或重新连接')
 
     def prepare_model_switch(self):
-        with self._lock: self._assert_idle(); self._remember()
+        with self._lock: self._assert_idle(); self._clear_input_selection(); self._remember()
     def retire(self):
         with self._lock: self._retired = True
     def billing_info(self): return ''
@@ -217,6 +222,14 @@ class OpenAIAgentsClient(BaseLLMModel):
 
     def _current_settings(self):
         return {'model': self.model_name, 'reasoning': self._reasoning, 'instructions': self.system_prompt, 'tools': deepcopy(self._tool_settings)}
+
+    def _reserve_input_session(self, session):
+        key = (self._owner, session)
+        with _bindings_lock:
+            if key in _cancel_sessions or (key in _session_locks and _session_locks[key] is not self):
+                raise InputPreparationStopped('另一窗口正在操作此会话，消息未发送')
+            _session_locks[key] = self
+        self._input_session_reservation = key
 
     @property
     def agent_model_choice(self):
@@ -286,7 +299,7 @@ class OpenAIAgentsClient(BaseLLMModel):
                 self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=self._pending_network))
             self.auto_save(self.chatbot)
             backup = {name: deepcopy(getattr(self, name)) for name in
-                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch', 'model_name', '_reasoning', '_pending_model_settings')}
+                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch', 'model_name', '_reasoning', '_pending_model_settings', '_input_context', '_installed_inputs', '_input_seed_reference', '_input_messages')}
             self.new_auto_history_filename()
             self._fresh()
             self._fork_previous = backup
@@ -321,6 +334,9 @@ class OpenAIAgentsClient(BaseLLMModel):
 
     def interrupt(self):
         with self._lock:
+            if self._input_context:
+                try: self._cancel_input_preparation()
+                except OSError: self._notice = '附件准备连接已中断，消息尚未发送'
             if self._state.get('outcome') in TERMINAL: return self._status('当前轮已结束')
             self._cancel_requested = True
             self._state['outcome'] = 'cancel_requested'
@@ -340,7 +356,12 @@ class OpenAIAgentsClient(BaseLLMModel):
             content = '\n'.join(part['text'] for part in item.get('content', []) if isinstance(part, dict) and part.get('type') in ('input_text', 'output_text', 'text') and isinstance(part.get('text'), str))
             unique[item['id']] = {'id': item['id'], 'role': item['role'], 'content': content, 'turn_id': item.get('turn_id')}
         self._cloud_items = list(unique.values())
-        self.history = [{'role': item['role'], 'content': item['content']} for item in self._cloud_items]
+        self.history = [{'role': item['role'], 'content': self._project_input_text(item['content']) if item['role']=='user' else item['content']} for item in self._cloud_items]
+        if not self._cloud_items and self._input_seed_reference is not None:
+            # The empty session was created only to prepare files. These local
+            # references have not been sent yet and must survive reconnect.
+            self.history = deepcopy(self._input_seed_reference)
+        if any(item['role']=='user' for item in self._cloud_items): self._input_seed_reference = None
         self._display = _rows(self.history)
         self._answer_index = len(self.history) - 1 if self.history and self.history[-1]['role'] == 'assistant' else None
         self._answer_row = len(self._display) - 1 if self._answer_index is not None else None
@@ -357,6 +378,9 @@ class OpenAIAgentsClient(BaseLLMModel):
             self._cancel_requested = self._cancel_sent = False
         for key in ('session_id', 'turn_id', 'baseline_turn_ids', 'submission_started'):
             if key in message and message[key] is not None: self._state[key] = message[key]
+        if message.get('submission_started') is True:
+            self._clear_input_selection()
+            self._input_context = None
         outcome = message.get('outcome')
         if outcome and (not self._cancel_requested or outcome in TERMINAL): self._state['outcome'] = outcome
         if (message.get('sync_complete') or message.get('history_authoritative')) and isinstance(message.get('items'), list):
@@ -454,12 +478,15 @@ class OpenAIAgentsClient(BaseLLMModel):
 
     def predict(self, inputs, chatbot, use_websearch=False, files=None, reply_language=None, should_check_token_count=True):
         if not self._owner: raise gr.Error('需要在当前登录会话中发送')
-        if not isinstance(inputs, str) or not inputs.strip(): raise gr.Error('请输入文字任务')
-        if use_websearch or files: raise gr.Error('当前 Agent 不支持原附件或外部搜索入口，请使用 Agent 工具配置')
+        input_records = self._take_input_files(files)
+        if not isinstance(inputs, str) or (not inputs.strip() and not input_records): raise gr.Error('请输入文字任务或添加附件')
+        inputs = inputs.strip() or '请查看上传的附件。'
+        display_input = inputs + ('\n\n附件：' + '、'.join(record.name for record in input_records) if input_records else '')
+        if use_websearch: raise gr.Error('当前 Agent 不支持原外部搜索入口，请使用 Agent 工具配置')
         if self._needs_sync:
             yield from self.reconnect()
             chatbot = self.chatbot
-        network_result = self._network_request(inputs)
+        network_result = self._network_request(inputs) if not input_records else None
         if network_result is not None:
             yield network_result
             return
@@ -476,13 +503,16 @@ class OpenAIAgentsClient(BaseLLMModel):
                 # Saved defaults apply only after an explicit fork. Continuing
                 # the original chat always sends its actual effective settings.
                 settings = deepcopy(self._session_settings)
+            if input_records and not settings['tools']['code_execution']:
+                with _bindings_lock: _session_locks.pop(reservation, None)
+                raise gr.Error('当前会话没有文件执行环境，请启用后按新配置新建' if self._state.get('session_id') else '请先在工具设置中开启代码与文件执行')
             previous = (deepcopy(self._state), deepcopy(self.history), deepcopy(self._display), self._answer_index, self._answer_row)
-            reference = _text_history(self.history) if not self._state.get('session_id') else None
-            if not self._state.get('session_id'): self._first_prompt = inputs
+            reference = deepcopy(self._input_seed_reference) if self._input_seed_reference is not None else _text_history(self.history) if not self._state.get('session_id') else None
+            if not self._state.get('session_id') or self._input_seed_reference is not None: self._first_prompt = display_input
             generation = uuid4().hex
             self._state = dict(self._state, generation=generation, turn_id=None, outcome='starting', baseline_turn_ids=None, submission_started=False)
-            self._display = [list(row) for row in chatbot or []] + [[inputs, '']]
-            self.history.extend([{'role': 'user', 'content': inputs}, {'role': 'assistant', 'content': ''}])
+            self._display = [list(row) for row in chatbot or []] + [[display_input, '']]
+            self.history.extend([{'role': 'user', 'content': display_input}, {'role': 'assistant', 'content': ''}])
             self._answer_index, self._answer_row = len(self.history) - 1, len(self._display) - 1
             self._running = True
             self._cancel_requested = self._cancel_sent = False
@@ -497,10 +527,17 @@ class OpenAIAgentsClient(BaseLLMModel):
             with self._lock:
                 if self._cancel_requested: return
             self._apply_next_model(generation)
+            settings.update(model=self.model_name, reasoning=self._reasoning)
+            installed_inputs = yield from self._prepare_input_frames(input_records, generation, settings, reference)
             with self._lock:
                 if self._cancel_requested: return
                 settings.update(model=self.model_name, reasoning=self._reasoning)
                 command.update(model=self.model_name, reasoning=self._reasoning)
+                command['session_id'] = self._state.get('session_id')
+                if installed_inputs:
+                    from optional.agents.runtime import format_input_text
+                    command['input_files'] = installed_inputs
+                    self._remember_input_message(format_input_text(inputs, reference, installed_inputs), display_input)
                 started = True
                 self._session_settings = settings
                 self._remember()
@@ -518,7 +555,7 @@ class OpenAIAgentsClient(BaseLLMModel):
             if self._state.get('outcome') in ('completed', 'cancelled', 'failed') and self._state.get('session_id'):
                 yield from self._download(generation)
                 yield deepcopy(self._display), self._status()
-        except ModelUpdateError as error:
+        except (ModelUpdateError, InputPreparationStopped) as error:
             with self._lock:
                 update_error = True
                 self._notice = '消息未发送：' + str(error)
@@ -526,15 +563,24 @@ class OpenAIAgentsClient(BaseLLMModel):
             with self._lock:
                 if self._state.get('generation') == generation:
                     if not started:
-                        self._state, self.history, self._display, self._answer_index, self._answer_row = previous
+                        rollback = self._input_rollback_state(previous[0], generation)
+                        self._state, self.history, self._display, self._answer_index, self._answer_row = (rollback, *previous[1:])
                         if self._cancel_requested: self._notice = '本轮尚未发送，已取消'
                     elif not terminal and self._state.get('outcome') not in TERMINAL:
                         self._state['outcome'] = 'incomplete' if self._state.get('session_id') else 'uncertain'
                     self._running = False
                     with _bindings_lock:
                         if _session_locks.get(reservation) is self: _session_locks.pop(reservation, None)
+                        input_reservation = getattr(self, '_input_session_reservation', None)
+                        if input_reservation is not None and _session_locks.get(input_reservation) is self:
+                            _session_locks.pop(input_reservation, None)
+                        self._input_session_reservation = None
                     self.chatbot = deepcopy(self._display)
                     self._remember()
+                    if not started and self._input_context:
+                        preparation = self._input_context.get('resume_state') or {}
+                        if preparation.get('outcome') == 'preparing': self._refresh_input_journal()
+                        self.auto_save(self.chatbot)
                     if started:
                         self.auto_save(self.chatbot)
                         if self._fork_previous and self._state.get('outcome') == 'not_started' and not self._state.get('session_id'):
@@ -553,6 +599,8 @@ class OpenAIAgentsClient(BaseLLMModel):
         with self._lock:
             if self._running or self._retired: raise gr.Error('当前连接仍在运行')
             if getattr(self, '_connection_mismatch', False): raise gr.Error(self._notice)
+            if self._input_context and self._refresh_input_journal():
+                raise gr.Error(self._notice)
             session = self._state.get('session_id')
             if not session and self._state.get('outcome') != 'uncertain':
                 empty_result = (deepcopy(self._display), self._status())
@@ -695,5 +743,6 @@ class OpenAIAgentsClient(BaseLLMModel):
         title = title.strip() or question[:16]
         title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title).strip().strip('.')
         return self.rename_chat_history((title or 'Agent 聊天') + '.json')
-    def handle_file_upload(self, *args): raise gr.Error('当前 Agent 不支持输入附件')
+    def handle_file_upload(self, files, chatbot, *args):
+        return gr.update(), chatbot, self.stage_input_files(files)
     def summarize_index(self, *args): raise gr.Error('当前 Agent 不支持本地知识库入口')

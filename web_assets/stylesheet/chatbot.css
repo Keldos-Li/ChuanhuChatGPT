@@ -245,6 +245,11 @@ hr.append-display {
     font-size: 0.875em; color: var(--body-text-color-subdued); overflow-wrap: anywhere;
 }
 .model-file-error:empty, .model-file-feedback:empty { display: none; }
+#agent-input-files { gap: 0; min-height: 0; }
+#agent-upload-files, #agent-pending-files { min-height: 0 !important; padding: 0 !important; border: 0 !important; background: none; }
+#agent-upload-files > .center.flex { display: none; }
+#agent-pending-files > .center.flex { display: none; }
+#agent-pending-files .file-preview-holder { max-height: 130px !important; overflow: auto; }
 #agent-browser-form {
     overflow-wrap: anywhere;
 }

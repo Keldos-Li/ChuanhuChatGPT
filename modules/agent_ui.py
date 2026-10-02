@@ -130,6 +130,14 @@ def browser_form(model, request_id=None, request: gr.Request = None):
 
 
 class AgentPanel:
+    def input_components(self):
+        with gr.Column(visible=False, elem_id='agent-input-files', min_width=0, scale=0) as self.input_group:
+            self.input_picker = gr.File(file_count='multiple', type='filepath', label='添加消息附件', show_label=False,
+                                        elem_id='agent-upload-files')
+            self.input_files = gr.File(file_count='multiple', type='filepath', label='消息附件', show_label=False,
+                                       elem_id='agent-pending-files')
+            self.input_target = gr.Textbox(visible=False)
+
     def selectors(self):
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
             self.model = gr.Dropdown(label='Agent 子模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
@@ -176,16 +184,15 @@ class AgentPanel:
     def outputs(self):
         return [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
                 self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit,
-                *self.artifacts.outputs, *self.config_inputs, self.availability]
+                *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else [])
 
-    @staticmethod
-    def values(model, request: gr.Request = None, include_config=True):
+    def values(self, model, request: gr.Request = None, include_config=True):
         enabled = _agent(model)
         if enabled and request is not None: model.bind_owner(request)
         if not enabled:
             return [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
-                    *ArtifactPanel.values(model), *[gr.update()] * 12]
+                    *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else [])
         busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
         next_model, next_reasoning = model.agent_model_choice
         cards = model._pending_actions
@@ -198,10 +205,11 @@ class AgentPanel:
         return [gr.update(visible=True), gr.update(visible=True), describe_settings(model),
                 gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=REASONING_CHOICES, interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
-                *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))]
+                *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), gr.update(value=list(model._pending_upload_paths), interactive=not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else [])
 
     def wrap_predict(self, predict, capability_ui):
-        def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, request: gr.Request = None):
+        def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
+            if _agent(model): files = agent_files
             for chat, status in _chat_frames(predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request)):
                 yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
             final_chat = gr.update(value=deepcopy(model.chatbot)) if _agent(model) else gr.update()
@@ -209,6 +217,21 @@ class AgentPanel:
         return predict_with_ui
 
     def wire(self, current_model, chatbot, status_display, capability_ui=None):
+        if hasattr(self, 'input_files'):
+            def stage_files(model, files, request: gr.Request):
+                if not _agent(model): return gr.update()
+                model.bind_owner(request)
+                return model.remove_input_files(files)
+            self.input_files.change(stage_files, [current_model, self.input_files], [status_display], queue=False)
+            def upload_files(model, files, target, request: gr.Request):
+                if not _agent(model): return '聊天已变化，附件未添加', gr.update(value=[]), gr.update()
+                model.bind_owner(request)
+                try: message = model.add_input_files(files, target)
+                except Exception as error: message = str(error)
+                return message, gr.update(value=[]), gr.update(value=list(model._pending_upload_paths))
+            self.input_picker.upload(upload_files, [current_model, self.input_picker, self.input_target],
+                                     [status_display, self.input_picker, self.input_files], queue=False,
+                js='(model, files, target) => { window.chuanhuAgentUploading = false; return [model, files, window.chuanhuAgentUploadTarget || target]; }')
         def choose_settings(model, name, effort, revision, request: gr.Request):
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort, revision)
@@ -234,7 +257,8 @@ class AgentPanel:
         def fork(model, request: gr.Request):
             model.bind_owner(request)
             return model.new_session_from_history()
-        self.fork.click(fork, [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs)
+        fork_event = self.fork.click(fork, [current_model], [chatbot, status_display]).then(self.values, [current_model], self.outputs)
+        if capability_ui is not None: fork_event.then(capability_ui.values, [current_model], capability_ui.outputs)
         def reconnect(model, request: gr.Request):
             if _agent(model):
                 model.bind_owner(request)

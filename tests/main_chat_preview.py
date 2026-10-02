@@ -26,6 +26,13 @@ def build(language='zh_CN'):
     sys.modules['modules.webui_locale']=locale_module
     import modules.presets as presets
     temporary=Path(tempfile.mkdtemp(prefix='chuanhu-main-preview-'))
+    fixtures=temporary/'synthetic-inputs';fixtures.mkdir()
+    for name,content in [('notes.txt','Synthetic notes for Agent attachment QA'),('metrics.csv','day,value\n1,10\n2,20'),
+                         ('slow-upload.txt','Synthetic cancellable preparation'),('upload-fail.txt','Synthetic upload failure')]:
+        (fixtures/name).write_text(content)
+    for index in ('a','b'):
+        folder=fixtures/index;folder.mkdir();(folder/'same.txt').write_text('Different synthetic content '+index)
+    print('Synthetic input fixtures:',fixtures)
     env=install(ROOT,temporary/'history',language,presets)
     import modules.webui as webui
     # Keep assets real, but all private journals/history inside a synthetic folder.

@@ -13,9 +13,9 @@ from test_agent_model import env, select, send, complete, request
 
 def test_agent_declares_all_unsupported_controls_and_independent_outputs(env):
     model=select(env);caps=capabilities(model)
-    for name in ('input_attachments','knowledge','external_websearch','sampling','token_limits','single_turn','output_mode','regenerate','history_delete','history_edit','history_rollback','billing','reply_language'):
+    for name in ('knowledge','external_websearch','sampling','token_limits','single_turn','output_mode','regenerate','history_delete','history_edit','history_rollback','billing','reply_language'):
         assert not getattr(caps,name)
-    assert caps.output_artifacts and caps.agent_tools
+    assert caps.output_artifacts and caps.agent_tools and caps.input_attachments and caps.sandbox_attachments
     ordinary=select(env,name='GPT3.5 Turbo')
     assert capabilities(ordinary).input_attachments and capabilities(ordinary).regenerate
 
@@ -31,7 +31,7 @@ def test_native_visibility_restores_and_hidden_input_values_are_cleared(env):
     agent=select(env);ordinary=select(env,name='GPT3.5 Turbo')
     with gr.Blocks(analytics_enabled=False) as app:
         current=gr.State();chat=gr.Chatbot();upload=gr.File(file_count='multiple');search=gr.Checkbox(value=True,visible=False);retry=gr.Button();selector=gr.Dropdown(choices=['ordinary','agent']);marker=gr.HTML()
-        ui=CapabilityUI([('input_attachments',upload,[]),('external_websearch',search,False),('regenerate',retry,None)],selector,marker);ui.wire(current,chat)
+        ui=CapabilityUI([('knowledge',upload,[]),('external_websearch',search,False),('regenerate',retry,None)],selector,marker);ui.wire(current,chat)
     hidden=ui.values(agent);assert hidden[0]['visible'] is False and hidden[0]['value']==[] and hidden[1]['value'] is False and hidden[2]['visible'] is False
     restored=ui.values(ordinary);assert restored[0]['visible'] and restored[2]['visible'] and not restored[1]['visible']
     assert 'data-model-capabilities' in restored[-1]
