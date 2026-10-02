@@ -533,7 +533,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     demo.load(create_greeting, inputs=None, outputs=[
               user_info, user_name, current_model, like_dislike_area, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList], api_name="load").then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
     chatgpt_predict_args = dict(
-        fn=agent_panel.wrap_predict(predict, capability_ui),
+        fn=agent_panel.status_callback(agent_panel.wrap_predict(predict, capability_ui), 1, header=True),
         inputs=[
             current_model,
             user_question,
@@ -543,7 +543,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             language_select_dropdown,
             agent_panel.input_files,
         ],
-        outputs=[chatbot, status_display, *agent_panel.outputs, *capability_ui.outputs],
+        outputs=[chatbot, status_display, *agent_panel.outputs, *capability_ui.outputs, agent_panel.activity],
         show_progress=True,
         concurrency_limit=CONCURRENT_COUNT
     )
@@ -559,8 +559,8 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         fn=capability_ui.values, inputs=[current_model], outputs=capability_ui.outputs
     )
 
-    finish_submission_args = dict(fn=agent_panel.finish_submission,
-        inputs=[current_model, user_question, user_input], outputs=[user_input, status_display])
+    finish_submission_args = dict(fn=agent_panel.status_callback(agent_panel.finish_submission, 1, header=True),
+        inputs=[current_model, user_question, user_input], outputs=[user_input, status_display, agent_panel.activity])
 
     reset_textbox_args = dict(
         fn=reset_textbox, inputs=[], outputs=[user_input]
@@ -607,7 +607,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     # Chatbot
-    cancelBtn.click(interrupt, [current_model], [status_display], queue=False, concurrency_limit=None)
+    cancelBtn.click(agent_panel.status_callback(interrupt, header=True), [current_model], [status_display, agent_panel.activity], queue=False, concurrency_limit=None)
 
     user_input.submit(**transfer_input_args).then(**
                                                   chatgpt_predict_args).then(**finish_submission_args).then(**end_outputing_args).then(**auto_name_chat_history_args)
@@ -627,9 +627,9 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                         current_model, index_files, chatbot, language_select_dropdown], [chatbot, status_display])
 
     emptyBtn.click(
-        reset,
+        agent_panel.status_callback(reset, 1, header=True),
         inputs=[current_model, retain_system_prompt_checkbox],
-        outputs=[chatbot, status_display, historySelectList, systemPromptTxt, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox],
+        outputs=[chatbot, status_display, historySelectList, systemPromptTxt, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, agent_panel.activity],
         show_progress=True,
         js='(a,b)=>{return clearChatbot(a,b);}',
     ).then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
@@ -678,24 +678,24 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     two_column.change(update_doc_config, [two_column], None)
 
     # LLM Models
-    keyTxt.change(set_key, [current_model, keyTxt], [
-                  user_api_key, status_display], api_name="set_key").then(**get_usage_args)
+    keyTxt.change(agent_panel.status_callback(set_key, 1, header=True), [current_model, keyTxt], [
+                  user_api_key, status_display, agent_panel.activity], api_name="set_key").then(**get_usage_args)
     keyTxt.submit(**get_usage_args)
     single_turn_checkbox.input(
         set_single_turn, [current_model, single_turn_checkbox], None, show_progress=False)
     use_streaming_checkbox.input(set_streaming, [current_model, use_streaming_checkbox], None, show_progress=False)
-    model_select_dropdown.input(change_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
-                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt], show_progress=True, api_name="get_model", js="(...args) => { window.chuanhuAgentPendingDraft = null; return args; }").then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
+    model_select_dropdown.input(agent_panel.status_callback(change_model, 1, header=True, returned_model=0), [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider, top_p_slider, systemPromptTxt, user_name, current_model], [
+                                 current_model, status_display, chatbot, lora_select_dropdown, user_api_key, keyTxt, modelDescription, use_streaming_checkbox, model_select_dropdown, systemPromptTxt, agent_panel.activity], show_progress=True, api_name="get_model", js="(...args) => { window.chuanhuAgentPendingDraft = null; return args; }").then(agent_panel.values, [current_model], agent_panel.outputs).then(agent_panel.chat_value, [current_model], [chatbot]).then(capability_ui.values, [current_model], capability_ui.outputs)
     model_select_dropdown.change(toggle_like_btn_visibility, [model_select_dropdown], [
                                  like_dislike_area], show_progress=False)
     # model_select_dropdown.change(
     #     toggle_file_type, [model_select_dropdown], [index_files], show_progress=False)
-    lora_select_dropdown.change(get_model, [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider,
-                                top_p_slider, systemPromptTxt, user_name, current_model], [current_model, status_display, chatbot, modelDescription], show_progress=True)
+    lora_select_dropdown.change(agent_panel.status_callback(get_model, 1, header=True, returned_model=0), [model_select_dropdown, lora_select_dropdown, user_api_key, temperature_slider,
+                                top_p_slider, systemPromptTxt, user_name, current_model], [current_model, status_display, chatbot, modelDescription, agent_panel.activity], show_progress=True)
 
     # Template
-    systemPromptTxt.change(set_system_prompt, [
-                           current_model, systemPromptTxt], [status_display]).then(agent_panel.values, [current_model], agent_panel.outputs)
+    systemPromptTxt.change(agent_panel.status_callback(set_system_prompt, header=True), [
+                           current_model, systemPromptTxt], [status_display, agent_panel.activity]).then(agent_panel.values, [current_model], agent_panel.outputs)
     templateRefreshBtn.click(get_template_dropdown, None, [
                              templateFileSelectDropdown])
     templateFileSelectDropdown.input(

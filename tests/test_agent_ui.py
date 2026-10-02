@@ -222,13 +222,14 @@ def test_gradio_callback_updates_same_session_and_restores_on_failure(env,monkey
     app,panel,state=panel_app(model)
     index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
     result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1],state=state,request=gr.Request(session_hash='ui-test')))
-    assert '下一轮' in result['data'][0] and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
+    assert app.fns[index].outputs == [panel.activity]
+    assert result['data'][0]['visible'] and '下一轮' in result['data'][0]['value'] and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
     assert model.model_name!='gpt-6-sol'
     send(env,model,'apply on send')
     assert model.model_name=='gpt-6-sol'
     monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([{'type':'error','message':'rejected'}]))
     result=asyncio.run(app.process_api(index,[None,'bad','low',2],state=state,request=gr.Request(session_hash='ui-test')))
-    assert '下一轮' in result['data'][0] and model.model_name=='gpt-6-sol'
+    assert '下一轮' in result['data'][0]['value'] and model.model_name=='gpt-6-sol'
     output=send(env,model,'must not submit')
     assert '消息未发送' in output[-1][1] and model.model_name=='gpt-6-sol'
     app.close()

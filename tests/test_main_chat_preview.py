@@ -39,6 +39,12 @@ async def exercise():
         if name=='predict_with_ui' and len(inputs)==6: inputs=[*inputs,[]]
         result = await app.process_api(index, inputs, state=state, request=request)
         while True:
+            current = state[app.fns[functions['initial']].outputs[0]._id]
+            if getattr(current, 'is_hosted_agent', False):
+                for component, value in zip(app.fns[index].outputs, result['data']):
+                    if getattr(component, 'elem_id', None) == 'status-display':
+                        assert value in ('', None), (name, value)
+            assert len({component._id for component in app.fns[index].outputs}) == len(app.fns[index].outputs)
             if name == 'predict_with_ui':
                 frame = result['data'][0]
                 if isinstance(frame, list) or (isinstance(frame, dict) and 'value' in frame):

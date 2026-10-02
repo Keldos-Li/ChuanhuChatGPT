@@ -125,6 +125,8 @@ hr.append-display {
 }
 .message.bot {
     background-color: var(--message-bot-background-color-light) !important;
+    /* Preserve the product's fixed bot column when Gradio's mobile CSS sets auto. */
+    width: 100% !important;
     max-width: calc(85% - 40px);
     border-bottom-left-radius: 0 !important;
 }
@@ -229,7 +231,7 @@ hr.append-display {
 #chuanhu-chatbot .agent-message-files {
     box-sizing: border-box;
     width: 100%;
-    max-width: 360px;
+    max-width: 300px;
     padding: 0;
     /* Cancel the message list's inter-turn gap for files in the same reply. */
     margin-block: calc(12px - var(--spacing-xxl) - var(--spacing-lg)) 12px;
@@ -243,9 +245,9 @@ hr.append-display {
 .agent-message-anchor, .agent-message-raw { display: none !important; }
 /* Keep these scoped: Gradio's button reset otherwise wins after mounting. */
 #chuanhu-chatbot .agent-message-files > .model-file-card {
-    display: flex; align-items: center; gap: 12px;
-    width: 100%; min-height: 72px;
-    box-sizing: border-box; padding: 12px 16px; border: 1px solid #e5e5e5;
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; min-height: 60px;
+    box-sizing: border-box; padding: 8px 16px; border: 1px solid #e5e5e5;
     border-radius: 12px; text-align: left; font: inherit;
     color: var(--body-text-color); background: #fff;
     cursor: pointer;
@@ -255,15 +257,27 @@ hr.append-display {
 .dark #chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #353535; }
 #chuanhu-chatbot .agent-message-files > .model-file-card:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 2px; }
 #chuanhu-chatbot .agent-message-files > .model-file-card:disabled { cursor: wait; }
-.model-file-icon { flex: 0 0 28px; height: 32px; color: var(--body-text-color-subdued); }
+.model-file-icon { flex: 0 0 24px; height: 28px; color: var(--body-text-color-subdued); }
 .model-file-icon svg { width: 100%; height: 100%; }
 .model-file-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .model-file-name { font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+#chuanhu-chatbot .model-file-name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
 .model-file-meta, .model-file-error, .model-file-feedback {
     font-size: 0.875em; color: var(--body-text-color-subdued); overflow-wrap: anywhere;
 }
 .model-file-error:empty, .model-file-feedback:empty { display: none; }
 #agent-input-files { gap: 0; min-height: 0; }
+#agent-activity-feedback, #agent-input-feedback {
+    border: 0; background: none; box-shadow: none;
+    color: var(--body-text-color-subdued);
+}
+#agent-activity-feedback { padding: 8px 20px; }
+#agent-input-feedback { padding: 0 20px; }
 #agent-upload-files, #agent-pending-files { min-height: 0 !important; padding: 0 !important; border: 0 !important; background: none; }
 #agent-upload-files > .center.flex { display: none; }
 #agent-pending-files > .center.flex { display: none; }
@@ -285,26 +299,14 @@ hr.append-display {
     width: 100%;
     max-width: 100%;
 }
+@media screen and (max-width: 499px) {
+    /* Use the original mobile chat-column limit without resizing bot bubbles. */
+    #chuanhu-chatbot .agent-message-files {
+        width: calc(100% - 84px);
+        max-width: none;
+    }
+}
 @container chatbot-area (width < 500px) {
-    #chuanhu-chatbot .agent-message-files { max-width: none; }
-    #chuanhu-chatbot .agent-message-has-files > .message.bot {
-        box-sizing: border-box;
-        flex: 1;
-        min-width: 0;
-        width: 100% !important;
-        max-width: 100% !important;
-    }
-    #chuanhu-chatbot .agent-message-has-files > .message.bot > .message-btn-column {
-        position: static;
-        flex-direction: row;
-        align-self: flex-end;
-        margin-top: 4px;
-        gap: 4px;
-    }
-    #chuanhu-chatbot .agent-message-has-files > .message.bot > .message-btn-column > button {
-        min-width: 32px;
-        min-height: 32px;
-    }
     #model-output-panels > .gradio-column {
         padding-inline: 12px;
     }

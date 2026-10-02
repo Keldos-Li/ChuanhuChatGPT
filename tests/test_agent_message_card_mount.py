@@ -86,6 +86,7 @@ def test_ready_cards_have_native_button_semantics_and_no_redundant_visible_downl
     assert card.get('data-file-action') == 'download'
     assert card.get('data-artifact-id') == 'file"<&\''
     assert card.get('aria-label') == 'same.txt，下载文件'
+    assert card.find('.//span[@class="model-file-name"]').get('title') == 'same.txt'
     assert card.find('.//span[@class="model-file-state"]') is None
     visible = ''.join(card.itertext())
     assert '可下载' not in visible and '下载文件' not in visible
@@ -139,3 +140,16 @@ def test_css_hides_source_panel_and_empty_bubble_without_hiding_mounted_file_hol
     assert re.search(r'display\s*:\s*none\s*!important', declarations('.agent-file-only-message'))
     assert re.search(r'display\s*:\s*none\s*!important', declarations('.agent-message-anchor'))
     assert not re.search(r'display\s*:\s*none', declarations('#chuanhu-chatbot .agent-message-files'))
+
+
+def test_bot_column_stays_fixed_against_gradio_mobile_auto_without_resizing_user_bubbles():
+    css = (Path(__file__).resolve().parents[1] / 'web_assets/stylesheet/chatbot.css').read_text()
+    css = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
+    rules = [(selector.strip(), body) for selector, body in re.findall(r'([^{}]+)\{([^{}]+)\}', css)]
+    def bodies(selector):
+        return '\n'.join(body for selectors, body in rules if selector in [item.strip() for item in selectors.split(',')])
+    assert re.search(r'(?<!max-)\bwidth\s*:\s*100%\s*!important', bodies('.message.bot'))
+    assert 'max-width: calc(85% - 40px)' in bodies('.message.bot')
+    assert 'max-width: calc(100% - 84px) !important' in bodies('.message.bot')
+    assert re.search(r'(?<!max-)\bwidth\s*:\s*auto\s*!important', bodies('.message.user'))
+    assert '#chuanhu-chatbot .agent-message-has-files > .message.bot' not in css
