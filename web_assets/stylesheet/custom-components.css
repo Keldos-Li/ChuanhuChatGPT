@@ -418,4 +418,4 @@ input:checked + .apSlider::before {
 }
 
 #model-capability-state { display: none !important; }
-.regenerate-btn[hidden], .delete-latest-btn[hidden], #chatbot-input-more-area [hidden], #chatbot-input-more-btn-div[hidden], #agent-browser-form [hidden] { display: none !important; }
+.regenerate-btn[hidden], .delete-latest-btn[hidden], .copy-bot-btn[hidden], .toggle-md-btn[hidden], #chatbot-input-more-area [hidden], #chatbot-input-more-btn-div[hidden], #agent-browser-form [hidden] { display: none !important; }

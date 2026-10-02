@@ -19,6 +19,8 @@ class ModelCapabilities:
     history_delete: bool = True
     history_edit: bool = True
     history_rollback: bool = True
+    message_copy: bool = True
+    message_markdown: bool = True
     output_artifacts: bool = False
     agent_tools: bool = False
     sandbox_attachments: bool = False

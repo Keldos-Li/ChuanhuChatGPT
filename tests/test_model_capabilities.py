@@ -16,6 +16,7 @@ def test_agent_declares_all_unsupported_controls_and_independent_outputs(env):
     for name in ('knowledge','external_websearch','sampling','token_limits','single_turn','output_mode','regenerate','history_delete','history_edit','history_rollback','billing','reply_language'):
         assert not getattr(caps,name)
     assert caps.output_artifacts and caps.agent_tools and caps.input_attachments and caps.sandbox_attachments
+    assert caps.message_copy and caps.message_markdown
     ordinary=select(env,name='GPT3.5 Turbo')
     assert capabilities(ordinary).input_attachments and capabilities(ordinary).regenerate
 

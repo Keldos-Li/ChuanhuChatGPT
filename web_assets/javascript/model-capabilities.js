@@ -16,6 +16,7 @@
         const mapping = {
             regenerate: '.regenerate-btn', history_delete: '.delete-latest-btn',
             history_edit: '.edit-message-btn', history_rollback: '.rollback-btn',
+            message_copy: '.copy-bot-btn', message_markdown: '.toggle-md-btn',
             input_attachments: '#upload-files-btn', knowledge: '#uploaded-files-btn',
             single_turn: 'input[name="single-session-cb"]',
             external_websearch: 'input[name="online-search-cb"]'

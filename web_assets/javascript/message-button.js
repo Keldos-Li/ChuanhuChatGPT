@@ -96,10 +96,13 @@ function addChuanhuButton(botElement) {
     var copyButton = document.createElement('button');
     copyButton.classList.add('chuanhu-btn');
     copyButton.classList.add('copy-bot-btn');
+    copyButton.type = 'button';
     copyButton.setAttribute('aria-label', 'Copy');
     copyButton.innerHTML = copyIcon;
+    copyButton.hidden = window.chuanhuSupports?.('message_copy') === false;
 
     copyButton.addEventListener('click', async () => {
+        if (window.chuanhuSupports?.('message_copy') === false) return;
 
         let textToCopyHTML = rawMessage.innerHTML;
         let textToCopyTMP = textToCopyHTML.replace(/<br\s*\/?>/gi, '\n');
@@ -141,10 +144,13 @@ function addChuanhuButton(botElement) {
     var toggleButton = document.createElement('button');
     toggleButton.classList.add('chuanhu-btn');
     toggleButton.classList.add('toggle-md-btn');
+    toggleButton.type = 'button';
     toggleButton.setAttribute('aria-label', 'Toggle');
+    toggleButton.hidden = window.chuanhuSupports?.('message_markdown') === false;
     var renderMarkdown = mdMessage.classList.contains('hideM');
     toggleButton.innerHTML = renderMarkdown ? mdIcon : rawIcon;
     toggleButton.addEventListener('click', () => {
+        if (window.chuanhuSupports?.('message_markdown') === false) return;
         renderMarkdown = mdMessage.classList.contains('hideM');
         if (renderMarkdown) {
             renderMarkdownText(botElement);

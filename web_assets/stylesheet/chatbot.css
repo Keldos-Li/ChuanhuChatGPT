@@ -294,6 +294,17 @@ hr.append-display {
         width: 100% !important;
         max-width: 100% !important;
     }
+    #chuanhu-chatbot .agent-message-has-files > .message.bot > .message-btn-column {
+        position: static;
+        flex-direction: row;
+        align-self: flex-end;
+        margin-top: 4px;
+        gap: 4px;
+    }
+    #chuanhu-chatbot .agent-message-has-files > .message.bot > .message-btn-column > button {
+        min-width: 32px;
+        min-height: 32px;
+    }
     #model-output-panels > .gradio-column {
         padding-inline: 12px;
     }
@@ -400,6 +411,11 @@ hr.append-display {
 }
 .chuanhu-btn:focus {
     outline: none;
+}
+#chuanhu-chatbot .copy-bot-btn:focus-visible,
+#chuanhu-chatbot .toggle-md-btn:focus-visible {
+    outline: 2px solid var(--primary-500);
+    outline-offset: 2px;
 }
 
 .message-btn-column {
