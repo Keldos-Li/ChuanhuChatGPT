@@ -29,6 +29,10 @@ _session_locks = {}
 _cancel_sessions = {}
 
 
+class ModelUpdateError(Exception):
+    """A next-turn parameter update failed before the task was submitted."""
+
+
 def browser_owner(request):
     if request is None or not request.session_hash:
         raise gr.Error('需要在当前登录会话中操作')
@@ -88,6 +92,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         self._auto_named = False
         self._first_prompt = None
         self._pending_network = None
+        self._pending_model_settings = None
         self.metadata = {}
         self._tool_settings = load_settings(shared.chuanhu_path, owner) if owner else validate_settings({})
 
@@ -133,7 +138,8 @@ class OpenAIAgentsClient(BaseLLMModel):
         state = {key: deepcopy(value) for key, value in self._state.items() if key not in ('required_actions', 'settings', 'items')}
         record = {'state': state, 'conversation_id': self._conversation_id, 'artifacts': deepcopy(self._artifacts),
                   'settings': deepcopy(self._session_settings), 'connection_ref': self._connection_reference(),
-                  'items': deepcopy(self._cloud_items), 'auto_named': self._auto_named, 'first_prompt': self._first_prompt}
+                  'items': deepcopy(self._cloud_items), 'auto_named': self._auto_named, 'first_prompt': self._first_prompt,
+                  'next_model_settings': self._pending_model_settings}
         self._store().put(self._owner, self.history_file_path, record)
 
     def adopt_local_history(self, original):
@@ -148,6 +154,7 @@ class OpenAIAgentsClient(BaseLLMModel):
         binding = None if self._importing or not self._owner else self._store().get(self._owner, self.history_file_path)
         self._pending_actions = []
         if binding:
+            self._pending_model_settings = binding.get('next_model_settings')
             if binding.get('connection_ref') != self._connection_reference():
                 self._notice = '当前连接配置与原会话不同，未连接云端；可恢复原配置，或明确按现配置新建并继续'
                 self._state = dict(binding['state'], outcome='incomplete')
@@ -209,24 +216,54 @@ class OpenAIAgentsClient(BaseLLMModel):
     def _current_settings(self):
         return {'model': self.model_name, 'reasoning': self._reasoning, 'instructions': self.system_prompt, 'tools': deepcopy(self._tool_settings)}
 
+    @property
+    def agent_model_choice(self):
+        return tuple(self._pending_model_settings or (self.model_name, self._reasoning))
+
     def set_agent_model(self, model, reasoning):
         with self._lock:
+            if self._retired: raise gr.Error('聊天已切换，请在当前聊天中选择')
             self._assert_idle()
             if reasoning == 'default': reasoning = None
             if not isinstance(model, str) or not model.strip(): raise gr.Error('请选择 Agent 子模型')
-            old = self.model_name, self._reasoning
-            if self._state.get('session_id'):
+            choice = (model.strip(), reasoning)
+            self._pending_model_settings = choice if choice != (self.model_name, self._reasoning) else None
+            self._remember()
+        return '已保存，下一轮自动使用'
+
+    def _apply_next_model(self, generation):
+        with self._lock:
+            if not self._pending_model_settings: return
+            model, reasoning = self._pending_model_settings
+            session = self._state.get('session_id')
+            if (model, reasoning) == (self.model_name, self._reasoning):
+                self._pending_model_settings = None
+                return
+        try:
+            if session:
                 confirmed = None
-                for message in self._worker({'action': 'update', 'session_id': self._state['session_id'], 'model': model, 'reasoning': reasoning}):
-                    if message.get('type') == 'error': raise gr.Error(message.get('message', '参数更新失败，保留原生效值'))
+                for message in self._worker({'action': 'update', 'session_id': session, 'model': model, 'reasoning': reasoning}):
+                    if message.get('type') == 'error':
+                        with self._lock:
+                            self._needs_sync = (message.get('diagnostics') or {}).get('status_code') not in (400, 401, 403, 404, 422)
+                        raise ModelUpdateError(message.get('message', '参数更新失败'))
                     if message.get('type') == 'result': confirmed = message.get('settings')
-                if not confirmed or confirmed.get('model') != model:
-                    raise gr.Error('参数更新结果尚未确认，保留原生效值；请重新连接')
-            self.model_name, self._reasoning = model, (confirmed.get('reasoning', reasoning) if self._state.get('session_id') else reasoning)
+                if not confirmed or confirmed.get('model') != model or (reasoning is not None and confirmed.get('reasoning') != reasoning):
+                    with self._lock: self._needs_sync = True
+                    raise ModelUpdateError('参数更新结果尚未确认，请重新连接')
+        except ModelUpdateError:
+            raise
+        except Exception:
+            with self._lock: self._needs_sync = True
+            raise ModelUpdateError('参数更新连接中断，请重新连接确认') from None
+        with self._lock:
+            if self._state.get('generation') != generation or self._retired:
+                raise ModelUpdateError('聊天已变化，消息未发送')
+            self.model_name, self._reasoning = model, (confirmed.get('reasoning', reasoning) if session else reasoning)
+            self._pending_model_settings = None
             if self._session_settings:
                 self._session_settings.update(model=model, reasoning=self._reasoning)
             self._remember()
-        return '参数已生效，将用于同一会话的下一轮'
 
     def save_agent_tools(self, settings):
         # Saving new defaults never changes the running session's tool set.
@@ -242,7 +279,7 @@ class OpenAIAgentsClient(BaseLLMModel):
                 self._tool_settings = save_settings(shared.chuanhu_path, self._owner, dict(self._tool_settings, network=self._pending_network))
             self.auto_save(self.chatbot)
             backup = {name: deepcopy(getattr(self, name)) for name in
-                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch')}
+                ('history_file_path', '_state', '_session_settings', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch', 'model_name', '_reasoning', '_pending_model_settings')}
             self.new_auto_history_filename()
             self._fresh()
             self._fork_previous = backup
@@ -426,10 +463,16 @@ class OpenAIAgentsClient(BaseLLMModel):
                        'instructions': settings['instructions'], 'tool_settings': deepcopy(settings['tools']),
                        'session_id': self._state.get('session_id'), 'run_id': generation, 'history_reference': reference}
         started = terminal = False
+        update_error = False
         try:
             yield deepcopy(self._display), self._status()
             with self._lock:
                 if self._cancel_requested: return
+            self._apply_next_model(generation)
+            with self._lock:
+                if self._cancel_requested: return
+                settings.update(model=self.model_name, reasoning=self._reasoning)
+                command.update(model=self.model_name, reasoning=self._reasoning)
                 started = True
                 self._session_settings = settings
                 self._remember()
@@ -447,11 +490,16 @@ class OpenAIAgentsClient(BaseLLMModel):
             if self._state.get('outcome') in ('completed', 'cancelled', 'failed') and self._state.get('session_id'):
                 yield from self._download(generation)
                 yield deepcopy(self._display), self._status()
+        except ModelUpdateError as error:
+            with self._lock:
+                update_error = True
+                self._notice = '消息未发送：' + str(error)
         finally:
             with self._lock:
                 if self._state.get('generation') == generation:
                     if not started:
                         self._state, self.history, self._display, self._answer_index, self._answer_row = previous
+                        if self._cancel_requested: self._notice = '本轮尚未发送，已取消'
                     elif not terminal and self._state.get('outcome') not in TERMINAL:
                         self._state['outcome'] = 'incomplete' if self._state.get('session_id') else 'uncertain'
                     self._running = False
@@ -469,7 +517,7 @@ class OpenAIAgentsClient(BaseLLMModel):
                             self._notice = '新会话未创建，已回到原会话；本次未发送内容另存于本地历史，新配置仍已保存'
                         elif self._state.get('session_id'):
                             self._fork_previous = None
-        if self._notice.startswith('新会话未创建'):
+        if update_error or self._notice.startswith('新会话未创建'):
             yield deepcopy(self._display), self._status()
 
     def reconnect(self):

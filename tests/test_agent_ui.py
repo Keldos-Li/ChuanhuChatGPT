@@ -11,7 +11,7 @@ from test_agent_model import env, select, send, complete, request
 
 
 def artifact_rows(markup):
-    return [[cell.text or '' for cell in row] for row in ET.fromstring(markup).findall('tbody/tr')]
+    return [[card.find('.//span[@class="model-file-name"]').text or '', '', card.find('.//span[@class="model-file-size"]').text or '', (card.find('.//span[@class="model-file-state"]').text or '') + (card.find('.//span[@class="model-file-error"]').text or '')] for card in ET.fromstring(markup).findall('button')]
 
 
 def panel_app(model):
@@ -55,11 +55,19 @@ def test_file_status_markup_escapes_names_types_and_errors(env):
                        'type':'<script>bad()</script>','status':'failed',
                        'error':'<svg onload="bad()"> & error','size':8}]
     markup=ArtifactPanel.values(model)[1]['value']
-    assert '<img' not in markup and '<script' not in markup and '<svg' not in markup
+    assert '<img' not in markup and '<script' not in markup and '<svg onload' not in markup
     rows=artifact_rows(markup)
     assert rows[0][0]==model._artifacts[0]['name']
-    assert rows[0][1]==model._artifacts[0]['type']
-    assert rows[0][3]=='下载失败：'+model._artifacts[0]['error']
+    assert 'data-artifact-id="one"' in markup and 'data-file-action="retry"' in markup
+    assert rows[0][3]=='下载失败，点击重试：'+model._artifacts[0]['error']
+
+
+def test_card_native_download_and_retry_dom_contract():
+    import subprocess, shutil
+    from pathlib import Path
+    result=subprocess.run([shutil.which('node') or 'node','tests/javascript/artifact-cards.test.cjs'],
+        cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
 
 
 def test_actual_gradio_diff_stream_removes_provisional_reference_rows(env,monkeypatch):
@@ -136,12 +144,17 @@ def test_no_login_submit_without_known_origin(env):
 def test_gradio_callback_updates_same_session_and_restores_on_failure(env,monkeypatch):
     complete(env,monkeypatch);model=select(env);send(env,model)
     app,panel,state=panel_app(model)
-    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='apply')
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_reasoning')
     result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high'],state=state,request=gr.Request(session_hash='ui-test')))
-    assert '下一轮' in result['data'][0] and model.model_name=='gpt-6-sol' and model._state['session_id']=='sess_test'
+    assert '下一轮' in result['data'][0] and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
+    assert model.model_name!='gpt-6-sol'
+    send(env,model,'apply on send')
+    assert model.model_name=='gpt-6-sol'
     monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([{'type':'error','message':'rejected'}]))
     result=asyncio.run(app.process_api(index,[None,'bad','low'],state=state,request=gr.Request(session_hash='ui-test')))
-    assert 'rejected' in result['data'][0] and model.model_name=='gpt-6-sol'
+    assert '下一轮' in result['data'][0] and model.model_name=='gpt-6-sol'
+    output=send(env,model,'must not submit')
+    assert '消息未发送' in output[-1][1] and model.model_name=='gpt-6-sol'
     app.close()
 
 
@@ -176,7 +189,7 @@ def test_live_updates_do_not_overwrite_unsaved_tool_form(env):
 def test_callback_owner_validation_is_gradio_injected(env,monkeypatch):
     complete(env,monkeypatch);model=select(env,username='alice')
     app,panel,state=panel_app(model)
-    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='apply')
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_reasoning')
     with pytest.raises(gr.Error):
         asyncio.run(app.process_api(index,[None,'gpt-6-sol','high'],state=state,request=gr.Request(username='bob',session_hash='ui-test')))
     app.close()
@@ -264,7 +277,7 @@ def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypat
         panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components()
     updates=list(panel.wrap_predict(env.wrappers['predict'],caps)(model,'hello',[],request=gr.Request(session_hash='ui')))
     final=updates[-1]
-    for component in (panel.model,panel.reasoning,panel.apply_model):
+    for component in (panel.model,panel.reasoning):
         assert final[2+panel.outputs.index(component)]['interactive'] is True
     assert not model._running
     app.close()

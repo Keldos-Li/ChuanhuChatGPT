@@ -126,22 +126,79 @@ def test_no_input_or_output_application_caps(env,monkeypatch):
 
 def test_model_effort_update_rolls_back_on_error_and_keeps_session(env,monkeypatch):
     calls,_=complete(env,monkeypatch);model=select(env);send(env,model)
+    count=len(calls)
     model.set_agent_model('gpt-6-sol','high')
+    assert len(calls)==count and model.model_name!='gpt-6-sol'
+    send(env,model,'apply on send')
     assert model.model_name=='gpt-6-sol' and model._reasoning=='high' and model._state['session_id']=='sess_test'
-    original=env.agents.worker_messages
-    monkeypatch.setattr(env.agents,'worker_messages',lambda c:iter([dict(type='error',message='rejected')]))
-    with pytest.raises(gr.Error):model.set_agent_model('invalid-model','low')
+    assert [c['action'] for c in calls[count:]]==['update','run','download']
+    before=list(model.history)
+    monkeypatch.setattr(env.agents,'worker_messages',lambda c:iter([dict(type='error',message='rejected',diagnostics={'status_code':400})]))
+    model.set_agent_model('invalid-model','low')
+    output=send(env,model,'not sent')
+    assert '消息未发送' in output[-1][1] and model.history==before
     assert model.model_name=='gpt-6-sol' and model._reasoning=='high'
-    monkeypatch.setattr(env.agents,'worker_messages',original);send(env,model,'next')
-    assert [c for c in calls if c['action']=='run'][-1]['model']=='gpt-6-sol'
+    assert model.agent_model_choice==('invalid-model','low') and not model._needs_sync
 
 
 def test_update_eof_not_success(env,monkeypatch):
     complete(env,monkeypatch);model=select(env);send(env,model)
     old=(model.model_name,model._reasoning)
     monkeypatch.setattr(env.agents,'worker_messages',lambda c:iter([]))
-    with pytest.raises(gr.Error):model.set_agent_model('gpt-6-sol','high')
+    model.set_agent_model('gpt-6-sol','high')
+    output=send(env,model,'not sent')
+    assert '消息未发送' in output[-1][1] and model._needs_sync
     assert (model.model_name,model._reasoning)==old
+
+
+def test_dropdown_changes_collapse_to_one_update_and_skip_unchanged_values(env,monkeypatch):
+    calls,_=complete(env,monkeypatch);model=select(env);send(env,model)
+    offset=len(calls)
+    model.set_agent_model('gpt-6-sol','default')
+    model.set_agent_model('gpt-6-sol','high')
+    model.set_agent_model('gpt-6.1-sol','medium')
+    assert len(calls)==offset
+    send(env,model,'latest choice')
+    assert [c['action'] for c in calls[offset:]]==['update','run','download']
+    assert calls[offset]['model']=='gpt-6.1-sol' and calls[offset]['reasoning']=='medium'
+    offset=len(calls);model.set_agent_model('gpt-6.1-sol','medium');send(env,model,'same choice')
+    assert [c['action'] for c in calls[offset:]]==['run','download']
+
+
+def test_new_session_choice_does_not_issue_separate_update(env,monkeypatch):
+    calls,_=complete(env,monkeypatch);model=select(env)
+    model.set_agent_model('gpt-6-sol','high');assert not calls
+    send(env,model)
+    assert [c['action'] for c in calls]==['run','download']
+    assert calls[0]['model']=='gpt-6-sol' and calls[0]['reasoning']=='high'
+
+
+def test_stop_during_parameter_update_never_submits_or_cancels_previous_turn(env,monkeypatch):
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    previous=list(model.history);old_turn=model._state['turn_id']
+    entered=threading.Event();release=threading.Event();calls=[]
+    def worker(command):
+        calls.append(command['action'])
+        assert command['action']=='update'
+        entered.set();assert release.wait(3)
+        yield {'type':'result','settings':{'model':'gpt-6-sol','reasoning':'high'}}
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    model.set_agent_model('gpt-6-sol','high')
+    thread=threading.Thread(target=lambda:send(env,model,'cancel this send'));thread.start()
+    assert entered.wait(3);model.interrupt();release.set();thread.join(3)
+    assert not thread.is_alive() and calls==['update']
+    assert model.history==previous and model._state['turn_id']==old_turn
+    assert model.model_name=='gpt-6-sol' and '尚未发送' in model._notice
+
+
+def test_queued_send_freezes_next_model_choice(env,monkeypatch):
+    from modules.model_capabilities import reserve_submission
+    complete(env,monkeypatch);model=select(env)
+    model.set_agent_model('gpt-6-sol','high')
+    envelope=reserve_submission(model,'fixed choice')
+    with pytest.raises(gr.Error):model.set_agent_model('gpt-6.1-sol','low')
+    list(env.wrappers['predict'](model,envelope,[],request=request()))
+    assert model.model_name=='gpt-6-sol'
 
 
 def test_config_saved_during_run_only_applies_after_explicit_new_session(env,monkeypatch):

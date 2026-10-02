@@ -167,7 +167,6 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                                         value="", variant="primary", elem_id="submit-btn")
                                     cancelBtn = gr.Button(
                                         value="", variant="secondary", visible=False, elem_id="cancel-btn")
-                        agent_panel.selectors()
                         # Note: Buttons below are set invisible in UI. But they are used in JS.
                         with gr.Row(elem_id="chatbot-buttons", visible=False):
                             with gr.Column(min_width=120, scale=1):
@@ -218,6 +217,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.multi_account_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
                             else:
                                 usageTxt = gr.Markdown(i18n("ui.toolbox.model.usage_hint"), elem_id="usage-display", elem_classes="insert-block", visible=show_api_billing)
+                        agent_panel.selectors()
                         agent_panel.settings_components()
                         gr.Markdown("---", elem_classes="hr-line", visible=not HIDE_MY_KEY)
                         with gr.Accordion(label="Prompt", open=True):

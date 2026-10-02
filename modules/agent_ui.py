@@ -39,14 +39,12 @@ class ArtifactPanel:
     """Output files independent from input attachments and text chat bubbles."""
     def __init__(self):
         with gr.Column(visible=False, elem_id='model-output-files', min_width=0, scale=0) as self.group:
-            gr.Markdown('### 生成的文件')
-            # A readonly status surface needs no Dataframe's separate virtual
-            # display state. Replace the visible markup on every progress event.
-            self.list = gr.HTML(elem_id='model-output-status')
-            self.files = gr.File(file_count='multiple', interactive=False, label='下载文件')
-            with gr.Row():
-                self.retry_id = gr.Dropdown(label='重新获取文件', choices=[])
-                self.retry = gr.Button('重试下载')
+            self.list = gr.HTML(elem_id='model-output-cards')
+            # CSS hides these native controls without unmounting their actual
+            # download and callback behavior. Cards address files by artifact ID.
+            self.files = gr.File(file_count='multiple', interactive=False, label='[]', elem_id='model-output-native-files')
+            self.retry_id = gr.Textbox(elem_id='model-output-retry-id', show_label=False)
+            self.retry = gr.Button('重试下载', elem_id='model-output-retry')
 
     @property
     def outputs(self): return [self.group, self.list, self.files, self.retry_id]
@@ -54,20 +52,30 @@ class ArtifactPanel:
     @staticmethod
     def values(model):
         records = getattr(model, '_artifacts', []) if capabilities(model).output_artifacts else []
-        rows, paths = [], []
+        cards, paths, ready_ids = [], [], []
         labels = {'preparing': '准备中', 'ready': '可下载', 'failed': '下载失败'}
         for record in records:
             size = record.get('size')
-            rows.append([record['name'], record.get('type', ''), f'{size:,} 字节' if isinstance(size, int) else '待确认',
-                         labels.get(record.get('status'), '准备中') + (('：' + record['error']) if record.get('error') else '')])
-            if record.get('status') == 'ready' and record.get('path'): paths.append(record['path'])
-        table = '<table aria-label="生成文件状态"><thead><tr>'
-        table += ''.join('<th scope="col">' + label + '</th>' for label in ('文件', '类型', '大小', '状态'))
-        table += '</tr></thead><tbody>'
-        table += ''.join('<tr>' + ''.join('<td>' + html.escape(str(cell)) + '</td>' for cell in row) + '</tr>' for row in rows)
-        table += '</tbody></table>'
-        return [gr.update(visible=bool(records)), gr.update(value=table if rows else ''), gr.update(value=paths),
-                gr.update(choices=[(record['name'] + ' · ' + record['id'], record['id']) for record in records], value=None)]
+            size_text = f'{size:,} 字节' if isinstance(size, int) else '大小待确认'
+            status = record.get('status', 'preparing')
+            action = 'retry' if status == 'failed' else 'download' if status == 'ready' and record.get('path') else ''
+            if action == 'download':
+                paths.append(record['path']); ready_ids.append(record['id'])
+            status_text = labels.get(status, '准备中')
+            if status == 'failed': status_text += '，点击重试'
+            error = ('：' + str(record['error'])) if record.get('error') else ''
+            escape = lambda value: html.escape(str(value), quote=True)
+            # Feather's generic file icon, also used by the installed Gradio UI.
+            icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>'
+            cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + status_text) + '"' + ('' if action else ' disabled="disabled"') + '>'
+                         + '<span class="model-file-icon">' + icon + '</span><span class="model-file-content">'
+                         + '<span class="model-file-name">' + escape(record['name']) + '</span>'
+                         + '<span class="model-file-meta"><span class="model-file-size">' + size_text + '</span> · <span class="model-file-state">' + escape(status_text) + '</span></span>'
+                         + '<span class="model-file-error">' + escape(error) + '</span><span class="model-file-feedback" aria-live="polite"></span></span></button>')
+        markup = '<div class="model-file-cards" aria-label="生成的文件">' + ''.join(cards) + '</div>' if cards else ''
+        # The hidden native label travels with its File value, so the browser
+        # maps stable IDs to links from the same render, even with duplicate names.
+        return [gr.update(visible=bool(records)), gr.update(value=markup), gr.update(value=paths, label=json.dumps(ready_ids)), gr.update(value='')]
 
 
 def describe_settings(model):
@@ -122,10 +130,9 @@ def browser_form(model, request_id=None, request: gr.Request = None):
 
 class AgentPanel:
     def selectors(self):
-        with gr.Row(visible=False, elem_id='agent-send-options') as self.selection_group:
+        with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
             self.model = gr.Dropdown(label='Agent 子模型', choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
-            self.reasoning = gr.Dropdown(label='推理强度', choices=MODEL_EFFORTS['gpt-6-astra'], value='default', min_width=120)
-            self.apply_model = gr.Button('应用到下一轮', size='sm', min_width=110)
+            self.reasoning = gr.Dropdown(label='推理强度', choices=MODEL_EFFORTS['gpt-6-astra'], value='default', info='选择后自动用于下一轮对话', min_width=120)
 
     def output_components(self):
         self.artifacts = ArtifactPanel()
@@ -165,7 +172,7 @@ class AgentPanel:
 
     @property
     def outputs(self):
-        return [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning, self.apply_model,
+        return [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
                 self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit,
                 *self.artifacts.outputs, *self.config_inputs, self.availability]
 
@@ -174,10 +181,11 @@ class AgentPanel:
         enabled = _agent(model)
         if enabled and request is not None: model.bind_owner(request)
         if not enabled:
-            return [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(), gr.update(),
+            return [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
                     *ArtifactPanel.values(model), *[gr.update()] * 12]
-        busy = model._running or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
+        busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
+        next_model, next_reasoning = model.agent_model_choice
         cards = model._pending_actions
         chosen = cards[0]['request_id'] if cards else None
         browser = browser_form(model, chosen)
@@ -186,7 +194,7 @@ class AgentPanel:
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
         return [gr.update(visible=True), gr.update(visible=True), describe_settings(model),
-                gr.update(value=model.model_name, interactive=not busy), gr.update(value=model._reasoning or 'default', choices=MODEL_EFFORTS.get(model.model_name, ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']), interactive=not busy), gr.update(interactive=not busy),
+                gr.update(value=next_model, interactive=not busy), gr.update(value=next_reasoning or 'default', choices=MODEL_EFFORTS.get(next_model, ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']), interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
                 *browser, *ArtifactPanel.values(model), *(config if include_config else [gr.update()] * len(config)), gr.update(value=tool_availability(settings))]
 
@@ -195,17 +203,22 @@ class AgentPanel:
             for chat, status in _chat_frames(predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request)):
                 yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
             final_chat = gr.update(value=deepcopy(model.chatbot)) if _agent(model) else gr.update()
-            yield final_chat, gr.update(), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+            yield final_chat, (model._status() if _agent(model) else gr.update()), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
         return predict_with_ui
 
     def wire(self, current_model, chatbot, status_display, capability_ui=None):
-        def apply(model, name, effort, request: gr.Request):
+        def choose_model(model, name, request: gr.Request):
+            model.bind_owner(request)
+            try: message = model.set_agent_model(name, 'default')
+            except Exception as error: message = str(error)
+            return message, *self.values(model)
+        def choose_reasoning(model, name, effort, request: gr.Request):
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort)
             except Exception as error: message = str(error)
             return message, *self.values(model)
-        self.model.input(lambda name: gr.update(choices=MODEL_EFFORTS.get(name, ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']), value='default'), [self.model], [self.reasoning])
-        self.apply_model.click(apply, [current_model, self.model, self.reasoning], [status_display, *self.outputs], queue=False)
+        self.model.input(choose_model, [current_model, self.model], [status_display, *self.outputs], queue=False)
+        self.reasoning.input(choose_reasoning, [current_model, self.model, self.reasoning], [status_display, *self.outputs], queue=False)
         def save(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, request: gr.Request):
             model.bind_owner(request)
             try:
