@@ -184,3 +184,34 @@ def test_uncertain_file_write_is_not_presented_as_ready_or_resubmitted(env,tmp_p
     result=submit(env,model,'not sent',paths)
     assert operations==['prepare_inputs'] and model._state['outcome']=='incomplete' and model._needs_sync
     assert '消息未发送' in result[-1][1] and not model.history
+
+
+def test_idle_reconnect_preserves_newly_staged_unsent_files(env,tmp_path,monkeypatch):
+    model,paths,service,calls=staged(env,tmp_path,monkeypatch,('notes.txt',))
+    submit(env,model,'First turn',paths)
+    assert model._draft_acknowledged and model._state['outcome']=='completed'
+    model.stage_input_files(paths)
+    pending_ids=[record.input_id for record in model._input_stager.snapshot()]
+    original=env.agents.worker_messages
+    def worker(command):
+        if command['action']=='recover':
+            # Real recover_stream constructs TurnState without a new submission;
+            # its public snapshot therefore has submission_started=False.
+            saved=deepcopy(service.snapshot(command['session_id']))
+            saved['submission_started']=False
+            yield dict(type='result',**saved)
+        else: yield from original(command)
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    list(model.reconnect())
+    assert model._pending_upload_paths==tuple(paths)
+    assert [record.input_id for record in model._input_stager.snapshot()]==pending_ids
+
+
+def test_direct_next_predict_confirms_and_clears_its_own_files(env,tmp_path,monkeypatch):
+    model,paths,service,calls=staged(env,tmp_path,monkeypatch,('notes.txt',))
+    submit(env,model,'First turn',paths)
+    assert model._draft_acknowledged
+    model.stage_input_files(paths)
+    list(env.wrappers['predict'](model,'Direct second turn',model.chatbot,files=paths,request=request()))
+    assert model._draft_acknowledged and not model._pending_upload_paths
+    assert len([call for call in calls if call['action']=='run'])==2

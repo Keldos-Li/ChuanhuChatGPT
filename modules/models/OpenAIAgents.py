@@ -461,7 +461,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 # Any turn can edit earlier sandbox files, including uploads
                 # whose own message was cancelled before submission.
                 self._input_stager.mark_submitted(self._installed_inputs)
-        if getattr(self, '_draft_submitted', False) and message.get('turn_id'):
+        if getattr(self, '_draft_submitted', False) and not getattr(self, '_draft_acknowledged', False) and message.get('turn_id'):
             self._draft_acknowledged = True
             self._clear_input_selection()
             self._input_context = None
@@ -602,6 +602,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self.history.extend([{'role': 'user', 'content': display_input}, {'role': 'assistant', 'content': ''}])
             self._answer_index, self._answer_row = len(self.history) - 1, len(self._display) - 1
             self._running = True
+            self._draft_submitted = self._draft_acknowledged = False
             self._cancel_requested = self._cancel_sent = False
             self._notice = ''
             command = {'action': 'run', 'prompt': inputs, 'model': self.model_name, 'reasoning': self._reasoning,
