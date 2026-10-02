@@ -29,7 +29,7 @@ class OfflineLocale:
     def __init__(self, root, language='zh_CN'):
         self.language = language
         self.tables = {lang: self.flatten(json.loads((root/'locale'/(lang+'.json')).read_text()))
-                       for lang in ('zh_CN','en_US')}
+                       for lang in sorted(path.stem for path in (root/'locale').glob('*.json'))}
     @staticmethod
     def flatten(tree, prefix=''):
         result = {}
