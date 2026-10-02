@@ -7,8 +7,8 @@ import gradio as gr
 import pytest
 from gradio.state_holder import SessionState
 from modules.model_capabilities import ModelCapabilities, AGENT_CAPABILITIES, CapabilityUI, capabilities, require_capability, reserve_submission
-from modules.agent_ui import ArtifactPanel
-from test_agent_model import env, select, send, complete, request
+from modules.agent.ui import ArtifactPanel
+from agent_fixtures import env, select, send, complete, request
 
 
 def test_agent_declares_all_unsupported_controls_and_independent_outputs(env):

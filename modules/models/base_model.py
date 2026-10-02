@@ -1111,6 +1111,7 @@ class BaseLLMModel:
             saved_json["chatbot"] = saved_json["chatbot"]
             logging.debug(f"{self.user_name} 加载对话历史完毕")
             self.history = saved_json["history"]
+            self.system_prompt = saved_json.get("system", self.system_prompt)
             self.single_turn = saved_json.get("single_turn", self.single_turn)
             self.temperature = saved_json.get("temperature", self.temperature)
             self.top_p = saved_json.get("top_p", self.top_p)

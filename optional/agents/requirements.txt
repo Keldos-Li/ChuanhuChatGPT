@@ -1,3 +1,0 @@
-# Compatibility install entry point; use the existing project environment.
-# The main requirements.txt installs this same SDK for ordinary chat and Agent.
-openai==3.22.0

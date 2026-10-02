@@ -114,7 +114,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     ordinary.OpenAIVisionClient = OrdinaryModel
     sys.modules[ordinary.__name__] = ordinary
     sys.modules.pop('modules.models.OpenAIAgents', None)
-    transport = importlib.import_module('modules.agent_transport')
+    transport = importlib.import_module('modules.agent.transport')
     transport.ROOT = root
     agents = importlib.import_module('modules.models.OpenAIAgents')
     agents.connection_for_model = lambda **kwargs: {'api_key': 'offline-fixture-only', 'base_url': 'https://offline.invalid/v1', 'organization': '', 'project': '', 'proxy_env': {}}

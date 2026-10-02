@@ -4,7 +4,8 @@ import json
 import socket
 import sys
 import types
-from typing import Any, Annotated, Literal, Required, NotRequired, Union, get_args, get_origin, get_type_hints
+from typing import Any, Annotated, Literal, Union, get_args, get_origin, get_type_hints
+from typing_extensions import Required, NotRequired
 import openai
 from openai._utils import maybe_transform
 from openai.types.beta.agents.session_create_params import SessionCreateParamsStreaming

@@ -81,7 +81,7 @@ function addChuanhuButton(botElement) {
     
     // if (!rawMessage && !mdMessage) {
     //     // 现在动态更新会导致 svelte.js 的 flush 出错，所以生成时不更新
-    //     if (chatbotIndicator.classList.contains('generating')) return;
+    //     if (chatbotIndicator.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
 
     //     // convertBotMessage(gradioButtonMsg);
     //     rawMessage = botElement.querySelector('.raw-message');
@@ -104,7 +104,7 @@ function addChuanhuButton(botElement) {
     addGeneratingLoader(botElement);
     
     // 改成生成时不添加按钮好了……
-    if (chatbotIndicator.classList.contains('generating')) return;
+    if (chatbotIndicator.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
 
 
 
@@ -218,7 +218,7 @@ function setLatestMessage() {
             message.querySelector('.generating-loader')?.remove();
         }
     });
-    if (chatbotIndicator.classList.contains('generating')) return;
+    if (chatbotIndicator.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
     if (latestMessage) addLatestMessageButtons(latestMessage);
 }
 

@@ -19,7 +19,7 @@ from gradio.components.chatbot import ChatbotData, FileMessage
 from gradio.data_classes import FileData
 from gradio_client import utils as client_utils
 from offline_models import OfflineLocale, install
-from modules.agent_ui import AgentPanel
+from modules.agent.ui import AgentPanel
 from modules.model_capabilities import CapabilityUI
 
 
@@ -37,6 +37,8 @@ def build(language='zh_CN', hide_my_key=True):
         folder=fixtures/index;folder.mkdir();(folder/'same.txt').write_text('Different synthetic content '+index)
     print('Synthetic input fixtures:',fixtures)
     env=install(ROOT,temporary/'history',language,presets)
+    presets.HISTORY_DIR = str(temporary/'history')
+    from modules.history_selection import load_history_model
     import modules.webui as webui
     webui.get_html = lambda filename: (ROOT/"web_assets"/"html"/filename).read_text()
     utility_source = ast.parse((ROOT/'modules/utils.py').read_text())
@@ -56,7 +58,7 @@ def build(language='zh_CN', hide_my_key=True):
         layout.append(node)
     namespace={name:getattr(presets,name) for name in dir(presets) if not name.startswith('__')}
     namespace.update(env.wrappers)
-    namespace.update(AgentPanel=AgentPanel,CapabilityUI=CapabilityUI,gr=gr,change_model=env.factory.change_model,CONCURRENT_COUNT=2,
+    namespace.update(load_history_model=load_history_model,AgentPanel=AgentPanel,CapabilityUI=CapabilityUI,gr=gr,change_model=env.factory.change_model,CONCURRENT_COUNT=2,
         config=SimpleNamespace(user_avatar=None,bot_avatar=None,http_proxy='',api_host='api.openai.com'),
         my_api_key='',HIDE_MY_KEY=hide_my_key,multi_api_key=False,check_update=False,show_api_billing=False,
         hide_history_when_not_logged_in=False,advance_docs={'pdf':{}},chat_name_method_index=0,latex_delimiters_set=[],

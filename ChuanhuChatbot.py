@@ -6,7 +6,8 @@ logging.basicConfig(
 )
 
 from modules.models.models import get_model, change_model
-from modules.agent_ui import AgentPanel
+from modules.history_selection import load_history_model
+from modules.agent.ui import AgentPanel
 from modules.model_capabilities import CapabilityUI
 from modules.train_func import *
 from modules.repo import *
@@ -592,10 +593,10 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
 
     load_history_from_file_args = dict(
-        fn=load_chat_history,
+        fn=load_history_model,
         js='(...args) => { window.chuanhuAgentPendingDraft = null; return args; }',
         inputs=[current_model, historySelectList],
-        outputs=[saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn],
+        outputs=[current_model, model_select_dropdown, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, lora_select_dropdown, user_api_key, keyTxt, modelDescription, status_display],
     )
 
     refresh_history_args = dict(
@@ -824,9 +825,9 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         js='(a)=>{return bgChangeOnlineSearch(a);}'
     )
     historySelectBtn.click(  # This is an experimental feature... Not actually used.
-        fn=load_chat_history,
+        fn=load_history_model,
         inputs=[current_model, historySelectList],
-        outputs=[saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn],
+        outputs=[current_model, model_select_dropdown, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, lora_select_dropdown, user_api_key, keyTxt, modelDescription, status_display],
         js='(a,b)=>{return bgSelectHistory(a,b);}'
     )
 # 默认开启本地服务器，默认可以直接从IP访问，默认不创建公开分享链接

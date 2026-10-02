@@ -102,12 +102,13 @@ class CapabilityUI:
             update={'visible': supported and self._visible[component._id]}
             if not supported and clear is not None: update['value']=clear
             results.append(gr.update(**update))
-        payload=dict(asdict(caps), busy=is_busy(model))
+        payload=dict(asdict(caps), busy=is_busy(model), turn_terminal=caps.agent_tools and getattr(model, '_state', {}).get('outcome') in ('completed', 'cancelled', 'failed') and not is_busy(model))
         payload['input_target'] = getattr(model, '_conversation_id', '') if caps.sandbox_attachments else ''
         if caps.sandbox_attachments and getattr(model, '_draft_acknowledged', False) and getattr(model, '_draft_token', None):
             payload['submitted_draft'] = {'token': model._draft_token, 'conversation': model._draft_conversation, 'text': model._draft_text}
         if caps.agent_tools and getattr(model, '_tool_ui_patch', None): payload['tool_patch'] = model._tool_ui_patch
-        results.extend([gr.update(interactive=not is_busy(model)),
+        provider_locked = caps.agent_tools and bool(getattr(model, '_state', {}).get('session_id'))
+        results.extend([gr.update(interactive=not is_busy(model) and not provider_locked),
             '<span data-model-capabilities="'+html.escape(json.dumps(payload),quote=True)+'"></span>'])
         if self.submit is not None and self.cancel is not None:
             remote_running = getattr(model, '_state', {}).get('outcome') in ('starting','in_progress','requires_action','cancel_requested','incomplete','uncertain')

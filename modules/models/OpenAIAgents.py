@@ -1,6 +1,7 @@
 """A durable Agent session in the existing ChuanhuChat conversation surface."""
 from copy import deepcopy
 import hashlib
+import logging
 import json
 import re
 from pathlib import Path
@@ -10,12 +11,12 @@ from uuid import uuid4
 
 import gradio as gr
 from modules import shared
-from modules.agent_transport import worker_messages, connection_for_model
-from modules.agent_store import BindingStore, owner_identity
+from modules.agent.transport import worker_messages, connection_for_model
+from modules.agent.store import BindingStore, owner_identity
 from modules.model_capabilities import AGENT_CAPABILITIES, require_capability
-from modules.agent_settings import load_settings
-from modules.agent_input_state import AgentInputState, InputPreparationStopped
-from optional.agents.tools import validate_settings, tool_availability
+from modules.agent.settings import load_settings
+from modules.agent.input_state import AgentInputState, InputPreparationStopped
+from modules.agent.tools import validate_settings, tool_availability
 from modules.presets import i18n
 from .base_model import BaseLLMModel, HISTORY_DIR
 
@@ -118,7 +119,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         return connection_for_model(api_key=self._connection_key, api_host=self.api_host)
 
     def _connection_reference(self):
-        from optional.agents.connection import AgentConnectionError
+        from modules.agent.connection import AgentConnectionError
         try:
             connection = self._connection()
             return {key: connection.get(key) for key in ('base_url', 'organization', 'project')}
@@ -196,13 +197,19 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self.record_ui_error(record.get('error') or '文件获取失败，可重试', ('artifact', record.get('id'), record.get('error')), operation=operation)
 
     def _worker(self, command):
-        from optional.agents.connection import AgentConnectionError
+        from modules.agent.connection import AgentConnectionError
         try:
             connection = self._connection()
         except AgentConnectionError as error:
             yield {'type': 'error', 'outcome': 'not_started', 'message': str(error)}
             return
-        wire = dict(command, connection=connection)
+        wire = dict(command, connection=connection, owner=self.user_name)
+        if command.get('action') in ('run', 'recover', 'recover_unknown', 'download'):
+            generation = self._state.get('generation')
+            wire['_observe_cancel'] = lambda: self._retired or self._state.get('generation') != generation
+        if 'skip_artifact_ids' not in wire:
+            wire['skip_artifact_ids'] = [record['id'] for record in self._artifacts
+                                         if record.get('status') == 'ready' and Path(record.get('path', '')).is_file()]
         try:
             yield from worker_messages(wire)
         finally:
@@ -296,7 +303,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def prepare_model_switch(self):
         with self._lock: self._assert_idle(); self._clear_input_selection(); self._remember()
     def retire(self):
-        with self._lock: self._retired = True
+        with self._lock:
+            self._retired = True
+            self._release_input_stager()
     def billing_info(self): return ''
     def set_key(self, new_key):
         with self._lock:
@@ -510,17 +519,20 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self.complete_error_operation(operation, source='stop')
         return self._status()
 
-    def _sync_items(self, items):
-        # Only server message items belong in conversational history. Tool output
-        # and browser authentication values never get copied to text bubbles.
+    @staticmethod
+    def _message_items(items):
         unique = {}
         for item in items:
             if not isinstance(item, dict) or not isinstance(item.get('id'), str): continue
             if item.get('type') != 'message' or item.get('role') not in ('user', 'assistant'): continue
             content = '\n'.join(part['text'] for part in item.get('content', []) if isinstance(part, dict) and part.get('type') in ('input_text', 'output_text', 'text') and isinstance(part.get('text'), str))
-            unique[item['id']] = {'id': item['id'], 'role': item['role'], 'content': content, 'turn_id': item.get('turn_id')}
-        self._cloud_items = list(unique.values())
-        self.history = [{'role': item['role'], 'content': self._project_input_text(item['content']) if item['role']=='user' else item['content']} for item in self._cloud_items]
+            unique[item['id']] = {'id': item['id'], 'role': item['role'], 'content': content, 'turn_id': item.get('turn_id'), 'phase': item.get('phase')}
+        return list(unique.values())
+
+    def _sync_items(self, items):
+        self._cloud_items = self._message_items(items)
+        from modules.agent.message_files import group_turn_messages
+        self.history = [{'role': item['role'], 'content': self._project_input_text(item['content']) if item['role']=='user' else item['content']} for item in group_turn_messages(self._cloud_items)]
         if not self._cloud_items and self._input_seed_reference is not None:
             # The empty session was created only to prepare files. These local
             # references have not been sent yet and must survive reconnect.
@@ -552,12 +564,17 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._draft_acknowledged = True
             self._clear_input_selection()
             self._input_context = None
+            self._release_input_stager()
         outcome = message.get('outcome')
         if outcome and (not self._cancel_requested or outcome in TERMINAL): self._state['outcome'] = outcome
         if (message.get('sync_complete') or message.get('history_authoritative')) and isinstance(message.get('items'), list):
             self._sync_items(message['items'])
             if message.get('sync_complete'): self._needs_sync = False
         elif self._answer_index is not None and 'text' in message:
+            if isinstance(message.get('items'), list):
+                known = {item['id']: item for item in self._cloud_items}
+                known.update((item['id'], item) for item in self._message_items(message['items']))
+                self._cloud_items = list(known.values())
             self.history[self._answer_index]['content'] = str(message['text'])
             self._display[self._answer_row][1] = self.history[self._answer_index]['content']
         if message.get('sync_complete') is False:
@@ -572,13 +589,28 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self.model_name = agent.get('model', self.model_name)
             self._reasoning = normalize_reasoning((agent.get('reasoning') or {}).get('effort'))
             self._session_settings.update(model=self.model_name, reasoning=self._reasoning)
+        if isinstance(message.get('artifacts'), list):
+            self._merge_artifacts(message['artifacts'])
         self._record_message_error(message, operation=error_operation)
         self._remember()
         return True
 
+    def _merge_artifacts(self, records):
+        records = deepcopy(records)
+        root = Path(tempfile.gettempdir()).resolve()
+        for record in records:
+            if record.get('status') != 'ready': continue
+            path = Path(record.get('path', ''))
+            if path.is_symlink() or not path.is_file() or not ((root in path.resolve().parents and any(parent.name.startswith('chuanhu-agent-artifacts-') for parent in path.parents)) or (Path(shared.chuanhu_path).resolve() / 'agent_data' / 'artifacts' / hashlib.sha256(self.user_name.encode()).hexdigest()) in path.resolve().parents):
+                record.update(status='failed', error='文件缓存校验失败，请重新获取')
+                record.pop('path', None)
+        previous = {record['id']: record for record in self._artifacts}
+        previous.update((record['id'], record) for record in records if isinstance(record.get('id'), str))
+        self._artifacts = list(previous.values())
+
     def _download(self, generation, artifact_ids=None, *, error_operation=None):
-        first = True
-        for message in self._worker({'action': 'download', 'session_id': self._state['session_id'], 'artifact_ids': artifact_ids}):
+        ready_ids = [record['id'] for record in self._artifacts if record.get('status') == 'ready' and record.get('path') and Path(record['path']).is_file()]
+        for message in self._worker({'action': 'download', 'session_id': self._state['session_id'], 'artifact_ids': artifact_ids, 'skip_artifact_ids': ready_ids if artifact_ids is None else []}):
             if message.get('type') == 'error':
                 with self._lock:
                     if self._retired or self._state.get('generation') != generation: return
@@ -592,18 +624,16 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             for record in records:
                 if record.get('status') != 'ready': continue
                 path = Path(record.get('path', ''))
-                if path.is_symlink() or not path.is_file() or root not in path.resolve().parents or not any(parent.name.startswith('chuanhu-agent-artifacts-') for parent in path.parents):
+                if path.is_symlink() or not path.is_file() or not ((root in path.resolve().parents and any(parent.name.startswith('chuanhu-agent-artifacts-') for parent in path.parents)) or (Path(shared.chuanhu_path).resolve() / 'agent_data' / 'artifacts' / hashlib.sha256(self.user_name.encode()).hexdigest()) in path.resolve().parents):
                     record.update(status='failed', error='文件缓存校验失败，请重新获取')
                     record.pop('path', None)
             with self._lock:
                 if self._state.get('generation') != generation or self._retired: return
                 previous = {record['id']: record for record in self._artifacts}
-                if first and artifact_ids is None: previous = {}
                 previous.update((record['id'], record) for record in records)
                 self._record_message_error(dict(message, artifacts=records), operation=error_operation)
                 self._artifacts = list(previous.values())
                 self._remember()
-                first = False
             yield deepcopy(self._display), self._status()
 
     def retry_artifact(self, artifact_id, *, error_operation=None):
@@ -655,7 +685,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             return deepcopy(self._display), self._status()
 
     def predict(self, inputs, chatbot, use_websearch=False, files=None, reply_language=None, should_check_token_count=True):
-        from modules.agent_message_files import decode_rows
+        from modules.agent.message_files import decode_rows
         chatbot = decode_rows(chatbot, self._conversation_id)
         if not self._owner: raise gr.Error('需要在当前登录会话中发送')
         input_records = self._take_input_files(files)
@@ -718,7 +748,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 command.update(model=self.model_name, reasoning=self._reasoning)
                 command['session_id'] = self._state.get('session_id')
                 if installed_inputs:
-                    from optional.agents.runtime import format_input_text
+                    from modules.agent.runtime import format_input_text
                     command['input_files'] = installed_inputs
                     self._remember_input_message(format_input_text(inputs, reference, installed_inputs), display_input)
                 started = True
@@ -733,8 +763,24 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         terminal = self._state.get('outcome') in TERMINAL
                         self._notice = detail
                     elif message.get('type') == 'result': terminal = self._state.get('outcome') in TERMINAL
+                    if self._state.get('outcome') in TERMINAL:
+                        terminal = True
+                        # 先持久化完整回答，再允许新一轮或切换历史，避免旧生成器丢失最后一帧。
+                        self.chatbot = deepcopy(self._display)
+                        self.auto_save(self.chatbot)
+                        answer = self._display[self._answer_row][1] if self._answer_row is not None else ''
+                        if answer and getattr(self, '_logged_generation', None) != generation:
+                            logging.info('回答为：%s', answer)
+                            self._logged_generation = generation
+                        self._running = False
+                        with _bindings_lock:
+                            if _session_locks.get(reservation) is self: _session_locks.pop(reservation, None)
+                            input_reservation = getattr(self, '_input_session_reservation', None)
+                            if input_reservation is not None and _session_locks.get(input_reservation) is self: _session_locks.pop(input_reservation, None)
+                            self._input_session_reservation = None
                 if self._cancel_requested: self._cancel(generation, error_operation=getattr(self, '_predict_error_operation', None) or generation, error_source=None)
                 yield deepcopy(self._display), self._status(detail)
+            if self._state.get('generation') != generation: return
             if self._state.get('outcome') in ('completed', 'cancelled', 'failed') and self._state.get('session_id'):
                 yield from self._download(generation)
                 yield deepcopy(self._display), self._status()
@@ -894,7 +940,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         yield  # Keep the ordinary model protocol, without a regenerate action.
 
     def export_markdown(self, filename, chatbot):
-        from modules.agent_message_files import decode_rows
+        from modules.agent.message_files import decode_rows
         return super().export_markdown(filename, decode_rows(chatbot, self._conversation_id))
 
     def respond_browser(self, request_id, response):

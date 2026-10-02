@@ -6,12 +6,14 @@
     window.chuanhuSupports = capability => snapshot[capability] !== false;
     window.chuanhuInputTarget = () => snapshot.sandbox_attachments === true ? '#agent-upload-files' : '#upload-index-file';
     window.chuanhuInputBusy = () => snapshot.busy === true;
+    window.chuanhuTurnTerminal = () => snapshot.turn_terminal === true;
     window.chuanhuInputConversation = () => snapshot.input_target || '';
     function apply() {
         queued = false;
         const app = root();
         const marker = app.querySelector('#model-capability-state [data-model-capabilities]');
         if (!marker) return;
+        const wasTerminal = snapshot.turn_terminal === true;
         try { snapshot = JSON.parse(marker.dataset.modelCapabilities); } catch (_) { return; }
         const chatArea = app.querySelector("#chatbot-area");
         if (chatArea && chatArea.classList.contains("agent-mode") !== (snapshot.agent_tools === true)) {
@@ -36,6 +38,7 @@
         const more = app.querySelector('#chatbot-input-more-btn-div');
         const hasMore = ['input_attachments','knowledge','single_turn','external_websearch'].some(window.chuanhuSupports);
         if (more && more.hidden === hasMore) more.hidden = !hasMore;
+        if (!wasTerminal && snapshot.turn_terminal === true && typeof setLatestMessage === 'function') setLatestMessage();
         window.chuanhuRefreshSendButton?.();
         window.chuanhuRefreshArtifactCards?.();
         window.chuanhuClearSubmittedDraft?.(snapshot.submitted_draft);

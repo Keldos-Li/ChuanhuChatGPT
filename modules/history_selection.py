@@ -1,0 +1,76 @@
+"""按已保存的模型选择打开历史，不把历史文件当作凭据来源。"""
+import json
+from pathlib import Path
+
+import gradio as gr
+
+from modules.model_capabilities import is_busy, model_lock
+
+
+def load_history_model(current_model, filename, request: gr.Request = None):
+    """显式切换历史可以离开 Agent；普通模型下拉切换仍受会话锁约束。"""
+    from modules import shared
+    from modules.presets import HISTORY_DIR, MODEL_METADATA
+    from modules.models.models import get_model
+    from modules.agent.store import BindingStore, owner_identity
+
+    with model_lock(current_model):
+        if request is not None:
+            username = request.username or ''
+            if current_model.user_name != username:
+                raise gr.Error('只能读取当前登录用户的聊天历史')
+            if getattr(current_model, 'is_hosted_agent', False):
+                current_model.bind_owner(request)
+        else:
+            username = current_model.user_name
+        if is_busy(current_model):
+            raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
+        root = (Path(HISTORY_DIR) / username).resolve()
+        chosen = Path(filename)
+        if not chosen.is_absolute():
+            chosen = root / chosen
+        if chosen.suffix != '.json':
+            chosen = Path(str(chosen) + '.json')
+        if chosen.is_symlink() or chosen.resolve().parent != root:
+            raise gr.Error('只能读取当前登录用户的聊天历史')
+        try:
+            saved = json.loads(chosen.read_text(encoding='utf-8'))
+            if not isinstance(saved, dict) or not isinstance(saved['history'], list) or not isinstance(saved['chatbot'], list):
+                raise ValueError
+        except (OSError, ValueError, KeyError):
+            raise gr.Error('历史记录无法读取或格式无效') from None
+
+        selection = saved.get('model_selection')
+        if selection is None:
+            # 旧版 Agent JSON 只记录子模型，绑定库才是会话身份的可信来源。
+            database = Path(shared.chuanhu_path) / 'agent_data' / 'bindings.sqlite3'
+            binding = BindingStore(shared.chuanhu_path).get(owner_identity(username), chosen.stem) if database.is_file() else None
+            if binding:
+                selection = 'OpenAI Agent'
+            else:
+                previous = saved.get('model_name')
+                selection = previous if previous in MODEL_METADATA else next(
+                    (name for name, metadata in MODEL_METADATA.items() if metadata.get('model_name') == previous),
+                    getattr(current_model, '_selection_name', current_model.model_name) if previous is None else None)
+        if selection not in MODEL_METADATA:
+            raise gr.Error('历史记录使用的模型当前不可用，请先恢复该模型配置')
+
+        current_selection = getattr(current_model, '_selection_name', current_model.model_name)
+        model = current_model
+        header = (gr.update(),) * 5
+        if selection != current_selection:
+            # 不转交另一个服务商的密钥，也不从 JSON 恢复密钥或连接地址。
+            created = get_model(selection, user_name=username, request=request)
+            model = created[0]
+            if model is None:
+                raise gr.Error('历史记录使用的模型无法初始化')
+            header = (created[3], created[4], created[5], created[6], created[1])
+        values = list(model.load_chat_history(chosen.name))
+        values[2] = dict(values[2], label=selection)
+        if model is not current_model:
+            if getattr(current_model, 'is_hosted_agent', False):
+                current_model._remember()
+                current_model.retire()
+            else:
+                current_model._chat_retired = True
+        return (model, gr.update(value=selection), *values, *header)

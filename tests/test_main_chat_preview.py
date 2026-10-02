@@ -56,7 +56,7 @@ async def exercise():
             if getattr(current, 'is_hosted_agent', False):
                 for component, value in zip(app.fns[index].outputs, result['data']):
                     if getattr(component, 'elem_id', None) == 'status-display':
-                        assert value in ('', None), (name, value)
+                        assert value in ('', None) or value == {'__type__': 'update'}, (name, value)
             assert len({component._id for component in app.fns[index].outputs}) == len(app.fns[index].outputs)
             if name == 'predict_with_ui':
                 frame = result['data'][0]
@@ -91,10 +91,10 @@ async def exercise():
         assert any(choice[0] == 'Ordinary  title' for choice in title[0]['choices'])
         reset = await call('reset', [None, False])
         assert reset[0] == [] and model.history == []
-        restored = await call('load_chat_history', [None, saved[:-5]])
+        restored = await call('load_history_model', [None, saved[:-5]])
         assert model.chatbot[0][0] == 'Ordinary: title!'
-        assert 'class="user-message"' in restored[2]['value'][0][0]
-        assert 'class="raw-message hideM"' in restored[2]['value'][0][1]
+        assert 'class="user-message"' in restored[4]['value'][0][0]
+        assert 'class="raw-message hideM"' in restored[4]['value'][0][1]
 
         await call('change_model', ['OpenAI Agent', None, '', 1, 1, 'QA', '', None])
         model = state[current_id]
@@ -112,7 +112,7 @@ async def exercise():
         assert len(model._artifacts) == 3
         await call('reset', [None, False])
         assert not model._state.get('session_id') and not model._artifacts
-        await call('load_chat_history', [None, saved.removesuffix('.json')])
+        await call('load_history_model', [None, saved.removesuffix('.json')])
         assert model._state['session_id'] == session
         await call('observe_history', [None])
         assert len(model._artifacts) == 3

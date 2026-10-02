@@ -11,9 +11,9 @@ import tempfile
 import time
 from types import SimpleNamespace
 from uuid import uuid4
-from optional.agents.tools import submit_browser_response
-from optional.agents.runtime import format_input_text
-from modules.agent_input_files import read_snapshot_file
+from modules.agent.tools import submit_browser_response
+from modules.agent.runtime import format_input_text
+from modules.agent.input_files import read_snapshot_file
 
 
 class MainChatMock:

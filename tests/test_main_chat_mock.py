@@ -1,7 +1,7 @@
 """The browser QA fixture itself must implement the contracts being exercised."""
 import json
 from main_chat_mock import MainChatMock
-from optional.agents.tools import validate_settings
+from modules.agent.tools import validate_settings
 
 
 def run(service,prompt='hello',session=None):
