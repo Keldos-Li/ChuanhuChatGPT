@@ -29,8 +29,9 @@ def test_extension_normalization_palette_and_safe_bounded_icon(name, extension, 
     if extension and len(extension) <= 5:
         assert label.text == extension
         assert label.get('fill') == 'currentColor' and label.get('stroke') == 'none'
+        assert label.get('font-size') == ('4' if len(extension) >= 4 else '5')
         if len(extension) >= 4:
-            assert label.get('textLength') == '14'
+            assert label.get('textLength') == '10'
     else:
         assert label is None
     assert icon.find('.//svg').get('fill') == 'none'

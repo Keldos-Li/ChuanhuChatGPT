@@ -43,8 +43,8 @@ def file_icon(name, *, input_card=False):
     extension = file_extension(name)
     kind = _EXTENSION_KIND.get(extension.lower(), 'unknown')
     layout = 'agent-input-icon' if input_card else 'model-file-icon'
-    label = ('<text x="12" y="17.5" text-anchor="middle" stroke="none" fill="currentColor" font-size="5.5" font-weight="600"'
-             + (' textLength="14" lengthAdjust="spacingAndGlyphs"' if len(extension) >= 4 else '')
+    label = ('<text x="12" y="17.5" text-anchor="middle" stroke="none" fill="currentColor" font-size="' + ('4' if len(extension) >= 4 else '5') + '" font-weight="600"'
+             + (' textLength="10" lengthAdjust="spacingAndGlyphs"' if len(extension) >= 4 else '')
              + '>' + html.escape(extension) + '</text>') if extension and len(extension) <= 5 else ''
     # Fixed markup and palette key; no filename is interpolated as HTML or CSS.
     return ('<span class="' + layout + ' agent-file-icon" data-file-kind="' + kind + '" aria-hidden="true">'
