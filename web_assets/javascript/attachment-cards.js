@@ -22,7 +22,7 @@
             if (holder._signature !== signature) {
                 holder.replaceChildren(); holder._signature = signature;
                 for (const file of files) {
-                    const card = document.createElement('div'); card.className = 'agent-input-card';
+                    const card = document.createElement('div'); card.className = 'agent-input-card agent-file-card--mini';
                     const extension = file.extension || 'FILE';
                     // Same escaped server renderer as sent user and bot cards.
                     const icon = document.createElement('template'); icon.innerHTML = file.icon;

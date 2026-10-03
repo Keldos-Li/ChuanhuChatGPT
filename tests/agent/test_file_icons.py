@@ -61,12 +61,17 @@ def test_composer_user_and_bot_use_identical_icon_renderer_and_escape_names():
     projection = MessageFileProjection([['hello', 'answer']], {}, {}, set(), 'chat',
         _original_rows=[['hello', 'answer']], user_files={0:[{'name':name, 'size':12}]})
     user = render_projection(projection, lambda text:text, lambda text:text)[0][0]
-    assert pending['icon'] in user
+    assert file_icon(name) in user
+    assert 'agent-input-card agent-file-card' in user
     assert 'name&quot;&lt;&amp;.CsV' in user
     assert '>name&quot;&lt;&amp;</span>' in user
-    assert '<span class="agent-input-meta">CSV · 12 字节</span>' in user
+    assert '<span class="agent-input-meta" data-file-part="meta">CSV · 12 字节</span>' in user
     bot = ArtifactPanel.values(model)[1]['value']
     assert file_icon(name) in bot
+    assert 'model-file-card agent-file-card' in bot
+    for part in ('content', 'name', 'basename', 'meta'):
+        assert f'data-file-part="{part}"' in user
+        assert f'data-file-part="{part}"' in bot
     assert 'name&quot;&lt;&amp;.CsV' in bot
     assert '<span class="model-file-extension">CSV</span> · <span class="model-file-size">12 字节</span>' in bot
 
@@ -89,4 +94,4 @@ def test_pending_and_user_titles_share_compound_suffix_rules_and_keep_full_hint(
     projection = MessageFileProjection([['hello', 'answer']], {}, {}, set(), 'chat',
         _original_rows=[['hello', 'answer']], user_files={0:[{'name':name, 'size':12}]})
     user = render_projection(projection, lambda text:text, lambda text:text)[0][0]
-    assert f'title="{name}">{basename}</span>' in user
+    assert f'title="{name}"><span data-file-part="basename">{basename}</span>' in user
