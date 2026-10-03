@@ -1,4 +1,5 @@
 """Shared, escaped file presentation for composer, user and assistant cards."""
+import html
 
 
 def split_filename(name):
@@ -42,8 +43,11 @@ def file_icon(name, *, input_card=False):
     extension = file_extension(name)
     kind = _EXTENSION_KIND.get(extension.lower(), 'unknown')
     layout = 'agent-input-icon' if input_card else 'model-file-icon'
+    label = ('<text x="12" y="17.5" text-anchor="middle" stroke="none" fill="currentColor" font-size="5.5" font-weight="600"'
+             + (' textLength="14" lengthAdjust="spacingAndGlyphs"' if len(extension) >= 4 else '')
+             + '>' + html.escape(extension) + '</text>') if extension and len(extension) <= 5 else ''
     # Fixed markup and palette key; no filename is interpolated as HTML or CSS.
     return ('<span class="' + layout + ' agent-file-icon" data-file-kind="' + kind + '" aria-hidden="true">'
-            '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
-            '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9H13z"/>'
-            '<path d="M13 2l7 7" fill="none"/></svg></span>')
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9H13z" fill="currentColor" fill-opacity="0.14"/>'
+            '<path d="M13 2l7 7" fill="none"/>' + label + '</svg></span>')

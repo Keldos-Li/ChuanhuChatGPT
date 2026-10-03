@@ -13,7 +13,8 @@ from modules.model_capabilities import AGENT_CAPABILITIES
 
 
 @pytest.mark.parametrize('name,extension,kind', [
-    ('report.PdF', 'PDF', 'pdf'), ('table.CsV', 'CSV', 'sheet'),
+    ('report.PdF', 'PDF', 'pdf'), ('table.CsV', 'CSV', 'sheet'), ('report.DOCX', 'DOCX', 'document'),
+    ('file.xyz', 'XYZ', 'unknown'), ('file.abcde', 'ABCDE', 'unknown'), ('file.<&', '<&', 'unknown'),
     ('bundle.TAR.GZ', 'TAR.GZ', 'archive'), ('types.d.TS', 'D.TS', 'code'),
     ('photo.JPG', 'JPG', 'image'), ('notes.txt', 'TXT', 'text'),
     ('README', '', 'unknown'), ('.env', '', 'unknown'), ('trailing.', '', 'unknown'),
@@ -24,8 +25,17 @@ def test_extension_normalization_palette_and_safe_bounded_icon(name, extension, 
     assert file_extension(name) == extension
     icon = ET.fromstring(file_icon(name))
     assert icon.get('data-file-kind') == kind
-    assert icon.find('.//text') is None
-    assert icon.find('.//svg').get('fill') == 'currentColor'
+    label = icon.find('.//text')
+    if extension and len(extension) <= 5:
+        assert label.text == extension
+        assert label.get('fill') == 'currentColor' and label.get('stroke') == 'none'
+        if len(extension) >= 4:
+            assert label.get('textLength') == '14'
+    else:
+        assert label is None
+    assert icon.find('.//svg').get('fill') == 'none'
+    assert icon.find('.//path').get('fill') == 'currentColor'
+    assert float(icon.find('.//path').get('fill-opacity')) == .14
     assert icon.find('.//path').get('d').endswith('V9H13z')
     assert icon.findall('.//path')[1].get('fill') == 'none'
     assert file_type_label(name) == ((extension or 'FILE')[:5] + ('…' if len(extension) > 5 else ''))
