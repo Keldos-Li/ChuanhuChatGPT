@@ -3,7 +3,10 @@
     let snapshot = {};
     let queued = false;
     const root = () => typeof gradioApp === 'function' ? gradioApp() : document;
-    window.chuanhuSupports = capability => snapshot[capability] !== false;
+    // Mutation actions require an explicit capability, including during initial load.
+    const explicitActions = new Set(['regenerate', 'history_delete']);
+    window.chuanhuSupports = capability => explicitActions.has(capability)
+        ? snapshot[capability] === true : snapshot[capability] !== false;
     window.chuanhuInputTarget = () => snapshot.sandbox_attachments === true ? '#agent-upload-files' : '#upload-index-file';
     window.chuanhuInputBusy = () => snapshot.busy === true;
     window.chuanhuTurnTerminal = () => snapshot.turn_terminal === true;

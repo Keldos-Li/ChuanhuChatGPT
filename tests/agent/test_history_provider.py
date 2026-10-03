@@ -144,3 +144,42 @@ def test_terminal_history_navigation_saves_and_preserves_old_reply(env, monkeypa
     list(iterator)
     assert restored.history==before
     assert any(item.get('content')=='Completed answer' for item in json.loads(path.read_text())['history'])
+
+
+@pytest.mark.parametrize('name', ['GPT3.5 Turbo', 'OpenAI Agent'])
+def test_new_chat_lists_saved_history_only_and_first_send_saves_reserved_path(env, monkeypatch, name):
+    from modules.history_selection import load_history_model
+    monkeypatch.setattr(env.presets, 'HISTORY_DIR', str(env.history_dir), raising=False)
+    complete(env, monkeypatch)
+    model = select(env, name=name)
+    send(env, model, 'Saved conversation')
+    saved = model.history_file_path
+    old_chat = [list(row) for row in model.chatbot]
+    reset = model.reset()
+    reserved = model.history_file_path
+    selector = reset[2]
+    assert selector.value is None
+    choices = [choice[0] for choice in selector.choices]
+    assert saved.removesuffix('.json') in choices
+    assert reserved.removesuffix('.json') not in choices
+    assert not (env.history_dir / reserved).exists()
+    send(env, model, 'First new message')
+    assert model.history_file_path == reserved
+    assert (env.history_dir / reserved).is_file()
+    from modules.models import base_model
+    assert reserved.removesuffix('.json') in base_model.get_history_names(model.user_name)
+    restored = load_history_model(model, saved, request())[0]
+    assert restored.chatbot == old_chat
+
+
+@pytest.mark.parametrize('contents', ['{broken json', '{}', '{"history": [], "chatbot": "invalid"}'])
+def test_invalid_saved_history_remains_an_error_after_reset(env, monkeypatch, contents):
+    from modules.history_selection import load_history_model
+    monkeypatch.setattr(env.presets, 'HISTORY_DIR', str(env.history_dir), raising=False)
+    model = select(env, name='GPT3.5 Turbo')
+    model.reset()
+    (env.history_dir / 'broken.json').write_text(contents)
+    with pytest.raises(Exception, match='历史记录无法读取或格式无效'):
+        load_history_model(model, 'broken', request())
+    with pytest.raises(Exception, match='历史记录无法读取或格式无效'):
+        load_history_model(model, 'missing', request())

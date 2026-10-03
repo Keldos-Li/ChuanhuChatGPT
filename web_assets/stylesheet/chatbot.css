@@ -56,6 +56,13 @@ hr.append-display {
     padding: 0 4px;
 }
 
+/* Gradio 4.29 animates opacity on .generating even when show_progress is
+   hidden. Remove only explicitly hidden generation overlays from display. */
+.gradio-container .wrap.hidden.generating {
+    display: none !important;
+    animation: none !important;
+}
+
 /* 阻止generating时的border */
 #chuanhu-chatbot > .wrap {
     border: none !important;

@@ -923,10 +923,8 @@ class BaseLLMModel:
         self.all_token_counts = []
         self.interrupted = False
         self.history_file_path = new_auto_history_filename(self.user_name)
-        history_name = self.history_file_path[:-5]
+        # Keep the reserved save path private until a history file exists.
         choices = get_history_names(self.user_name)
-        if history_name not in choices:
-            choices.insert(0, history_name)
         system_prompt = self.system_prompt if remain_system_prompt else INITIAL_SYSTEM_PROMPT
 
         self.single_turn = self.default_single_turn
@@ -944,7 +942,7 @@ class BaseLLMModel:
         return (
             [],
             self.token_message([0]),
-            gr.Radio(choices=choices, value=history_name),
+            gr.Radio(choices=choices, value=None),
             system_prompt,
             self.single_turn,
             self.temperature,

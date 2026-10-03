@@ -177,7 +177,7 @@ function createDOM() {
     return {document, MutationObserver, microtasks, frames, timers, flush};
 }
 
-function fixture({history = 'empty', normal = false, snapshot = payload.initial} = {}) {
+function fixture({history = 'empty', normal = false, snapshot = payload.initial, initialCaps = null} = {}) {
     const dom = createDOM(), {document} = dom, hits = [], copied = [], saved = [];
     const element = (tag, attrs = {}, text = '') => {
         const node = document.createElement(tag);
@@ -224,6 +224,7 @@ function fixture({history = 'empty', normal = false, snapshot = payload.initial}
         setCaps(ordinary ? payload.normalCaps : payload.agentCaps);
     }
     replace(snapshot, normal);
+    if (initialCaps !== null) setCaps(initialCaps);
     const context = vm.createContext({
         document, gradioApp: () => document, chatbotIndicator: indicator,
         MutationObserver: dom.MutationObserver,
@@ -342,6 +343,24 @@ test('file-only bubble gets the hide marker while its separate card remains acti
     f.source.innerHTML = ''; f.dom.flush();
     assert(!row.classList.contains('agent-file-only-message'), 'Removing cards clears stale file-only hiding');
     assert(!row.classList.contains('agent-message-has-files'));
+});
+
+test('message actions stay closed until capabilities arrive, then ordinary actions restore', async () => {
+    const f = fixture({initialCaps: {}}); f.refresh();
+    const row = f.rows().at(-1);
+    for (const className of ['regenerate-btn', 'delete-latest-btn']) {
+        const control = button(f, row, className);
+        assert(control.hidden, 'Unknown capability must not briefly expose ' + className);
+        control.dispatchEvent({type: 'click', bubbles: true});
+    }
+    assert(!f.hits.includes('gr-retry-btn') && !f.hits.includes('gr-dellast-btn'));
+    f.setCaps(payload.agentCaps); f.dom.flush();
+    for (const className of ['regenerate-btn', 'delete-latest-btn']) assert(button(f, row, className).hidden);
+    f.setCaps(payload.normalCaps); f.dom.flush();
+    for (const className of ['regenerate-btn', 'delete-latest-btn']) {
+        assert(!button(f, row, className).hidden); button(f, row, className).click();
+    }
+    assert(f.hits.includes('gr-retry-btn') && f.hits.includes('gr-dellast-btn'));
 });
 
 test('Agent read-only capabilities stay enabled while regeneration and deletion do nothing', async () => {
