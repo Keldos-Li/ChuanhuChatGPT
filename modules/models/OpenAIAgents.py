@@ -207,6 +207,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             yield {'type': 'error', 'outcome': 'not_started', 'message': str(error)}
             return
         wire = dict(command, connection=connection, owner=self.user_name)
+        self._tool_log_key = connection.get('api_key')
         if command.get('action') in ('run', 'recover', 'recover_unknown', 'download'):
             generation = self._state.get('generation')
             wire['_observe_cancel'] = lambda: self._retired or self._state.get('generation') != generation
@@ -579,6 +580,12 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         logged[key] = digest
         self._logged_answers = logged
 
+    def _log_tool_results(self, message, artifacts=()):
+        from modules.agent.tool_logging import ToolLog
+        if not hasattr(self, '_tool_log'):
+            self._tool_log = ToolLog()
+        self._tool_log.observe(self, message, artifacts)
+
     def _accept(self, message, generation, *, restoring=False, error_operation=None):
         if self._retired or self._state.get('generation') != generation: return False
         session = message.get('session_id')
@@ -630,6 +637,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._merge_artifacts(message['artifacts'])
         self._record_message_error(message, operation=error_operation)
         self._log_final_answer(message)
+        self._log_tool_results(message, self._artifacts if 'artifacts' in message else ())
         self._remember()
         return True
 
@@ -685,6 +693,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 previous.update((record['id'], record) for record in records)
                 self._record_message_error(dict(message, artifacts=records), operation=error_operation)
                 self._artifacts = list(previous.values())
+                self._log_tool_results(message, records)
                 self._remember()
             yield deepcopy(self._display), self._status()
 
@@ -796,6 +805,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         started = terminal = False
         update_error = False
         try:
+            from modules.agent.tool_logging import safe_text, known_secrets
+            logging.info('用户%s的输入为：%s', safe_text(self.user_name, 100),
+                         safe_text(inputs, secrets=known_secrets(self)))
             yield deepcopy(self._display), self._status()
             with self._lock:
                 if self._cancel_requested: return
