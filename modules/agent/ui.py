@@ -235,7 +235,7 @@ class AgentPanel:
                 interactive = not (model._running or bool(getattr(model, '_pending_send', None)) or model._needs_sync
                                    or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed'))
             records = model._input_stager.snapshot() if model._input_stager is not None else ()
-            metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records], 'files': [{'id':record.input_id,'name':record.name,'size':record.size,
+            metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records], 'files': [{'id':record.input_id,'name':record.name,'basename':split_filename(record.name)[0],'size':record.size,
                         'extension': file_type_label(record.name), 'size_label': file_size_label(record.size), 'icon': file_icon(record.name, input_card=True)} for record in records]}
             return gr.update(value=list(model._pending_upload_paths), label=json.dumps(metadata), interactive=interactive)
 

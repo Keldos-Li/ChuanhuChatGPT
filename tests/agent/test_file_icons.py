@@ -55,6 +55,7 @@ def test_composer_user_and_bot_use_identical_icon_renderer_and_escape_names():
         _display=[['hello', 'answer']], _cloud_items=[], _state={'session_id':'session', 'turn_id':'turn'}, _answer_row=0)
     pending = json.loads(AgentPanel.input_value(model, interactive=True)['label'])['files'][0]
     assert pending['extension'] == 'CSV'
+    assert pending['basename'] == 'name"<&'
     assert pending['size_label'] == '12 字节'
     assert pending['icon'] == file_icon(name, input_card=True)
     projection = MessageFileProjection([['hello', 'answer']], {}, {}, set(), 'chat',
@@ -62,6 +63,7 @@ def test_composer_user_and_bot_use_identical_icon_renderer_and_escape_names():
     user = render_projection(projection, lambda text:text, lambda text:text)[0][0]
     assert pending['icon'] in user
     assert 'name&quot;&lt;&amp;.CsV' in user
+    assert '>name&quot;&lt;&amp;</span>' in user
     assert '<span class="agent-input-meta">CSV · 12 字节</span>' in user
     bot = ArtifactPanel.values(model)[1]['value']
     assert file_icon(name) in bot
@@ -75,3 +77,16 @@ def test_long_and_missing_extension_metadata_has_one_separator_and_bounded_type(
         meta = file_type_label(name) + ' · ' + file_size_label(1234)
         assert meta == label + ' · 1,234 字节'
         assert meta.count(' · ') == 1
+
+
+@pytest.mark.parametrize('name,basename', [('archive.TAR.GZ', 'archive'), ('definition.d.ts', 'definition'),
+    ('README', 'README'), ('.env', '.env'), ('.config.json', '.config'), ('trailing.', 'trailing.')])
+def test_pending_and_user_titles_share_compound_suffix_rules_and_keep_full_hint(name, basename):
+    model = SimpleNamespace(is_hosted_agent=True, _lock=RLock(), _conversation_id='chat', _pending_upload_paths=[],
+        _input_stager=SimpleNamespace(snapshot=lambda: [SimpleNamespace(input_id='input', name=name, size=12)]))
+    pending = json.loads(AgentPanel.input_value(model, interactive=True)['label'])['files'][0]
+    assert pending['name'] == name and pending['basename'] == basename
+    projection = MessageFileProjection([['hello', 'answer']], {}, {}, set(), 'chat',
+        _original_rows=[['hello', 'answer']], user_files={0:[{'name':name, 'size':12}]})
+    user = render_projection(projection, lambda text:text, lambda text:text)[0][0]
+    assert f'title="{name}">{basename}</span>' in user

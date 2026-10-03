@@ -28,7 +28,7 @@
                     const icon = document.createElement('template'); icon.innerHTML = file.icon;
                     const text = document.createElement('span'); text.className = 'agent-input-card-text';
                     const name = document.createElement('span'); name.className = 'agent-input-name';
-                    name.textContent = file.name; name.title = file.name;
+                    name.textContent = file.basename; name.title = file.name;
                     const meta = document.createElement('span'); meta.className = 'agent-input-meta';
                     meta.textContent = extension + ' · ' + file.size_label;
                     text.append(name, meta);
