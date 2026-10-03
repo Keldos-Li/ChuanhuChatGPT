@@ -13,6 +13,7 @@ import html
 import json
 import re
 from typing import Callable, Dict, List, Set
+from modules.agent.file_icons import file_icon, file_size_label, file_type_label
 
 
 @dataclass
@@ -368,8 +369,9 @@ def render_projection(projection, format_user: Callable[[str], str], format_assi
             if role == 'user' and projection.user_files.get(index):
                 cards = []
                 for file in projection.user_files[index]:
-                    name = str(file.get('name', '附件')); extension = name.rsplit('.', 1)[-1].upper() if '.' in name else 'FILE'
-                    cards.append('<span class="agent-input-card"><span class="agent-input-icon" aria-hidden="true">' + html.escape(extension[:4]) + '</span><span class="agent-input-card-text"><span class="agent-input-name" title="' + html.escape(name, quote=True) + '">' + html.escape(name) + '</span><span class="agent-input-meta">' + html.escape(extension) + '</span></span></span>')
+                    name = str(file.get('name', '附件'))
+                    meta = file_type_label(name) + ' · ' + file_size_label(file.get('size'))
+                    cards.append('<span class="agent-input-card">' + file_icon(name, input_card=True) + '<span class="agent-input-card-text"><span class="agent-input-name" title="' + html.escape(name, quote=True) + '">' + html.escape(name) + '</span><span class="agent-input-meta">' + html.escape(meta) + '</span></span></span>')
                 prefix = '<div class="agent-user-file-source" hidden>' + ''.join(cards) + '</div>' + prefix
             if not isinstance(prefix, str):
                 raise TypeError('message formatters must return strings')

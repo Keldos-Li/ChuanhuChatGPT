@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import gradio as gr
 import pytest
 from modules.agent.ui import AgentPanel, ArtifactPanel, REASONING_CHOICES, split_filename, i18n
+from modules.agent.file_icons import file_type_label
 from agent_fixtures import env, select, send, complete, request
 
 
@@ -27,7 +28,7 @@ def test_single_line_basename_and_extension_size_metadata_preserve_download_iden
     assert label.find('span[@class="model-file-basename"]').text==stem
     assert label.find('span[@class="model-file-extension"]') is None
     meta=card.find('.//span[@class="model-file-meta"]')
-    assert ''.join(meta.itertext())==(suffix[1:]+' · ' if suffix else '')+'1 字节'
+    assert ''.join(meta.itertext())==file_type_label(name)+' · 1 字节'
     assert ArtifactPanel.values(model)[2]['value']==['/tmp/synthetic']
 
 

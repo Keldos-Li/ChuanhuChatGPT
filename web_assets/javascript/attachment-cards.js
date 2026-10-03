@@ -23,20 +23,20 @@
                 holder.replaceChildren(); holder._signature = signature;
                 for (const file of files) {
                     const card = document.createElement('div'); card.className = 'agent-input-card';
-                    const extension = file.name.includes('.') ? file.name.split('.').pop().toUpperCase() : 'FILE';
-                    const icon = document.createElement('span'); icon.className = 'agent-input-icon';
-                    icon.textContent = extension.slice(0, 4); icon.setAttribute('aria-hidden', 'true');
+                    const extension = file.extension || 'FILE';
+                    // Same escaped server renderer as sent user and bot cards.
+                    const icon = document.createElement('template'); icon.innerHTML = file.icon;
                     const text = document.createElement('span'); text.className = 'agent-input-card-text';
                     const name = document.createElement('span'); name.className = 'agent-input-name';
                     name.textContent = file.name; name.title = file.name;
                     const meta = document.createElement('span'); meta.className = 'agent-input-meta';
-                    meta.textContent = extension + (Number.isFinite(file.size) ? ' · ' + (file.size / 1048576).toFixed(2) + ' MB' : '');
+                    meta.textContent = extension + ' · ' + file.size_label;
                     text.append(name, meta);
                     const remove = document.createElement('button'); remove.type = 'button';
                     remove.className = 'agent-input-remove-card'; remove.textContent = '×';
                     remove.setAttribute('aria-label', '移除 ' + file.name);
                     remove.dataset.inputId = file.id; remove.dataset.inputTarget = metadata.target;
-                    card.append(icon, text, remove); holder.append(card);
+                    card.append(icon.content, text, remove); holder.append(card);
                 }
             }
             const busy = window.chuanhuInputBusy?.() || window.chuanhuAgentUploading;

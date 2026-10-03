@@ -8,6 +8,7 @@ from copy import deepcopy
 import gradio as gr
 from modules.agent.tools import FUNCTIONS, tool_availability
 from modules.agent.operations import OperationScope
+from modules.agent.file_icons import file_icon, file_size_label, file_type_label, split_filename
 from modules.model_capabilities import capabilities
 from modules.presets import i18n
 
@@ -21,16 +22,6 @@ REASONING_CHOICES = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ma
 def reasoning_choices():
     return [(i18n('ui.toolbox.agent.' + ('reasoning_default' if value == 'default' else value)), value) for value in REASONING_CHOICES]
 
-
-
-def split_filename(name):
-    """Keep familiar compound extensions intact; a dotfile is not an extension."""
-    compounds = ('.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst', '.tar.lzma', '.tar.lz', '.d.ts')
-    for suffix in compounds:
-        if name.lower().endswith(suffix) and len(name) > len(suffix):
-            return name[:-len(suffix)], name[-len(suffix):]
-    dot = name.rfind('.')
-    return (name[:dot], name[dot:]) if 0 < dot < len(name) - 1 else (name, '')
 
 
 def _agent(model):
@@ -97,7 +88,7 @@ class ArtifactPanel:
         labels = {'preparing': '准备中', 'ready': '', 'failed': '下载失败'}
         for record in records:
             size = record.get('size')
-            size_text = f'{size:,} 字节' if isinstance(size, int) else '大小待确认'
+            size_text = file_size_label(size)
             status = record.get('status', 'preparing')
             action = 'retry' if status == 'failed' else 'download' if status == 'ready' and record.get('path') else ''
             if action == 'download':
@@ -107,12 +98,10 @@ class ArtifactPanel:
             error = ('：' + str(record['error'])) if record.get('error') else ''
             escape = lambda value: html.escape(str(value), quote=True)
             basename, extension = split_filename(record['name'])
-            # Feather's generic file icon, also used by the installed Gradio UI.
-            icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>'
             cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-remote-path="' + escape(record.get('remote_path', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
-                         + '<span class="model-file-icon">' + icon + '</span><span class="model-file-content">'
+                         + file_icon(record['name']) + '<span class="model-file-content">'
                          + '<span class="model-file-name" title="' + escape(record['name']) + '"><span class="model-file-basename">' + escape(basename) + '</span></span>'
-                         + '<span class="model-file-meta">' + ('<span class="model-file-extension">' + escape(extension[1:]) + '</span> · ' if extension else '') + '<span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
+                         + '<span class="model-file-meta"><span class="model-file-extension">' + escape(file_type_label(record['name'])) + '</span> · <span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
                          + '<span class="model-file-error">' + escape(error) + '</span><span class="model-file-feedback" aria-live="polite"></span></span></button>')
         markup = '<div class="model-file-cards" aria-label="生成的文件">' + ''.join(cards) + '</div>' if cards else ''
         # The hidden native label travels with its File value, so the browser
@@ -246,7 +235,8 @@ class AgentPanel:
                 interactive = not (model._running or bool(getattr(model, '_pending_send', None)) or model._needs_sync
                                    or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed'))
             records = model._input_stager.snapshot() if model._input_stager is not None else ()
-            metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records], 'files': [{'id':record.input_id,'name':record.name,'size':record.size} for record in records]}
+            metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records], 'files': [{'id':record.input_id,'name':record.name,'size':record.size,
+                        'extension': file_type_label(record.name), 'size_label': file_size_label(record.size), 'icon': file_icon(record.name, input_card=True)} for record in records]}
             return gr.update(value=list(model._pending_upload_paths), label=json.dumps(metadata), interactive=interactive)
 
     def selectors(self):
