@@ -554,6 +554,31 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._answer_index = len(self.history) - 1 if self.history and self.history[-1]['role'] == 'assistant' else None
         self._answer_row = len(self._display) - 1 if self._answer_index is not None else None
 
+    def _log_final_answer(self, message):
+        if (message.get('type') != 'result' or self._state.get('outcome') not in TERMINAL
+                or not any(key in message for key in ('text', 'items'))):
+            return
+        turn_id = self._state.get('turn_id')
+        if not turn_id:
+            return
+        if isinstance(message.get('items'), list):
+            from modules.agent.message_files import group_turn_messages
+            current_items = [item for item in self._message_items(message['items'])
+                             if item.get('turn_id') == turn_id and item['role'] == 'assistant']
+            answer = '\n\n'.join(item['content'] for item in group_turn_messages(current_items) if item['content'])
+        else:
+            answer = message.get('text', '') if message.get('turn_id') == turn_id else ''
+        if not answer:
+            return
+        key = (self._state.get('session_id'), turn_id)
+        digest = hashlib.sha256(answer.encode()).hexdigest()
+        logged = getattr(self, '_logged_answers', {})
+        if logged.get(key) == digest:
+            return
+        logging.info('回答为：%s', answer)
+        logged[key] = digest
+        self._logged_answers = logged
+
     def _accept(self, message, generation, *, restoring=False, error_operation=None):
         if self._retired or self._state.get('generation') != generation: return False
         session = message.get('session_id')
@@ -604,6 +629,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         if isinstance(message.get('artifacts'), list):
             self._merge_artifacts(message['artifacts'])
         self._record_message_error(message, operation=error_operation)
+        self._log_final_answer(message)
         self._remember()
         return True
 
@@ -803,10 +829,6 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         # 先持久化完整回答，再允许新一轮或切换历史，避免旧生成器丢失最后一帧。
                         self.chatbot = deepcopy(self._display)
                         self.auto_save(self.chatbot)
-                        answer = self._display[self._answer_row][1] if self._answer_row is not None else ''
-                        if answer and getattr(self, '_logged_generation', None) != generation:
-                            logging.info('回答为：%s', answer)
-                            self._logged_generation = generation
                         self._running = False
                         with _bindings_lock:
                             if _session_locks.get(reservation) is self: _session_locks.pop(reservation, None)
