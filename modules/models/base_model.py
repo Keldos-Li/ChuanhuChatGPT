@@ -920,6 +920,7 @@ class BaseLLMModel:
         if getattr(self, '_pending_send', None) or self._chat_running:
             raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
         self.history = []
+        self.chatbot = []
         self.all_token_counts = []
         self.interrupted = False
         self.history_file_path = new_auto_history_filename(self.user_name)
@@ -1133,8 +1134,8 @@ class BaseLLMModel:
             self.stream = saved_json.get("stream", self.stream)
             self.chatbot = saved_json["chatbot"]
 
-            history_json_path = os.path.realpath(os.path.join(HISTORY_DIR, self.user_name, self.history_file_path + ".json"))
-            history_md_path = os.path.realpath(os.path.join(HISTORY_DIR, self.user_name, self.history_file_path + ".md"))
+            history_json_path = os.path.realpath(history_file_path)
+            history_md_path = os.path.splitext(history_json_path)[0] + ".md"
             tmp_json_for_download = save_file_to_cache(history_json_path, GRADIO_CACHE)
             tmp_md_for_download = save_file_to_cache(history_md_path, GRADIO_CACHE)
             return (

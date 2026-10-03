@@ -473,7 +473,9 @@ def test_failed_fork_keeps_original_title_state(env,monkeypatch):
 
 def test_explicit_network_chat_command_keeps_fixed_session_configuration(env,monkeypatch):
     calls,_=complete(env,monkeypatch);model=select(env);send(env,model)
-    before=len(calls);send(env,model,'请关闭联网')
+    before=len(calls)
+    with pytest.raises(gr.Error,match='会话创建后'):
+        send(env,model,'请关闭联网')
     assert len(calls)==before and model._state['session_id']=='sess_test'
     assert model._pending_network is None and model._session_settings['tools']['network'] is True
     assert '已固定' in model._notice

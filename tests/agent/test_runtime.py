@@ -514,3 +514,23 @@ def test_real_worker_entry_accepts_read_only_observation_actions(action,monkeypa
     messages=[json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert called==['client'] and messages[-1]['type']=='result'
     assert messages[-1]['session_id']=='sess_test' and not fake.submitted and not fake.payloads
+
+
+def test_repeated_uncertain_recovery_preserves_baseline_and_submission_receipt():
+    client = FakeClient(events=[], session_status='idle', saved_turn='completed')
+    client.roots = [{'id': 'old', 'subagent_id': None, 'status': 'completed'}]
+    client.saved_items = [message('old_answer', 'Previous answer', turn_id='old')]
+    receipts = []
+    with pytest.raises(runtime.AgentError) as first:
+        runtime.recover_stream(client, 'sess_test', baseline_turn_ids=['old'], submission_started=True,
+                               on_progress=lambda state: receipts.append(state.snapshot()), read_only=True)
+    receipt = first.value.state.snapshot()
+    assert receipt['baseline_turn_ids'] == ['old'] and receipt['submission_started'] is True
+    assert receipts[-1]['baseline_turn_ids'] == ['old'] and receipts[-1]['submission_started'] is True
+    with pytest.raises(runtime.AgentError) as second:
+        runtime.recover_stream(client, receipt['session_id'], receipt['turn_id'],
+                               baseline_turn_ids=receipt['baseline_turn_ids'], submission_started=receipt['submission_started'], read_only=True)
+    again = second.value.state.snapshot()
+    assert again['turn_id'] is None and again['outcome'] == 'incomplete' and again['text'] == ''
+    assert again['baseline_turn_ids'] == ['old'] and again['submission_started'] is True
+    assert not client.submitted

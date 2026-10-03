@@ -115,9 +115,6 @@ presets.MODEL_METADATA = _model_metadata
 
 if "available_models" in config:
     presets.MODELS = list(config["available_models"])
-    if "OpenAI Agent" in presets.MODELS and "川虎助理 Pro" in presets.MODELS:
-        presets.MODELS.remove("OpenAI Agent")
-        presets.MODELS.insert(presets.MODELS.index("川虎助理 Pro") + 1, "OpenAI Agent")
     logging.info(i18n("msg.model.available_set").format(available_models=config["available_models"]))
 
 # 模型配置

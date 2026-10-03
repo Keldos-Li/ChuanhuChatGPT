@@ -420,7 +420,8 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
 
 
 def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, submission_started=False, tool_settings=None, on_progress=None, read_only=False):
-    state = TurnState(session_id, turn_id)
+    state = TurnState(session_id, turn_id, ignored_turn_ids=set(baseline_turn_ids or ()),
+                      submission_started=submission_started)
     try:
         # The stream must be connected before the first history/status request.
         with client.beta.agents.sessions.events.stream(session_id) as stream:

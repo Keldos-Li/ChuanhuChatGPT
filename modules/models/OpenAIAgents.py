@@ -707,6 +707,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._pending_network = None
             if self._state.get('session_id'):
                 self._notice = SESSION_CONFIG_LOCKED
+                raise gr.Error(SESSION_CONFIG_LOCKED)
             else:
                 self._assert_idle()
                 self._tool_settings = validate_settings(dict(self._tool_settings, network=desired))
@@ -781,8 +782,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 command.update(model=self.model_name, reasoning=self._reasoning)
                 command['session_id'] = self._state.get('session_id')
                 if installed_inputs:
-                    from modules.agent.runtime import format_input_text
                     command['input_files'] = installed_inputs
+                if installed_inputs or reference:
+                    from modules.agent.runtime import format_input_text
                     self._remember_input_message(format_input_text(inputs, reference, installed_inputs), display_input, installed_inputs)
                 started = True
                 self._session_settings = settings

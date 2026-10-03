@@ -127,7 +127,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     sys.modules[factory.__name__] = factory
     wrappers = dict(helpers)
     names = {'predict','retry','interrupt','billing_info','reset','load_chat_history','set_system_prompt','handle_file_upload',
-             'start_outputing','end_outputing','transfer_input','reset_textbox','auto_name_chat_history'}
+             'start_outputing','end_outputing','transfer_input','reset_textbox','auto_name_chat_history','upload_chat_history','delete_chat_history'}
     definitions(root/'modules/utils.py', names, wrappers)
     return SimpleNamespace(root=root, presets=presets, base=base, factory=factory, agents=agents,
                            wrappers=wrappers, history_dir=history_dir, locale=locale)

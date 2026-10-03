@@ -1,4 +1,5 @@
 import base64
+import json
 from copy import deepcopy
 import pytest
 
@@ -6,7 +7,7 @@ from modules.agent import inputs, runtime
 from modules.agent.input_files import AgentInputFiles
 from test_inputs_runtime import FakeClient as InputClient
 from test_runtime import FakeClient as TurnClient, turn, text, message
-from agent_fixtures import env, select, request
+from agent_fixtures import env, select, request, send
 from test_input_model import submit
 
 
@@ -178,3 +179,58 @@ def test_original_wrong_actual_copy_path_is_not_accepted(tmp_path):
     assert caught.value.state['outcome'] == 'uncertain'
     assert not caught.value.state['installed']
     store.close()
+
+
+@pytest.mark.parametrize('source', ['switch', 'import'])
+def test_history_reference_without_files_keeps_plain_user_bubble_after_restore(env, tmp_path, monkeypatch, source):
+    model, _, _, _, commands, _ = wired_model(env, tmp_path, monkeypatch)
+    def no_file_worker(command):
+        commands.append(deepcopy(command))
+        if command['action'] == 'run':
+            wire = runtime.format_input_text(command['prompt'], command.get('history_reference'), command.get('input_files'))
+            yield dict(type='result', session_id='sess_test', turn_id='t1', outcome='completed',
+                       sync_complete=True, items=[message('u1', wire, 't1', role='user'), message('a1', 'answer', 't1')])
+        elif command['action'] == 'download':
+            yield dict(type='result', artifacts=[])
+        else:
+            raise AssertionError(command)
+    monkeypatch.setattr(env.agents, 'worker_messages', no_file_worker)
+    reference = [{'role': 'user', 'content': 'old question'},
+                 {'role': 'assistant', 'content': 'old answer'}]
+    if source == 'switch':
+        ordinary = select(env, name='GPT3.5 Turbo')
+        send(env, ordinary, 'old question')
+        reference = deepcopy(ordinary.history)
+        model = select(env, original=ordinary)
+    else:
+        imported = env.history_dir / 'imported.json'
+        imported.write_text(json.dumps({'system': 'ordinary prompt', 'history': reference, 'chatbot': [['old question', 'old answer']]}))
+        imported.with_suffix('.md').write_text('synthetic history')
+        model.load_chat_history(imported.name)
+    send(env, model, 'new question')
+    command = next(c for c in commands if c['action'] == 'run')
+    wire = runtime.format_input_text('new question', reference, [])
+    assert command['history_reference'] == reference and not command.get('input_files')
+    assert wire != 'new question'
+    assert model.history[-2]['content'] == 'new question'
+    assert model.chatbot[-1][0] == 'new question'
+    assert model._project_input_text(wire) == 'new question'
+    model.rename_chat_history('history-seed-display.json')
+    filename = model.history_file_path
+    cloud_items = [message('u1', wire, 't1', role='user'), message('a1', 'answer', 't1')]
+    def recover(command):
+        if command['action'] == 'recover':
+            yield dict(type='result', session_id='sess_test', turn_id='t1', outcome='completed',
+                       sync_complete=True, history_authoritative=True, items=cloud_items, required_actions=[])
+        elif command['action'] == 'download':
+            yield dict(type='result', artifacts=[])
+        else:
+            raise AssertionError(command)
+    monkeypatch.setattr(env.agents, 'worker_messages', recover)
+    restored = select(env)
+    restored.load_chat_history(filename)
+    assert restored.history[-2]['content'] == 'new question'
+    assert restored._input_messages == model._input_messages
+    list(restored.reconnect())
+    assert restored.history[-2]['content'] == 'new question'
+    assert restored.chatbot[-1][0] == 'new question'

@@ -81,3 +81,28 @@ def test_starting_input_request_keeps_draft_and_files_until_a_turn_is_seen(env,t
     model._accept({'session_id':'session','submission_started':True,'turn_id':'new-turn','outcome':'in_progress'},'g')
     assert model._draft_acknowledged and not model._pending_upload_paths
     assert model._input_context is None
+
+
+def test_locked_network_command_preserves_draft_and_emits_visible_error(env, monkeypatch):
+    from agent_fixtures import complete, select, send
+    from modules.model_capabilities import CapabilityUI
+    calls, _ = complete(env, monkeypatch)
+    model = select(env)
+    send(env, model, 'Start synthetic session')
+    count = len(calls)
+    before = [dict(item) for item in model.history]
+    with gr.Blocks(analytics_enabled=False) as app:
+        panel = AgentPanel(); panel.selectors(); panel.output_components(); panel.settings_components(); panel.input_components()
+        cap = CapabilityUI([], gr.Dropdown(), gr.HTML(), gr.Button(), gr.Button()); cap.wire(None, None)
+    try:
+        envelope = panel.wrap_transfer(env.wrappers['transfer_input'])('关闭联网', model, request=request())[0]
+        wrapped = panel.status_callback(panel.wrap_predict(env.wrappers['predict'], cap, compact=True), 1, header=True)
+        list(wrapped(model, envelope, model.chatbot, request=request()))
+        assert not model._draft_submitted and not model._draft_acknowledged
+        assert len(calls) == count and model.history == before
+        assert model._tool_settings['network'] is True
+        assert 'value' not in panel.finish_submission(model, envelope, '关闭联网', request())[0]
+        with pytest.raises(gr.Error, match='会话创建后'):
+            panel.emit_ui_error(model, request())
+    finally:
+        app.close()

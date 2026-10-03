@@ -183,3 +183,48 @@ def test_invalid_saved_history_remains_an_error_after_reset(env, monkeypatch, co
         load_history_model(model, 'broken', request())
     with pytest.raises(Exception, match='历史记录无法读取或格式无效'):
         load_history_model(model, 'missing', request())
+
+
+@pytest.mark.parametrize('name', ['GPT3.5 Turbo', 'OpenAI Agent'])
+@pytest.mark.parametrize('with_suffix', [False, True])
+def test_history_route_and_direct_load_use_real_gradio_cache_without_reset(env, monkeypatch, name, with_suffix):
+    from gradio.processing_utils import save_file_to_cache
+    from modules.history_selection import load_history_model
+    from modules.models import base_model
+    from pathlib import Path
+    monkeypatch.setattr(env.presets, 'HISTORY_DIR', str(env.history_dir), raising=False)
+    monkeypatch.setattr(base_model, 'save_file_to_cache', save_file_to_cache)
+    complete(env, monkeypatch)
+    model = select(env, name=name)
+    send(env, model, 'Saved ordinary or Agent conversation')
+    saved = model.history_file_path
+    json_path = env.history_dir / saved
+    md_path = json_path.with_suffix('.md')
+    expected_json, expected_md = json_path.read_bytes(), md_path.read_bytes()
+    expected_chat = [list(row) for row in model.chatbot]
+    identifier = saved if with_suffix else saved.removesuffix('.json')
+    direct = model.load_chat_history(identifier)
+    assert model.chatbot == expected_chat and model.history
+    assert direct[2]['value'] == expected_chat
+    for button, content, original in zip(direct[-2:], (expected_json, expected_md), (json_path, md_path)):
+        cached = Path(button.value['path'] if isinstance(button.value, dict) else button.value)
+        assert cached.is_file() and cached != original
+        assert cached.read_bytes() == content
+    routed = load_history_model(model, identifier, request())
+    restored = routed[0]
+    assert restored.history and restored.chatbot == expected_chat
+    assert routed[4]['value'] == expected_chat
+    for button, content, original in zip(routed[17:19], (expected_json, expected_md), (json_path, md_path)):
+        cached = Path(button.value['path'] if isinstance(button.value, dict) else button.value)
+        assert cached.is_file() and cached != original
+        assert cached.read_bytes() == content
+
+
+def test_ordinary_reset_then_agent_switch_cannot_restore_old_bubbles(env):
+    ordinary = select(env, name='GPT3.5 Turbo')
+    send(env, ordinary, 'Old synthetic question')
+    assert ordinary.chatbot
+    ordinary.reset()
+    agent = select(env, ordinary)
+    assert ordinary.chatbot == []
+    assert agent.history == [] and agent.chatbot == [] and agent._display == []

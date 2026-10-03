@@ -84,7 +84,7 @@ def build(language='zh_CN', hide_my_key=True):
     # Exact actual event-chain source, no substitute dropdown or chat callbacks.
     event_prefixes=('cancelBtn.click(', 'user_input.submit(', 'submitBtn.click(',
                     'retryBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(',
-                    'emptyBtn.click(', 'historySelectList.select(')
+                    'emptyBtn.click(', 'historySelectList.select(', 'uploadHistoryBtn.upload(', 'historyDeleteBtn.click(')
     events=[node for node in block.body
             if (isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id.endswith('_args') for target in node.targets))
             or (isinstance(node,ast.Expr) and ast.unparse(node).startswith(event_prefixes))]

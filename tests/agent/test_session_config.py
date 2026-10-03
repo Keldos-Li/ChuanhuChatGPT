@@ -103,7 +103,8 @@ def test_first_send_preparation_failure_locks_configuration_after_submission(env
         model.stage_agent_tools(dict(model._tool_settings, network=True), 1, model._conversation_id)
     with pytest.raises(gr.Error, match='会话创建后'):
         model.freeze_agent_configuration(snapshot['tools'], 'Different instructions', 1, model._conversation_id)
-    model._network_request('开启联网')
+    with pytest.raises(gr.Error, match='会话创建后'):
+        model._network_request('开启联网')
     assert model._pending_network is None
     assert model._session_settings == snapshot
     assert model._store().get(model._owner, model.history_file_path)['settings'] == snapshot
@@ -119,12 +120,12 @@ def test_network_commands_only_explain_locked_session_without_fork_state(env, mo
     previous = (deepcopy(model.history), deepcopy(model._state), deepcopy(model._session_settings))
     count = len(calls)
     model._pending_network = False  # Clear obsolete pending state from the earlier workflow.
-    output = send(env, model, command)
+    with pytest.raises(gr.Error, match='会话创建后'):
+        send(env, model, command)
     assert len(calls) == count
     assert (model.history, model._state, model._session_settings) == previous
     assert model._pending_network is None and model._fork_previous is None
-    assert env.agents.SESSION_CONFIG_LOCKED in output[-1][1]
-    assert '按新配置新建并继续' not in output[-1][1]
+    assert model._notice == env.agents.SESSION_CONFIG_LOCKED
 
 
 def test_network_commands_configure_new_chat_without_creating_session(env):

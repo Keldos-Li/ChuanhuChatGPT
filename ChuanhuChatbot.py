@@ -728,15 +728,15 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
     )
     historyRefreshBtn.click(**refresh_history_args)
     historyDeleteBtn.click(delete_chat_history, [current_model, historySelectList], [status_display, historySelectList, chatbot], js='(a,b,c)=>{return showConfirmationDialog(a, b, c);}').then(
-        reset,
+        agent_panel.status_callback(reset, 1, header=True),
         inputs=[current_model, retain_system_prompt_checkbox],
-        outputs=[chatbot, status_display, historySelectList, systemPromptTxt],
-        show_progress=True,
+        outputs=[chatbot, status_display, historySelectList, systemPromptTxt, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, agent_panel.activity],
+        show_progress='hidden',
         js='(a,b)=>{return clearChatbot(a,b);}',
-    )
+    ).then(agent_panel.values, [current_model], agent_panel.outputs, show_progress='hidden').then(agent_panel.chat_value, [current_model], [chatbot], show_progress='hidden').then(capability_ui.values, [current_model], capability_ui.outputs, show_progress='hidden')
     historySelectList.select(**load_history_from_file_args).then(agent_panel.values, [current_model], agent_panel.outputs, show_progress='hidden').then(agent_panel.chat_value, [current_model], [chatbot], show_progress='hidden').then(capability_ui.values, [current_model], capability_ui.outputs, show_progress='hidden').then(agent_panel.observe_history, [current_model], agent_panel.history_outputs, queue=True, concurrency_limit=None, show_progress='hidden').then(agent_panel.history_boundary_values(capability_ui), [current_model], [*agent_panel.outputs, *capability_ui.outputs], show_progress='hidden').then(agent_panel.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
     uploadHistoryBtn.upload(upload_chat_history, [current_model, uploadHistoryBtn], [
-                        saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList]).then(**refresh_history_args)
+                        saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList]).then(**refresh_history_args).then(agent_panel.values, [current_model], agent_panel.outputs, show_progress='hidden').then(agent_panel.chat_value, [current_model], [chatbot], show_progress='hidden').then(capability_ui.values, [current_model], capability_ui.outputs, show_progress='hidden')
     historySearchTextbox.input(
         filter_history,
         [user_name, historySearchTextbox],
