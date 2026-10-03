@@ -114,7 +114,22 @@ async def exercise():
         assert not model._state.get('session_id') and not model._artifacts
         await call('load_history_model', [None, saved.removesuffix('.json')])
         assert model._state['session_id'] == session
+        assert model._needs_sync
+        boundary=app.fns[functions['values_at_boundary']]
+        choices=[component for component in boundary.outputs if isinstance(component,gr.Dropdown) and component.value in ('gpt-6.1-sol','default')]
+        assert len(choices)==2
+        await call('values_at_boundary',[None])
+        assert all(state.blocks_config.blocks[component._id].interactive is False for component in choices)
         await call('observe_history', [None])
+        assert not model._needs_sync
+        await call('history_values_at_boundary',[None])
+        assert all(state.blocks_config.blocks[component._id].interactive is True for component in choices)
+        assert model.agent_model_choice[0]=='gpt-6.1-sol'
+        # 三个真实历史进入链都仅在同步结束后更新一次完整控制边界。
+        for observer_index in [i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='observe_history']:
+            follow=next(i for i,dep in enumerate(config['dependencies']) if dep['trigger_after']==observer_index)
+            assert app.fns[follow].fn.__name__=='history_values_at_boundary'
+            assert config['dependencies'][follow]['show_progress']=='hidden'
         assert len(model._artifacts) == 3
         assert model.chatbot[-1][0] == 'files'
         # The browser's actual new-settings flow must reconcile the provisional
@@ -144,7 +159,8 @@ async def exercise():
         assert model._pending_upload_paths
         await call('transfer_input',['',None])
         await call('predict_with_ui',[None,None,[],False,[],'English',data])
-        assert 'synthetic.csv' in model.chatbot[0][0]
+        from modules.agent.ui import message_file_projection
+        assert message_file_projection(model).user_files[0][0]['name'] == 'synthetic.csv'
         assert '/workspace/inputs/' not in model.chatbot[0][0] and not model._pending_upload_paths
 
         # Empty native Files become read-only while the real main generator
@@ -162,8 +178,8 @@ async def exercise():
         outputs = {getattr(component, 'elem_id', None): value
                    for component, value in zip(app.fns[predict_index].outputs, frame['data'])}
         assert outputs['status-display'] in ('', None)
-        assert outputs['agent-upload-files']['interactive'] is False
-        assert outputs['agent-pending-files']['interactive'] is False
+        assert state.blocks_config.blocks[app.fns[predict_index].outputs[next(i for i,c in enumerate(app.fns[predict_index].outputs) if getattr(c,'elem_id',None)=='agent-upload-files')]._id].interactive is False
+        assert state.blocks_config.blocks[app.fns[predict_index].outputs[next(i for i,c in enumerate(app.fns[predict_index].outputs) if getattr(c,'elem_id',None)=='agent-pending-files')]._id].interactive is False
         deny_index = [i for i, fn in enumerate(app.fns)
                       if fn.fn and fn.fn.__name__ == 'respond'][1]
         assert app.config['dependencies'][deny_index]['queue'] is False
@@ -177,10 +193,10 @@ async def exercise():
         assert '未访问网站' in model.chatbot[-1][1]
         # The exhausted generator returns Gradio's FINISHED/None placeholders;
         # use the actual live projection to inspect the terminal component state.
-        completed = await call('live_values', [None])
+        panel_values = next(i for i, fn in enumerate(app.fns) if fn.fn and fn.fn.__name__ == 'values' and any(getattr(c, 'elem_id', None) == 'agent-pending-files' for c in fn.outputs))
+        completed = (await app.process_api(panel_values, [None], state=state, request=request))['data']
         outputs = {getattr(component, 'elem_id', None): value
-                   for component, value in zip(app.fns[functions['live_values']].outputs, completed)}
-        assert outputs['agent-activity-feedback']['visible'] is False
+                   for component, value in zip(app.fns[panel_values].outputs, completed)}
         assert outputs['agent-upload-files']['interactive'] is True
         assert outputs['agent-pending-files']['interactive'] is True
     finally:

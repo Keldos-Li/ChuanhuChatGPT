@@ -27,7 +27,7 @@ def test_sidebar_translations_and_internal_values(language):
         assert [value for label, value in panel.reasoning.choices] == REASONING_CHOICES
         assert [value for label, value in panel.search_mode.choices] == ['live', 'cached', 'disabled']
         assert panel.reasoning.value == 'default' and panel.search_mode.value == 'live'
-        assert panel.model.value == 'gpt-6-astra'
+        assert panel.model.value == 'gpt-6.1-sol'
         assert panel.discovery.visible is False and panel.programmatic.visible is False
         app.close()
     finally:

@@ -458,12 +458,14 @@ def update_settings(client, session_id, model, reasoning):
     except Exception as error: raise _error(error) from None
 
 
-def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), on_progress=None, cache_root=None, should_cancel=None, live=False):
+def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), on_progress=None, cache_root=None, should_cancel=None, live=False, on_metadata=None):
     """发布文件进度；缓存按不可变文件身份复用，忙碌下载留给下一次观察。"""
     from contextlib import nullcontext
     from modules.agent.artifact_cache import ArtifactCache, ArtifactBusy
     try: artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100))
     except Exception as error: raise _error(error) from None
+    if on_metadata:
+        on_metadata([{'id':a['id'],'session_id':session_id,'turn_id':a.get('turn_id'), 'remote_path':a.get('path') or a.get('filename')} for a in artifacts])
     artifacts = [artifact for artifact in artifacts if (artifact_ids is None or artifact.get('id') in artifact_ids) and artifact.get('id') not in skip_artifact_ids]
     if not artifacts:
         if cache_root is not None:
@@ -474,7 +476,7 @@ def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_i
     for artifact in artifacts:
         name = Path(str(artifact.get('path') or artifact.get('filename') or 'artifact')).name
         name = re.sub(r'[\x00-\x1f/\\]', '_', name).lstrip('.') or 'artifact'
-        records.append({'id': artifact['id'], 'session_id': session_id, 'turn_id': artifact.get('turn_id'), 'name': name,
+        records.append({'id': artifact['id'], 'session_id': session_id, 'turn_id': artifact.get('turn_id'), 'name': name, 'remote_path': artifact.get('path') or artifact.get('filename'),
                         'type': artifact.get('mime_type') or mimetypes.guess_type(name)[0] or 'application/octet-stream',
                         'size': artifact.get('size_bytes'), 'status': 'preparing'})
     if on_progress: on_progress(deepcopy(records))

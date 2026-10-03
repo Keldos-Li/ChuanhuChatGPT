@@ -59,6 +59,7 @@ function createDOM(readyState = 'complete') {
         }
         setAttribute(name, value) {this.attributes.set(name, String(value)); notify(this, 'attributes');}
         getAttribute(name) {return this.attributes.get(name) ?? null;}
+        removeAttribute(name) {this.attributes.delete(name);}
         get className() {return this.attributes.get('class') || '';}
         set className(value) {this.setAttribute('class', value);}
         get disabled() {return this.attributes.has('disabled');}
@@ -148,7 +149,7 @@ function createDOM(readyState = 'complete') {
             for (const node of chain) {for (const handler of node.listeners.get(event.type) || []) handler(event); if (!event.bubbles) break;}
             return true;
         }
-        click() {if (!this.disabled) this.dispatchEvent({type: 'click', bubbles: true});}
+        click() {if (!this.disabled) this.dispatchEvent({type: 'click', bubbles: true, preventDefault() {this.defaultPrevented = true;}});}
     }
     const document = new Element('document');
     document.readyState = readyState;
@@ -412,6 +413,62 @@ test('DOMContentLoaded defers mounting, then later source and chat renders are o
     f.document.dispatchEvent({type: 'DOMContentLoaded'}); f.dom.flush(); assert.deepEqual(ids(f.owned(row)), ['file']);
     f.cards.remove(); f.dom.flush(); assert.equal(f.holders().length, 0);
     f.app.append(f.cards); f.dom.flush(); assert.deepEqual(ids(f.owned(row)), ['file']);
+});
+
+function bodyLink(f,row,href) {
+    const md=f.document.createElement('div');md.className='md-message';
+    const link=f.document.createElement('a');link.setAttribute('href',href);link.setAttribute('target','_blank');link.textContent='download';
+    md.append(link);row.append(md);return link;
+}
+
+test('body file links match full path and current reply without guessing same basename',()=>{
+    const f=fixture({activeConversation:'conversation'});const a=f.row('a'),b=f.row('b');
+    const ca=f.card('file-a','a'),cb=f.card('file-b','b');
+    ca.dataset.remotePath='/workspace/outputs/a/same.txt';cb.dataset.remotePath='/workspace/outputs/b/same.txt';
+    const good=bodyLink(f,b,'sandbox:/workspace/outputs/b/same.txt');
+    const wrong=bodyLink(f,b,'/workspace/outputs/a/same.txt');
+    const outside=bodyLink(f,b,'https://example.com/workspace/outputs/b/same.txt');
+    f.chat.append(a,b);f.cards.append(ca,cb);f.nativeFiles(['file-a','file-b']);f.start();
+    good.click();assert.deepEqual(f.hits,['file:file-b']);
+    assert.equal(good.dataset.artifactId,'file-b');assert.equal(good.getAttribute('target'),null);
+    wrong.click();assert.deepEqual(f.hits,['file:file-b']);
+    assert.match(wrong.nextElementSibling.textContent,/未发布或已过期/);
+    assert.equal(outside.getAttribute('href'),'https://example.com/workspace/outputs/b/same.txt');
+    assert.equal(outside.dataset.agentFileLink,undefined);
+});
+
+test('encoded, relative and artifact identities resolve but traversal and ambiguous paths do not',()=>{
+    const f=fixture({activeConversation:'conversation'});const row=f.row('r');
+    const card=f.card('owned','r');card.dataset.remotePath='/workspace/outputs/中文.txt';
+    const encoded=bodyLink(f,row,'sandbox:/workspace/outputs/%E4%B8%AD%E6%96%87.txt');
+    const relative=bodyLink(f,row,'outputs/中文.txt');const identity=bodyLink(f,row,'artifact://owned');
+    const unsafe=bodyLink(f,row,'/workspace/outputs/../中文.txt');
+    f.chat.append(row);f.cards.append(card);f.nativeFiles(['owned']);f.start();
+    for(const link of [encoded,relative,identity]){link.click();assert.equal(link.dataset.artifactId,'owned');}
+    assert.deepEqual(f.hits,['file:owned','file:owned','file:owned']);assert.equal(unsafe.dataset.agentFileLink,undefined);
+    const duplicate=f.card('second','r');duplicate.dataset.remotePath=card.dataset.remotePath;
+    f.cards.append(duplicate);f.dom.flush();encoded.click();assert.equal(encoded.dataset.artifactId,'');
+    assert.equal(f.hits.length,3);
+});
+
+test('body link dispatches retry and rejects a stale conversation after navigation',()=>{
+    const f=fixture({activeConversation:'conversation'});const row=f.row('r');const card=f.card('failed','r','conversation','failed');
+    card.dataset.remotePath='/mnt/data/result.txt';const link=bodyLink(f,row,'/mnt/data/result.txt');
+    f.chat.append(row);f.cards.append(card);f.start();link.click();f.dom.flush();
+    assert.deepEqual(f.hits,['input:failed','retry:failed']);
+    f.setActiveConversation('next');link.click();assert.equal(f.hits.length,2);
+    assert.match(link.nextElementSibling.textContent,/未发布或已过期/);
+});
+
+test('body pending feedback disappears when its owned file becomes ready',()=>{
+    const f=fixture({activeConversation:'conversation'});const row=f.row('r');
+    const pending=f.card('owned','r','conversation','preparing');pending.dataset.remotePath='/workspace/outputs/result.txt';
+    const link=bodyLink(f,row,'/workspace/outputs/result.txt');f.chat.append(row);f.cards.append(pending);f.start();
+    link.click();f.dom.flush();assert.match(link.nextElementSibling.textContent,/正在准备/);
+    const ready=f.card('owned','r');ready.dataset.remotePath=pending.dataset.remotePath;
+    f.cards.replaceChildren(ready);f.nativeFiles(['owned']);f.dom.flush();
+    assert(!link.nextElementSibling?.classList.contains('agent-link-feedback'));
+    link.click();assert.deepEqual(f.hits,['file:owned']);
 });
 
 console.log(`Artifact cards: ${passed} passed, ${failed} failed`);

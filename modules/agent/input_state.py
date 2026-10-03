@@ -234,8 +234,10 @@ class AgentInputState:
             return dict(previous, outcome='uncertain', generation=context['run_id'], submission_started=False)
         return previous
 
-    def _remember_input_message(self, wire_text, display_text):
-        self._input_messages[hashlib.sha256(wire_text.encode()).hexdigest()] = display_text
+    def _remember_input_message(self, wire_text, display_text, files=()):
+        self._input_messages[hashlib.sha256(wire_text.encode()).hexdigest()] = {'text': display_text,
+            'files': [{'id':item['input_id'],'name':item['name'],'size':item.get('size')} for item in files]}
 
     def _project_input_text(self, text):
-        return self._input_messages.get(hashlib.sha256(text.encode()).hexdigest(), text)
+        value = self._input_messages.get(hashlib.sha256(text.encode()).hexdigest(), text)
+        return value.get('text', text) if isinstance(value, dict) else value

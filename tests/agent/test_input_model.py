@@ -35,7 +35,9 @@ def test_first_file_only_and_existing_session_file_inputs(env,tmp_path,monkeypat
     assert [c['action'] for c in calls]==['prepare_inputs','run','download']
     assert calls[1]['session_id']==session and calls[1]['input_files'][0]['name']=='one.txt'
     assert len(model.history)==2 and '/workspace/' not in model.chatbot[0][0]
-    assert 'one.txt' in model.chatbot[0][0] and not model._pending_upload_paths
+    assert model.chatbot[0][0] == '请查看上传的附件。' and not model._pending_upload_paths
+    from modules.agent.ui import message_file_projection
+    assert message_file_projection(model).user_files[0][0]['name'] == 'one.txt'
     model.stage_input_files(paths);submit(env,model,'read again',paths)
     assert model._state['session_id']==session
     assert len(service.sessions[session]['inputs'])==2
@@ -103,7 +105,9 @@ def test_history_reference_survives_precreated_file_session(env,tmp_path,monkeyp
     submit(env,model,'use context',paths)
     assert calls[1]['history_reference']==[{'role':'user','content':'old question'},{'role':'assistant','content':'old answer'}]
     assert 'old answer' in service.sessions[model._state['session_id']]['items'][0]['content'][0]['text']
-    assert model.chatbot[0][0]=='use context\n\n附件：one.txt'
+    assert model.chatbot[0][0]=='use context'
+    from modules.agent.ui import message_file_projection
+    assert message_file_projection(model).user_files[0][0]['name'] == 'one.txt'
 
 
 def test_late_upload_completion_cannot_attach_to_a_reset_conversation(env,tmp_path,monkeypatch):

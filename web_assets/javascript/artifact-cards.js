@@ -2,6 +2,42 @@
 (function () {
     const root = () => typeof gradioApp === 'function' ? gradioApp() : document;
     let scheduled = false;
+    // 只匹配同一消息的服务端文件身份和完整远端路径，不按文件名猜测。
+    function fileReference(value) {
+        if (typeof value !== 'string' || /^(?:https?:|\/\/|#)/i.test(value)) return null;
+        try { value = decodeURIComponent(value); } catch (_) { return null; }
+        if (/[\\\x00-\x1f]/.test(value) || value.split('/').includes('..')) return null;
+        if (/^artifact:(?:\/\/)?/.test(value)) return {id: value.replace(/^artifact:(?:\/\/)?/, '')};
+        value = value.replace(/^sandbox:/, '');
+        if (/^\/(?:workspace|mnt\/data)\//.test(value)) return {path: value};
+        if (/^(?:workspace|mnt\/data)\//.test(value)) return {path: '/' + value};
+        if (/^(?:outputs|artifacts)\//.test(value)) return {path: '/workspace/' + value};
+        return null;
+    }
+    function mountLinks(chat, groups) {
+        for (const row of chat.querySelectorAll('.message-row.bot-row')) {
+            const anchor = row.querySelector('.agent-message-anchor');
+            if (!anchor) continue;
+            const cards = groups.get(anchor.dataset.conversationId + ':' + anchor.dataset.messageKey)?.cards || [];
+            for (const link of row.querySelectorAll('.md-message a[href]')) {
+                const original = link._agentFileHref || link.getAttribute('href');
+                const reference = fileReference(original);
+                if (!reference) continue;
+                link._agentFileHref = original;
+                const matches = cards.filter(card => reference.id ? card.dataset.artifactId === reference.id
+                    : fileReference(card.dataset.remotePath)?.path === reference.path);
+                link.dataset.agentFileLink = 'true';
+                link.dataset.artifactId = matches.length === 1 ? matches[0].dataset.artifactId : '';
+                link.dataset.messageKey = anchor.dataset.messageKey;
+                link.dataset.conversationId = anchor.dataset.conversationId;
+                link.setAttribute('href', '#');
+                link.removeAttribute('target');
+                link.title = matches.length === 1 ? '获取此回复生成的文件' : '文件未发布或已过期，请重新连接后重试';
+                if (matches.length === 1 && !matches[0].disabled && link.nextElementSibling?.classList.contains('agent-link-feedback'))
+                    link.nextElementSibling.remove();
+            }
+        }
+    }
     function mountCards() {
         scheduled = false;
         const app = root();
@@ -49,6 +85,7 @@
                 row.classList.remove('agent-message-has-files');
             }
         }
+        mountLinks(chat, groups);
     }
     function scheduleMount() {
         if (!scheduled) { scheduled = true; queueMicrotask(mountCards); }
@@ -58,6 +95,25 @@
     function start() { observer.observe(document.documentElement, {childList:true, subtree:true, characterData:true}); mountCards(); }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
     document.addEventListener('click', event => {
+        const link = (event.composedPath ? event.composedPath() : [event.target])
+            .find(node => node?.matches?.('a[data-agent-file-link]'));
+        if (link) {
+            event.preventDefault();
+            const cards = Array.from(root().querySelectorAll('#model-output-cards .model-file-card'));
+            const card = cards.find(node => node.dataset.artifactId === link.dataset.artifactId
+                && node.dataset.messageKey === link.dataset.messageKey && node.dataset.conversationId === link.dataset.conversationId
+                && node.dataset.conversationId === globalThis.chuanhuInputConversation?.());
+            if (card && !card.disabled) card.click();
+            else {
+                let feedback = link.nextElementSibling;
+                if (!feedback?.classList.contains('agent-link-feedback')) {
+                    feedback = document.createElement('span'); feedback.className = 'agent-link-feedback';
+                    feedback.setAttribute('aria-live', 'polite'); link.after(feedback);
+                }
+                feedback.textContent = card ? '（文件正在准备，请稍后重试）' : '（文件未发布或已过期，请重新连接后重试）';
+            }
+            return;
+        }
         const card = (event.composedPath ? event.composedPath() : [event.target])
             .find(node => node?.matches?.('.model-file-card'));
         if (!card || card.disabled) return;

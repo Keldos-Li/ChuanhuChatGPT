@@ -92,6 +92,14 @@ class CapabilityUI:
         self.submit, self.cancel = submit, cancel
         self.outputs = [component for _,component,_ in bindings] + [selector,marker] + ([submit,cancel] if submit is not None and cancel is not None else [])
 
+    @property
+    def stream_outputs(self):
+        return [self.selector, self.marker] + ([self.submit, self.cancel] if self.submit is not None and self.cancel is not None else [])
+
+    def stream_values(self, model):
+        values = self.values(model)
+        return [values[self.outputs.index(component)] for component in self.stream_outputs]
+
     def values(self, model):
         caps = capabilities(model)
         results=[]
@@ -118,4 +126,3 @@ class CapabilityUI:
 
     def wire(self, current_model, chatbot):
         self._visible = {component._id:component.visible for _,component,_ in self.bindings}
-        chatbot.change(self.values,[current_model],self.outputs,queue=False,show_progress=False)

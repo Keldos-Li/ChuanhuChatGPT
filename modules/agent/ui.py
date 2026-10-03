@@ -7,6 +7,7 @@ from uuid import uuid4
 from copy import deepcopy
 import gradio as gr
 from modules.agent.tools import FUNCTIONS, tool_availability
+from modules.agent.operations import OperationScope
 from modules.model_capabilities import capabilities
 from modules.presets import i18n
 
@@ -40,7 +41,8 @@ def message_file_projection(model, rows=None):
     from modules.agent.message_files import project_message_files
     return project_message_files(deepcopy(model._display if rows is None else rows), model._cloud_items, model._artifacts,
         session_id=model._state.get('session_id'), conversation_id=model._conversation_id,
-        current_turn_id=model._state.get('turn_id'), answer_row=model._answer_row)
+        current_turn_id=model._state.get('turn_id'), answer_row=model._answer_row, input_messages=getattr(model, '_input_messages', {}),
+        pending_input_files=getattr(model, '_active_input_cards', []))
 
 
 def _chat_frames(updates):
@@ -59,6 +61,18 @@ def _chat_frames(updates):
             previous_count = count
             if wrapped: chat = gr.update(value=deepcopy(chat))
         yield chat, status
+
+
+class FrameUpdates:
+    """每个流独立比较控件输出，仅提交变化；不缓存聊天正文。"""
+    def __init__(self):
+        self.previous = None
+
+    def changes(self, values):
+        values = list(values)
+        result = values if self.previous is None else [gr.update() if value == old else value for value, old in zip(values, self.previous)]
+        self.previous = deepcopy(values)
+        return result
 
 
 class ArtifactPanel:
@@ -95,7 +109,7 @@ class ArtifactPanel:
             basename, extension = split_filename(record['name'])
             # Feather's generic file icon, also used by the installed Gradio UI.
             icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>'
-            cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
+            cards.append('<button type="button" class="model-file-card" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-remote-path="' + escape(record.get('remote_path', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
                          + '<span class="model-file-icon">' + icon + '</span><span class="model-file-content">'
                          + '<span class="model-file-name" title="' + escape(record['name']) + '"><span class="model-file-basename">' + escape(basename) + '</span></span>'
                          + '<span class="model-file-meta">' + ('<span class="model-file-extension">' + escape(extension[1:]) + '</span> · ' if extension else '') + '<span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
@@ -103,7 +117,7 @@ class ArtifactPanel:
         markup = '<div class="model-file-cards" aria-label="生成的文件">' + ''.join(cards) + '</div>' if cards else ''
         # The hidden native label travels with its File value, so the browser
         # maps stable IDs to links from the same render, even with duplicate names.
-        return [gr.update(visible=bool(records)), gr.update(value=markup), gr.update(value=paths, label=json.dumps(ready_ids)), gr.update(value='')]
+        return [gr.update(visible=bool(records)), gr.update(value=markup), gr.update(value=paths, label=json.dumps(ready_ids)), gr.update() if _agent(model) else gr.update(value='')]
 
 
 def describe_settings(model):
@@ -232,14 +246,15 @@ class AgentPanel:
                 interactive = not (model._running or bool(getattr(model, '_pending_send', None)) or model._needs_sync
                                    or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed'))
             records = model._input_stager.snapshot() if model._input_stager is not None else ()
-            metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records]}
+            metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records], 'files': [{'id':record.input_id,'name':record.name,'size':record.size} for record in records]}
             return gr.update(value=list(model._pending_upload_paths), label=json.dumps(metadata), interactive=interactive)
 
     def selectors(self):
         with gr.Column(visible=False, elem_id='agent-model-options', min_width=0) as self.selection_group:
-            self.model = gr.Dropdown(label=i18n('ui.toolbox.agent.model'), choices=list(MODEL_EFFORTS), value='gpt-6-astra', allow_custom_value=True, min_width=150)
+            self.model = gr.Dropdown(label=i18n('ui.toolbox.agent.model'), choices=list(MODEL_EFFORTS), value='gpt-6.1-sol', allow_custom_value=True, min_width=150)
             self.reasoning = gr.Dropdown(label=i18n('ui.toolbox.agent.reasoning'), choices=reasoning_choices(), value='default', min_width=120)
             self.choice_revision = gr.Number(value=0, precision=0, visible=False)
+            self.choice_target = gr.Textbox(visible=False)
 
     def output_components(self):
         self.artifacts = ArtifactPanel()
@@ -342,7 +357,7 @@ class AgentPanel:
     def outputs(self):
         return ([self.accordion] if hasattr(self, 'accordion') else []) + ([self.separator] if hasattr(self, 'separator') else []) + ([self.tools_separator] if hasattr(self, 'tools_separator') else []) + [self.selection_group, self.settings_group, self.settings_status, self.model, self.reasoning,
                 self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit,
-                *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else []) + (list(self.sidebar[:4]) if hasattr(self, 'sidebar') else []) + [self.config_target]
+                *self.artifacts.outputs, *self.config_inputs, self.availability] + ([self.input_group, self.input_files, self.input_picker, self.input_target] if hasattr(self, 'input_files') else []) + (list(self.sidebar[:4]) if hasattr(self, 'sidebar') else []) + [self.config_target, self.choice_target]
 
     def values(self, model, request: gr.Request = None, include_config=True):
         enabled = _agent(model)
@@ -350,7 +365,7 @@ class AgentPanel:
         if not enabled:
             return ([gr.update(visible=getattr(self, 'model_panel_visible', False), open=getattr(self, 'model_panel_visible', False))] if hasattr(self, 'accordion') else []) + ([gr.update(visible=False)] if hasattr(self, 'separator') else []) + ([gr.update(visible=False)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
-                    *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + ['']
+                    *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + ['', '']
         busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
         next_model, next_reasoning = model.agent_model_choice
         cards = model._pending_actions
@@ -364,10 +379,41 @@ class AgentPanel:
         return ([(gr.update(visible=True, open=True) if include_config else gr.update())] if hasattr(self, 'accordion') else []) + ([gr.update(visible=True)] if hasattr(self, 'separator') else []) + ([gr.update(visible=True)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=True), gr.update(visible=True), '',
                 gr.update(**({'value': next_model} if include_config else {}), interactive=not busy), gr.update(**({'value': next_reasoning or 'default', 'choices': reasoning_choices()} if include_config else {}), interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
-                *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked and component not in (self.discovery, self.programmatic)) for component, value in zip(self.config_inputs, config)], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id]
+                *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked and component not in (self.discovery, self.programmatic)) for component, value in zip(self.config_inputs, config)], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id, model.agent_choice_target]
 
-    def wrap_predict(self, predict, capability_ui):
+    @property
+    def stream_outputs(self):
+        outputs = [self.model, self.reasoning, self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit, *self.artifacts.outputs]
+        if hasattr(self, 'input_files'): outputs += [self.input_files, self.input_picker]
+        return outputs
+
+    def stream_values(self, model, request=None):
+        values = self.values(model, request=request, include_config=False)
+        return [values[self.outputs.index(component)] for component in self.stream_outputs]
+
+    def boundary_values(self, capability_ui):
+        def values_at_boundary(model, request: gr.Request):
+            return [*self.values(model, request=request, include_config=False), *capability_ui.values(model)]
+        return values_at_boundary
+
+    def history_boundary_values(self, capability_ui):
+        def history_values_at_boundary(model, request: gr.Request):
+            outputs = [*self.outputs, *capability_ui.outputs]
+            if not _agent(model): return [gr.update() for _ in outputs]
+            with model._lock:
+                scope = getattr(model, '_history_ui_complete_scope', None)
+                if scope is None or not scope.current(model): return [gr.update() for _ in outputs]
+                model._history_ui_complete_scope = None
+                return [*self.values(model, request=request, include_config=False), *capability_ui.values(model)]
+        return history_values_at_boundary
+
+    def wrap_predict(self, predict, capability_ui, compact=False):
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
+            def controls():
+                if compact and not _agent(model):
+                    return [gr.update() for _ in [*self.stream_outputs, *capability_ui.stream_outputs]]
+                return [*(self.stream_values(model, request=request) if compact else self.values(model, request=request, include_config=False)),
+                        *(capability_ui.stream_values(model) if compact else capability_ui.values(model))]
             if _agent(model): files = agent_files
             operation = uuid4().hex if _agent(model) else None
             if operation is not None:
@@ -376,9 +422,10 @@ class AgentPanel:
                     if not duplicate: model._predict_error_operation = operation
                 if duplicate:
                     model.record_ui_error('当前任务仍在运行', operation=operation)
-                    yield tuple(gr.update() for _ in [None, None, *self.outputs, *capability_ui.outputs])
+                    yield tuple(gr.update() for _ in [None, None, *(self.stream_outputs if compact else self.outputs), *(capability_ui.stream_outputs if compact else capability_ui.outputs)])
                     model.complete_error_operation(operation)
                     return
+            updates = FrameUpdates()
             target, owner = (model._conversation_id, model._owner) if operation else (None, None)
             try:
                 projected = ((self.render_chat(model, chat), status) for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request))
@@ -386,13 +433,13 @@ class AgentPanel:
                     for chat, status in _chat_frames(projected):
                         if operation and (model._retired or model._conversation_id != target or model._owner != owner
                                           or getattr(model, '_predict_error_operation', None) != operation): return
-                        yield chat, status, *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+                        yield chat, status, *updates.changes(controls())
                 except gr.Error as error:
                     if operation is None: raise
                     model.record_ui_error(str(error), operation=operation)
                 if operation and (model._retired or model._conversation_id != target or model._owner != owner or getattr(model, '_predict_error_operation', None) != operation): return
                 final_chat = gr.update(value=self.render_chat(model, model.chatbot)) if _agent(model) else gr.update()
-                yield final_chat, (model._status() if _agent(model) else gr.update()), *self.values(model, request=request, include_config=False), *capability_ui.values(model)
+                yield final_chat, (model._status() if _agent(model) else gr.update()), *updates.changes(controls())
                 if operation is not None: model.complete_error_operation(operation)
             finally:
                 if operation is not None:
@@ -449,19 +496,19 @@ class AgentPanel:
                                      [self.input_feedback, self.input_picker, self.input_files], queue=True, concurrency_limit=None,
                 js='(model, files, target) => { window.chuanhuAgentUploadStaging = true; window.chuanhuRefreshSendButton?.(); return [model, files, window.chuanhuAgentUploadTarget || target]; }')
             upload_event.then(None, [], [], queue=False, js='() => { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; window.chuanhuRefreshSendButton?.(); }').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
-        def choose_settings(model, name, effort, revision, request: gr.Request):
+        def choose_settings(model, name, effort, revision, target, request: gr.Request):
             model.bind_owner(request)
-            try: message = model.set_agent_model(name, effort, revision)
+            try: message = model.set_agent_model(name, effort, revision, target=target)
             except Exception as error: raise gr.Error(str(error)) from None
             # A response generated before a newer selection may arrive last.
             # Never write selector values back from this asynchronous event.
             return message if message is not None else gr.update()
-        choice_js = '''(state, name, effort, unused) => {
+        choice_js = '''(state, name, effort, unused, target) => {
             window.chuanhuAgentChoiceRevision = (window.chuanhuAgentChoiceRevision || 0) + 1;
-            return [state, name, effort, window.chuanhuAgentChoiceRevision];
+            return [state, name, effort, window.chuanhuAgentChoiceRevision, target];
         }'''
         for selector in (self.model, self.reasoning):
-            selector.input(self.status_callback(choose_settings), [current_model, self.model, self.reasoning, self.choice_revision], [status_display], queue=False, js=choice_js)
+            selector.input(self.status_callback(choose_settings), [current_model, self.model, self.reasoning, self.choice_revision, self.choice_target], [status_display], queue=False, js=choice_js)
         def choose_tools(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, revision, target, request: gr.Request):
             model.bind_owner(request)
             try:
@@ -493,7 +540,7 @@ class AgentPanel:
         fork_event.then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         # Called only after an authorized local history selection. This observer
         # uses GET snapshots, never recover_stream or function-action execution.
-        self.history_outputs = [chatbot, status_display] + (capability_ui.outputs + self.outputs if capability_ui is not None else [])
+        self.history_outputs = [chatbot, status_display] + (capability_ui.stream_outputs + self.stream_outputs if capability_ui is not None else [])
         def observe_history(model, request: gr.Request):
             # Gradio 4.29 writes None to every output when a queued generator
             # ends before its first frame. Always start with explicit no-ops.
@@ -501,29 +548,39 @@ class AgentPanel:
             if not _agent(model) or model._retired: return
             model.bind_owner(request)
             target, owner = model._conversation_id, model._owner
+            visit = model.agent_choice_target
+            model._history_ui_complete_scope = None
             epoch = uuid4().hex
+            updates = FrameUpdates()
             def current():
-                return not model._retired and model._conversation_id == target and model._owner == owner and getattr(model, '_history_epoch', None) == epoch
+                return not model._retired and model.agent_choice_target == visit and model._conversation_id == target and model._owner == owner and getattr(model, '_history_epoch', None) == epoch
             for chat, status in _chat_frames(model.observe_history(error_operation=epoch)):
                 if not current(): return
-                extras = (*capability_ui.values(model), *self.values(model, request=request, include_config=False)) if capability_ui is not None else ()
-                yield self.render_chat(model, chat), status, *extras
+                extras = (*capability_ui.stream_values(model), *self.stream_values(model, request=request)) if capability_ui is not None else ()
+                yield self.render_chat(model, chat), status, *updates.changes(extras)
             if not current(): return
-            extras = (*capability_ui.values(model), *self.values(model, request=request, include_config=False)) if capability_ui is not None else ()
-            yield gr.update(value=self.render_chat(model, model.chatbot)), model._status(), *extras
+            extras = (*capability_ui.stream_values(model), *self.stream_values(model, request=request)) if capability_ui is not None else ()
+            with model._lock:
+                if not current(): return
+                model._history_ui_complete_scope = OperationScope.capture(model)
+            yield gr.update(value=self.render_chat(model, model.chatbot)), model._status(), *updates.changes(extras)
             model.complete_error_operation(epoch)
         self.observe_history = self.status_callback(observe_history, 1)
         def retry_file(model, identifier, request: gr.Request):
             operation = uuid4().hex
             try:
                 model.bind_owner(request)
+                scope = OperationScope.capture(model)
+                updates = FrameUpdates()
                 for _, status in model.retry_artifact(identifier, error_operation=operation):
-                    yield status, *self.values(model, request=request, include_config=False)
+                    if not scope.current(model): return
+                    yield status, *updates.changes(self.stream_values(model, request=request))
             except gr.Error as error:
+                if 'scope' in locals() and not scope.current(model): return
                 model.record_ui_error(str(error), operation=operation)
-                yield tuple(gr.update() for _ in [None, *self.outputs])
-            model.complete_error_operation(operation)
-        self.artifacts.retry.click(self.status_callback(retry_file), [current_model, self.artifacts.retry_id], [status_display, *self.outputs]).then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
+                yield tuple(gr.update() for _ in [None, *self.stream_outputs])
+            if 'scope' in locals() and scope.current(model): model.complete_error_operation(operation)
+        self.artifacts.retry.click(self.status_callback(retry_file), [current_model, self.artifacts.retry_id], [status_display, *self.stream_outputs], show_progress='hidden').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         self.request_id.input(browser_form, [current_model, self.request_id], [self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit])
         def origin(model, identifier, decision):
             card = next((card for card in model._pending_actions if card['request_id'] == identifier), None)
@@ -571,11 +628,4 @@ class AgentPanel:
                 root.querySelectorAll('input').forEach(x => x.value='');
                 return [model, id, JSON.stringify(response)];
             }''').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
-        # A model output updates progress, file readiness and pending forms without
-        # another message or a queued request behind the running generator.
-        def live_values(model, request: gr.Request):
-            values = [*self.values(model, request=request, include_config=False), self.activity_value(model)]
-            if hasattr(self, 'input_feedback'):
-                values.append(gr.update() if _agent(model) and model._pending_upload_paths else gr.update(value='', visible=False))
-            return values
-        chatbot.change(live_values, [current_model], [*self.outputs, self.activity] + ([self.input_feedback] if hasattr(self, 'input_feedback') else []), queue=False, show_progress=False)
+        # 流式回调已携带文件与权限状态，不再由 chatbot.change 逐 token 重刷侧栏。

@@ -58,6 +58,17 @@
         if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
         const button = (event.composedPath ? event.composedPath() : [event.target])
             .find(node => node?.matches?.('button'));
+        if (button?.matches?.('.agent-input-remove-card')) {
+            event.preventDefault(); event.stopImmediatePropagation();
+            if (window.chuanhuInputBusy?.() || window.chuanhuAgentUploading) return;
+            const app = root(), input = app.querySelector('#agent-input-remove-payload textarea, #agent-input-remove-payload input');
+            const trigger = app.querySelector('#agent-input-remove');
+            if (!input || !trigger) return;
+            input.value = JSON.stringify({target:button.dataset.inputTarget, ids:[button.dataset.inputId]});
+            input.dispatchEvent(new Event('input', {bubbles:true}));
+            requestAnimationFrame(() => trigger.click());
+            return;
+        }
         const preview = button?.closest?.('#agent-pending-files');
         if (!preview) return;
         const row = button.closest('tr.file');

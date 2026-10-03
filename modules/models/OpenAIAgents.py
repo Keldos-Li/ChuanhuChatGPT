@@ -15,6 +15,7 @@ from modules.agent.transport import worker_messages, connection_for_model
 from modules.agent.store import BindingStore, owner_identity
 from modules.model_capabilities import AGENT_CAPABILITIES, require_capability
 from modules.agent.settings import load_settings
+from modules.agent.operations import OperationScope
 from modules.agent.input_state import AgentInputState, InputPreparationStopped
 from modules.agent.tools import validate_settings, tool_availability
 from modules.presets import i18n
@@ -86,6 +87,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._conversation_id = uuid4().hex
         self._state = {'outcome': 'not_started'}
         self._display, self._artifacts, self._cloud_items = [], [], []
+        self._active_input_cards = []
         self._answer_index = self._answer_row = None
         self._session_settings = None
         self._importing = self._needs_sync = False
@@ -101,6 +103,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._pending_network = None
         self._pending_model_settings = None
         self._choice_revision = 0
+        self._choice_epoch = uuid4().hex
         self._tool_revision = 0
         self._active_file_retries = set()
         self._initialize_inputs()
@@ -238,6 +241,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._restore_binding()
 
     def _restore_binding(self):
+        self._choice_epoch = uuid4().hex
+        self._active_input_cards = []
         self._cancel_requested = self._cancel_sent = False
         self._draft_token = self._draft_conversation = None
         self._draft_submitted = self._draft_acknowledged = False
@@ -281,6 +286,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             if self.history: self._notice = '将根据这份历史创建新的 Agent 会话：带入全部可用文字；不继承旧工具状态、沙盒文件和任务'
 
     def _fresh(self):
+        self._choice_epoch = uuid4().hex
         self._tool_ui_patch = None
         self._draft_token = self._draft_conversation = None
         self._draft_submitted = self._draft_acknowledged = False
@@ -293,6 +299,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._state = {'outcome': 'not_started'}
         self._conversation_id = uuid4().hex
         self._artifacts, self._cloud_items, self._pending_actions = [], [], []
+        self._active_input_cards = []
         self._answer_index = self._answer_row = self._session_settings = None
         self._needs_sync = self._connection_mismatch = self._unavailable = False
 
@@ -335,8 +342,13 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def agent_model_choice(self):
         return tuple(self._pending_model_settings or (self.model_name, self._reasoning))
 
-    def set_agent_model(self, model, reasoning, revision=None):
+    @property
+    def agent_choice_target(self):
+        return self._conversation_id + ':' + self._choice_epoch
+
+    def set_agent_model(self, model, reasoning, revision=None, target=None):
         with self._lock:
+            if target is not None and target != self.agent_choice_target: return None
             if revision is not None:
                 if not isinstance(revision, (int, float)) or revision < 0 or int(revision) != revision:
                     raise gr.Error('无效的设置版本')
@@ -608,16 +620,30 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         previous.update((record['id'], record) for record in records if isinstance(record.get('id'), str))
         self._artifacts = list(previous.values())
 
-    def _download(self, generation, artifact_ids=None, *, error_operation=None):
-        ready_ids = [record['id'] for record in self._artifacts if record.get('status') == 'ready' and record.get('path') and Path(record['path']).is_file()]
-        for message in self._worker({'action': 'download', 'session_id': self._state['session_id'], 'artifact_ids': artifact_ids, 'skip_artifact_ids': ready_ids if artifact_ids is None else []}):
+    def _download(self, generation, artifact_ids=None, *, error_operation=None, scope=None):
+        with self._lock:
+            scope = scope or OperationScope.capture(self)
+            if not scope.current(self) or self._state.get('generation') != generation: return
+            session_id = self._state['session_id']
+            ready_ids = [record['id'] for record in self._artifacts if record.get('status') == 'ready' and record.get('path') and Path(record['path']).is_file()]
+        for message in self._worker({'action': 'download', 'session_id': session_id, 'artifact_ids': artifact_ids, 'skip_artifact_ids': ready_ids if artifact_ids is None else []}):
             if message.get('type') == 'error':
                 with self._lock:
-                    if self._retired or self._state.get('generation') != generation: return
+                    if not scope.current(self): return
                     self._record_message_error(message, operation=error_operation)
-                self._notice = '回答已保留，文件获取失败，可重试：' + message.get('message', '')
+                    self._notice = '回答已保留，文件获取失败，可重试：' + message.get('message', '')
                 yield deepcopy(self._display), self._status()
                 return
+            if isinstance(message.get('artifact_metadata'), list):
+                with self._lock:
+                    if not scope.current(self): return
+                    for metadata in message['artifact_metadata']:
+                        for record in self._artifacts:
+                            if (metadata.get('id') == record.get('id') and metadata.get('session_id') == self._state.get('session_id')
+                                    and metadata.get('turn_id') == record.get('turn_id')):
+                                record['remote_path'] = metadata.get('remote_path')
+                    self._remember()
+                yield deepcopy(self._display), self._status()
             if 'artifacts' not in message: continue
             records = message['artifacts']
             root = Path(tempfile.gettempdir()).resolve()
@@ -628,7 +654,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     record.update(status='failed', error='文件缓存校验失败，请重新获取')
                     record.pop('path', None)
             with self._lock:
-                if self._state.get('generation') != generation or self._retired: return
+                if not scope.current(self): return
                 previous = {record['id']: record for record in self._artifacts}
                 previous.update((record['id'], record) for record in records)
                 self._record_message_error(dict(message, artifacts=records), operation=error_operation)
@@ -638,6 +664,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
 
     def retry_artifact(self, artifact_id, *, error_operation=None):
         with self._lock:
+            if self._retired: return
+            scope = OperationScope.capture(self)
             if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
             generation = self._state.get('generation')
             retry_key = (self._state.get('session_id'), artifact_id)
@@ -649,19 +677,22 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     record.update(status='preparing');record.pop('error', None)
         try:
             yield deepcopy(self._display), self._status()
-            yield from self._download(generation, [artifact_id], error_operation=attempt)
+            yield from self._download(generation, [artifact_id], error_operation=attempt, scope=scope)
         except Exception:
-            self._notice = '文件获取失败，可重试'
-            self.record_ui_error(self._notice, operation=attempt)
+            with self._lock:
+                if not scope.current(self): return
+                self._notice = '文件获取失败，可重试'
+                self.record_ui_error(self._notice, operation=attempt)
         finally:
             with self._lock:
                 self._active_file_retries.discard(retry_key)
-                if self._state.get('generation') == generation and self._state.get('session_id') == retry_key[0]:
+                if scope.current(self) and self._state.get('session_id') == retry_key[0]:
                     for record in self._artifacts:
                         if record['id']==artifact_id and record.get('status')=='preparing':
                             record.update(status='failed', error='文件获取未完成，请重试')
                             self.record_ui_error(record['error'], ('artifact', record['id'], record['error']), operation=attempt)
                     self._remember()
+        if not scope.current(self): return
         yield deepcopy(self._display), self._status()
 
     def _network_request(self, inputs):
@@ -691,7 +722,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         input_records = self._take_input_files(files)
         if not isinstance(inputs, str) or (not inputs.strip() and not input_records): raise gr.Error('请输入文字任务或添加附件')
         inputs = inputs.strip() or '请查看上传的附件。'
-        display_input = inputs + ('\n\n附件：' + '、'.join(record.name for record in input_records) if input_records else '')
+        display_input = inputs
         if use_websearch: raise gr.Error('当前 Agent 不支持原外部搜索入口，请使用 Agent 工具配置')
         if self._needs_sync:
             yield from self.reconnect()
@@ -718,6 +749,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             if input_records and not settings['tools']['code_execution']:
                 with _bindings_lock: _session_locks.pop(reservation, None)
                 raise gr.Error('当前会话没有文件执行环境，请启用后按新配置新建' if self._state.get('session_id') else '请先在工具设置中开启代码与文件执行')
+            previous_input_cards = deepcopy(self._active_input_cards)
             previous = (deepcopy(self._state), deepcopy(self.history), deepcopy(self._display), self._answer_index, self._answer_row)
             reference = deepcopy(self._input_seed_reference) if self._input_seed_reference is not None else _text_history(self.history) if not self._state.get('session_id') else None
             if not self._state.get('session_id') or self._input_seed_reference is not None: self._first_prompt = display_input
@@ -726,6 +758,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._display = [list(row) for row in chatbot or []] + [[display_input, '']]
             self.history.extend([{'role': 'user', 'content': display_input}, {'role': 'assistant', 'content': ''}])
             self._answer_index, self._answer_row = len(self.history) - 1, len(self._display) - 1
+            self._active_input_cards = [{'id':record.input_id,'name':record.name,'size':record.size} for record in input_records]
             self._running = True
             self._draft_submitted = self._draft_acknowledged = False
             self._cancel_requested = self._cancel_sent = False
@@ -750,7 +783,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 if installed_inputs:
                     from modules.agent.runtime import format_input_text
                     command['input_files'] = installed_inputs
-                    self._remember_input_message(format_input_text(inputs, reference, installed_inputs), display_input)
+                    self._remember_input_message(format_input_text(inputs, reference, installed_inputs), display_input, installed_inputs)
                 started = True
                 self._session_settings = settings
                 self._remember()
@@ -795,6 +828,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             with self._lock:
                 if self._state.get('generation') == generation:
                     if not started:
+                        self._active_input_cards = previous_input_cards
                         rollback = self._input_rollback_state(previous[0], generation)
                         self._state, self.history, self._display, self._answer_index, self._answer_row = (rollback, *previous[1:])
                         for error_record in getattr(self, '_ui_errors', []):
@@ -1034,20 +1068,28 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def delete_first_conversation(self): raise gr.Error('Agent 云端历史不支持本地回退')
     def delete_last_conversation(self, chatbot): raise gr.Error('Agent 云端历史不支持本地回退')
     def auto_name_chat_history(self, name_chat_method, user_question, single_turn_checkbox):
-        first_turn = len([item for item in self.history if item.get('role') == 'user']) == 1
-        if self._state.get('outcome') not in TERMINAL or self._needs_sync or not first_turn or self._auto_named or single_turn_checkbox:
-            return gr.update()
-        question = self._first_prompt or next(item['content'] for item in self.history if item['role'] == 'user')
+        with self._lock:
+            first_turn = len([item for item in self.history if item.get('role') == 'user']) == 1
+            if self._retired or self._state.get('outcome') not in TERMINAL or self._needs_sync or not first_turn or self._auto_named or single_turn_checkbox:
+                return gr.update()
+            scope = OperationScope.capture(self, history_target=True)
+            question = self._first_prompt or next(item['content'] for item in self.history if item['role'] == 'user')
+            command = {'action': 'title', 'model': self.model_name, 'history': _text_history(self.history)}
         title = ''
         if name_chat_method == i18n('naming.by_model_summary'):
-            for message in self._worker({'action': 'title', 'model': self.model_name, 'history': _text_history(self.history)}):
+            for message in self._worker(command):
                 if message.get('type') == 'result': title = message.get('title', '')
-            if not title.strip(): self._notice = '模型标题未生成，已使用首问命名'
         elif name_chat_method != i18n('naming.by_first_question'):
             return gr.update()
-        title = title.strip() or question[:16]
-        title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title).strip().strip('.')
-        return self.rename_chat_history((title or 'Agent 聊天') + '.json')
+        with self._lock:
+            if (not scope.current(self)
+                    or self._running or self._auto_named):
+                return gr.update()
+            if not title.strip() and name_chat_method == i18n('naming.by_model_summary'):
+                self._notice = '模型标题未生成，已使用首问命名'
+            title = title.strip() or question[:16]
+            title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title).strip().strip('.')
+            return self.rename_chat_history((title or 'Agent 聊天') + '.json')
     def handle_file_upload(self, files, chatbot, *args):
         return gr.update(), chatbot, self.stage_input_files(files)
     def summarize_index(self, *args): raise gr.Error('当前 Agent 不支持本地知识库入口')

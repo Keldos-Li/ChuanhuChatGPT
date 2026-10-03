@@ -76,15 +76,15 @@ def test_dropdown_revision_ignores_late_callback_and_send_freezes_visible_pair(e
     app,panel,state=panel_app(model)
     index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
     entered=threading.Event();release=threading.Event();original=model.set_agent_model
-    def delayed(name,effort,revision=None):
+    def delayed(name,effort,revision=None,target=None):
         if revision==1:entered.set();assert release.wait(3)
-        return original(name,effort,revision)
+        return original(name,effort,revision,target=target)
     monkeypatch.setattr(model,'set_agent_model',delayed)
     async def exercise():
         req=gr.Request(session_hash='choice-race')
-        early=asyncio.create_task(app.process_api(index,[None,'gpt-6-sol','default',1],state=state,request=req))
+        early=asyncio.create_task(app.process_api(index,[None,'gpt-6-sol','default',1,model.agent_choice_target],state=state,request=req))
         assert await asyncio.to_thread(entered.wait,3)
-        await app.process_api(index,[None,'gpt-6-sol','high',2],state=state,request=req)
+        await app.process_api(index,[None,'gpt-6-sol','high',2,model.agent_choice_target],state=state,request=req)
         release.set();stale=await early
         assert all(isinstance(value,dict) and value.get('__type__')=='update' and 'value' not in value for value in stale['data'])
         assert model.agent_model_choice==('gpt-6-sol','high')
@@ -114,7 +114,7 @@ def test_retry_listing_failure_returns_clickable_failed_card_then_can_retry(env,
         result=await app.process_api(index,[None,'file'],state=state,request=gr.Request(session_hash='retry'))
         frames=[]
         while True:
-            update=result['data'][1+panel.outputs.index(panel.artifacts.list)]
+            update=result['data'][1+panel.stream_outputs.index(panel.artifacts.list)]
             if isinstance(update,dict) and update.get('value'):frames.append(ET.fromstring(update['value']).find('button'))
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'file'],state=state,request=gr.Request(session_hash='retry'),iterator=result['iterator'])
@@ -137,8 +137,8 @@ def test_older_completed_choice_response_cannot_overwrite_widgets_or_same_revisi
     app,panel,state=panel_app(model)
     index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
     req=gr.Request(session_hash='late-response')
-    early=asyncio.run(app.process_api(index,[None,'gpt-6-sol','default',1],state=state,request=req))
-    later=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',2],state=state,request=req))
+    early=asyncio.run(app.process_api(index,[None,'gpt-6-sol','default',1,model.agent_choice_target],state=state,request=req))
+    later=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',2,model.agent_choice_target],state=state,request=req))
     assert panel.model not in app.fns[index].outputs and panel.reasoning not in app.fns[index].outputs
     assert len(early['data'])==len(later['data'])==1
     # Even a stale visible value submitted with an already-confirmed revision
@@ -225,14 +225,14 @@ def test_gradio_callback_updates_same_session_and_restores_on_failure(env,monkey
     complete(env,monkeypatch);model=select(env);send(env,model)
     app,panel,state=panel_app(model)
     index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
-    result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1],state=state,request=gr.Request(session_hash='ui-test')))
+    result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1,model.agent_choice_target],state=state,request=gr.Request(session_hash='ui-test')))
     assert app.fns[index].outputs == [panel.activity]
     assert not result['data'][0]['visible'] and result['data'][0]['value']=='' and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
     assert model.model_name!='gpt-6-sol'
     send(env,model,'apply on send')
     assert model.model_name=='gpt-6-sol'
     monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([{'type':'error','message':'rejected'}]))
-    result=asyncio.run(app.process_api(index,[None,'bad','low',2],state=state,request=gr.Request(session_hash='ui-test')))
+    result=asyncio.run(app.process_api(index,[None,'bad','low',2,model.agent_choice_target],state=state,request=gr.Request(session_hash='ui-test')))
     assert not result['data'][0]['visible'] and model.model_name=='gpt-6-sol'
     output=send(env,model,'must not submit')
     assert '消息未发送' in output[-1][1] and model.model_name=='gpt-6-sol'
@@ -273,7 +273,7 @@ def test_callback_owner_validation_is_gradio_injected(env,monkeypatch):
     app,panel,state=panel_app(model)
     index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
     with pytest.raises(gr.Error):
-        asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1],state=state,request=gr.Request(username='bob',session_hash='ui-test')))
+        asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1,model.agent_choice_target],state=state,request=gr.Request(username='bob',session_hash='ui-test')))
     app.close()
 
 
@@ -303,7 +303,7 @@ def test_history_observer_waiting_permission_exposes_same_main_stop(env,monkeypa
         result=await app.process_api(indices['observe_history'],[None],state=state,request=req)
         assert all(value == gr.update() for value in result['data'])
         result=await app.process_api(indices['observe_history'],[None],state=state,request=req,iterator=result['iterator'])
-        assert result['data'][2+caps.outputs.index(main_stop)]['visible']
+        assert result['data'][2+caps.stream_outputs.index(main_stop)]['visible']
         assert model._pending_actions
         await app.process_api(indices['interrupt'],[None],state=state,request=req)
         assert 'cancel' in calls
@@ -311,7 +311,7 @@ def test_history_observer_waiting_permission_exposes_same_main_stop(env,monkeypa
         while result['is_generating']:
             result=await app.process_api(indices['observe_history'],[None],state=state,request=req,iterator=result['iterator'])
             results.append(result)
-        updates=[entry['data'][2+caps.outputs.index(main_stop)] for entry in results if isinstance(entry['data'][2+caps.outputs.index(main_stop)],dict)]
+        updates=[entry['data'][2+caps.stream_outputs.index(main_stop)] for entry in results if isinstance(entry['data'][2+caps.stream_outputs.index(main_stop)],dict)]
         assert any(update.get('visible') is False for update in updates)
     try:asyncio.run(exercise())
     finally:app.close()
@@ -354,17 +354,40 @@ def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypat
 
 def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypatch):
     from modules.model_capabilities import CapabilityUI
-    complete(env,monkeypatch);model=select(env)
+    model=select(env);downloads=[]
+    def worker(command):
+        if command['action']=='run':
+            yield dict(type='progress',session_id='s',turn_id='t',outcome='in_progress')
+            yield dict(type='result',session_id='s',turn_id='t',outcome='completed',text='answer',sync_complete=True)
+        elif command['action']=='download':
+            downloads.append('started')
+            yield dict(type='progress',artifacts=[])
+            yield dict(type='result',artifacts=[])
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
     with gr.Blocks(analytics_enabled=False) as app:
-        current=gr.State();chat=gr.Chatbot();status=gr.Markdown();selector=gr.Dropdown();marker=gr.HTML()
+        current=gr.State();text=gr.Textbox();chat=gr.Chatbot();status=gr.Markdown();selector=gr.Dropdown();marker=gr.HTML()
         caps=CapabilityUI([],selector,marker);caps.wire(current,chat)
         panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components()
-    updates=list(panel.wrap_predict(env.wrappers['predict'],caps)(model,'hello',[],request=gr.Request(session_hash='ui')))
-    final=updates[-1]
-    for component in (panel.model,panel.reasoning):
-        assert final[2+panel.outputs.index(component)]['interactive'] is True
-    assert not model._running
-    app.close()
+        event=gr.Button().click(panel.wrap_predict(env.wrappers['predict'],caps,compact=True),
+            [current,text,chat],[chat,status,*panel.stream_outputs,*caps.stream_outputs],queue=True)
+    state=SessionState(app);state[current._id]=model
+    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='predict_with_ui')
+    async def exercise():
+        inputs=[None,'hello',[]];req=gr.Request(session_hash='ui')
+        result=await app.process_api(index,inputs,state=state,request=req)
+        while model._state.get('outcome')!='completed':
+            assert all(state.blocks_config.blocks[c._id].interactive is False for c in (panel.model,panel.reasoning))
+            result=await app.process_api(index,inputs,state=state,request=req,iterator=result['iterator'])
+        # 生产 compact 路径在回答终态立即解锁，不等后续文件下载。
+        assert not downloads and not model._running
+        assert all(state.blocks_config.blocks[c._id].interactive is True for c in (panel.model,panel.reasoning))
+        result=await app.process_api(index,inputs,state=state,request=req,iterator=result['iterator'])
+        assert downloads and result['is_generating']
+        assert all(state.blocks_config.blocks[c._id].interactive is True for c in (panel.model,panel.reasoning))
+        while result['is_generating']:
+            result=await app.process_api(index,inputs,state=state,request=req,iterator=result['iterator'])
+    try:asyncio.run(exercise())
+    finally:app.close()
 
 
 def test_prompt_change_after_session_is_rejected_and_effective_value_kept(env,monkeypatch):
@@ -404,7 +427,7 @@ def test_single_file_retry_streams_preparing_and_result_without_losing_other_fil
     async def exercise():
         req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'retry'],state=state,request=req);statuses=[]
         while True:
-            update=result['data'][1+panel.outputs.index(panel.artifacts.list)]
+            update=result['data'][1+panel.stream_outputs.index(panel.artifacts.list)]
             if isinstance(update,dict) and update.get('value'):
                 rows=artifact_rows(update['value']);assert rows[0][0]=='other' and rows[0][3]=='';statuses.append(rows[1][3])
             if not result['is_generating']:break

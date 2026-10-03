@@ -31,6 +31,21 @@ Agent 使用主项目的 Python 环境与 `openai==3.22.0`，不需要第二个 
 }
 ```
 
+管理员绑定仅授予权限，不会自动加入用户工具配置。用户仍需在 Agent 的 MCP 配置中填写 JSON 数组，例如：
+
+```json
+[
+  {
+    "server_label": "work-mcp",
+    "server_url": "https://mcp.example.com/mcp",
+    "authorization_env": "WORK_MCP_TOKEN",
+    "allowed_tools": ["read_issue"]
+  }
+]
+```
+
+`WORK_MCP_TOKEN` 的实际值只由管理员设置在服务器环境中；用户界面和历史中只保存引用名，不能填写真实凭据。
+
 `owners` 使用已认证用户名；只有显式 `shared: true` 才表示部署范围内共享，包含匿名用户。
 `allowed_tools` 必须覆盖用户请求的明确工具子集。服务地址与凭据变量名必须完全匹配绑定。
 只有管理员显式设置 `allow_private: true` 才允许绑定的私网目标或 HTTP 凭据端点；此设置需要评估内部服务风险。
@@ -39,9 +54,10 @@ Agent 使用主项目的 Python 环境与 `openai==3.22.0`，不需要第二个 
 
 ## 测试
 
-安装 `requirements_tests.txt` 后，在项目根目录执行：
+使用完整项目环境安装 `requirements.txt` 与 `requirements_tests.txt` 后，在项目根目录执行。JavaScript 验证还需要已有 Node.js：
 
 ```sh
+pip install -r requirements.txt -r requirements_tests.txt
 python -m pytest tests -q
 node tests/javascript/model-capabilities.test.cjs
 python tests/production_build_smoke.py

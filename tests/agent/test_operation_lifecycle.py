@@ -279,8 +279,8 @@ def test_send_javascript_ignores_appended_outputs_and_keeps_tool_revision():
     returned=json.loads(run.stdout)
     assert returned[-3:]==['instructions','conversation',3] and len(returned)==20
     chains=[ast.unparse(n) for n in ast.walk(tree) if isinstance(n,ast.Expr)]
-    assert any('submit(**transfer_input_args).success(**chatgpt_predict_args)' in text for text in chains)
-    assert any('click(**transfer_input_args).success(**chatgpt_predict_args' in text for text in chains)
+    assert any('submit(**transfer_input_args).success(**submission_ui_args).success(**chatgpt_predict_args)' in text for text in chains)
+    assert any('click(**transfer_input_args).success(**submission_ui_args).success(**chatgpt_predict_args' in text for text in chains)
 
 
 def wrapped_send(env,model,text):
@@ -330,9 +330,10 @@ def test_connection_mismatch_observer_early_error_receipt(env):
     model=select(env);model._needs_sync=True;model._connection_mismatch=True
     with gr.Blocks(analytics_enabled=False) as app:
         current=gr.State();chat=gr.Chatbot();status=gr.Markdown();panel=AgentPanel()
-        panel.selectors();panel.settings_components();panel.output_components();cap=SimpleNamespace(outputs=[],values=lambda *a:[])
+        panel.selectors();panel.settings_components();panel.output_components();cap=SimpleNamespace(outputs=[],values=lambda *a:[],stream_outputs=[],stream_values=lambda *a:[])
         panel.wire(current,chat,status,cap)
     panel.values=lambda *a,**kw:[]
+    panel.stream_values=lambda *a,**kw:[]
     list(panel.observe_history(model,request()))
     with pytest.raises(gr.Error,match='连接配置'):panel.emit_ui_error(model,request())
     panel.emit_ui_error(model,request());app.close()
@@ -490,3 +491,100 @@ def test_empty_local_chat_can_configure_tools_before_first_submission(env,monkey
     model.freeze_agent_configuration(settings,'First-round instructions',1,model._conversation_id)
     assert model._state.get('session_id') is None
     assert model.system_prompt=='First-round instructions'
+
+
+def test_old_choice_target_cannot_change_new_visit_even_same_conversation(env):
+    model=select(env);old=model.agent_choice_target
+    model._choice_epoch='new-visit'
+    before=(model.agent_model_choice,model._choice_revision)
+    assert model.set_agent_model('gpt-6-astra','high',99,target=old) is None
+    assert (model.agent_model_choice,model._choice_revision)==before
+    model.set_agent_model('gpt-6-sol','low',100,target=model.agent_choice_target)
+    assert model.agent_model_choice==('gpt-6-sol','low')
+
+
+@pytest.mark.parametrize('response',[{'type':'error','message':'old failure'},
+    {'type':'result','artifacts':[{'id':'old','name':'old.txt','status':'failed','error':'old failure'}]},
+    {'type':'progress','artifact_metadata':[{'id':'old','session_id':'s','turn_id':'t','remote_path':'/workspace/old.txt'}]}])
+def test_download_response_cannot_mutate_same_generation_new_visit(env,monkeypatch,response):
+    model=select(env);model._state=dict(session_id='s',turn_id='t',generation='g',outcome='completed')
+    model._artifacts=[dict(id='old',name='old.txt',status='failed',turn_id='t')]
+    before=deepcopy(model._artifacts)
+    def worker(command):
+        model._choice_epoch='new-visit';model._notice='current notice'
+        yield deepcopy(response)
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    assert list(model._download('g'))==[]
+    assert model._artifacts==before and model._notice=='current notice'
+
+
+def test_late_title_does_not_rename_or_consume_new_chat(env,monkeypatch):
+    def initial(command):
+        if command['action']=='run':
+            yield dict(type='result',session_id='s',turn_id='t',outcome='completed',text='first answer')
+        elif command['action']=='download': yield dict(type='result',artifacts=[])
+    monkeypatch.setattr(env.agents,'worker_messages',initial)
+    model=select(env);send(env,model)
+    assert not model._needs_sync and not model._auto_named
+    def worker(command):
+        assert command['action']=='title'
+        model.reset();model._notice='current notice'
+        yield dict(type='result',title='old chat title')
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    result=model.auto_name_chat_history(env.agents.i18n('naming.by_model_summary'),'old question',False)
+    assert result==gr.update() and not model._auto_named
+    assert 'old chat title' not in model.history_file_path and model._notice=='current notice'
+
+
+def test_hot_events_exclude_sidebar_and_no_chatbot_change_refresh():
+    import ast
+    root=Path(__file__).resolve().parents[2]
+    tree=ast.parse((root/'ChuanhuChatbot.py').read_text())
+    def assignment(name):
+        return next(n.value for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id==name for t in n.targets))
+    predict=assignment('chatgpt_predict_args')
+    outputs=next(k.value for k in predict.keywords if k.arg=='outputs')
+    assert 'stream_outputs' in ast.unparse(outputs) and 'agent_panel.outputs' not in ast.unparse(outputs)
+    for name in ('chatgpt_predict_args','transfer_input_args','submission_ui_args','finish_submission_args'):
+        assert next(k.value.value for k in assignment(name).keywords if k.arg=='show_progress')=='hidden'
+    ui=ast.parse((root/'modules/model_capabilities.py').read_text())
+    assert not any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='change' and isinstance(n.func.value,ast.Name) and n.func.value.id=='chatbot' for n in ast.walk(ui))
+
+
+def test_same_chat_rename_during_retry_finishes_instead_of_staying_preparing(env,monkeypatch,tmp_path):
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    model._artifacts=[dict(id='file',name='synthetic.txt',status='failed')]
+    model._remember()
+    folder=Path(__import__('tempfile').mkdtemp(prefix='chuanhu-agent-artifacts-'))
+    file=folder/'synthetic.txt';file.write_text('synthetic')
+    def worker(command):
+        assert command['action']=='download'
+        yield dict(type='result',artifacts=[dict(id='file',name='synthetic.txt',status='ready',path=str(file))])
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    retry=model.retry_artifact('file');next(retry)
+    model.rename_chat_history('Renamed chat.json')
+    assert list(retry)
+    assert model._artifacts[0]['status']=='ready' and not model._active_file_retries
+    assert model.history_file_path=='Renamed chat.json'
+
+
+def test_history_terminal_boundary_rejects_completed_old_visit(env):
+    from modules.agent.operations import OperationScope
+    model=select(env)
+    panel=AgentPanel()
+    scope=OperationScope.capture(model);model._history_ui_complete_scope=scope
+    model._choice_epoch='new-visit'
+    with gr.Blocks(analytics_enabled=False) as app:
+        panel.selectors();panel.settings_components();panel.output_components()
+    cap=SimpleNamespace(outputs=[])
+    values=panel.history_boundary_values(cap)(model,request())
+    assert values and all(value==gr.update() for value in values)
+    app.close()
+
+
+def test_artifact_refresh_does_not_clear_click_transport_before_retry(env):
+    model=select(env)
+    model._artifacts=[dict(id='file',name='synthetic.txt',status='failed')]
+    # 失败卡到达与发送终态边界都可能紧跟用户点击；不覆盖用户写入的传输值。
+    assert ArtifactPanel.values(model)[-1]==gr.update()
+    assert ArtifactPanel.values(SimpleNamespace())[-1]==gr.update(value='')

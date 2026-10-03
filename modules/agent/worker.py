@@ -169,7 +169,7 @@ def main():
             elif action == 'inspect':
                 emit('result', **inspect_saved(client, session_id, command.get('turn_id'), command.get('baseline_turn_ids'), command.get('submission_started') is True))
             elif action == 'cancel': emit('result', session_id=session_id, turn_id=command.get('turn_id'), **cancel_session(client, session_id, command.get('turn_id')))
-            elif action == 'download': emit('result', session_id=session_id, artifacts=download_artifacts(client, session_id, artifact_ids=command.get('artifact_ids'), skip_artifact_ids=command.get('skip_artifact_ids', ()), cache_root=cache_root, on_progress=lambda records: emit('progress', session_id=session_id, artifacts=records)))
+            elif action == 'download': emit('result', session_id=session_id, artifacts=download_artifacts(client, session_id, artifact_ids=command.get('artifact_ids'), skip_artifact_ids=command.get('skip_artifact_ids', ()), cache_root=cache_root, on_metadata=lambda records: emit('progress', session_id=session_id, artifact_metadata=records), on_progress=lambda records: emit('progress', session_id=session_id, artifacts=records)))
             elif action == 'update': emit('result', session_id=session_id, settings=update_settings(client, session_id, command.get('model'), command.get('reasoning')))
             elif action == 'browser_response':
                 # Never echo submitted fields, including in errors or diagnostics.

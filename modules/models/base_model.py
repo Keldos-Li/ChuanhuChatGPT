@@ -520,7 +520,7 @@ class BaseLLMModel:
                 # retriever = VectorStoreRetriever(vectorstore=index, search_type="similarity_score_threshold", search_kwargs={
                 #                                  "k": 6, "score_threshold": 0.2})
                 try:
-                    relevant_documents = retriever.get_relevant_documents(fake_inputs)
+                    relevant_documents = retriever.invoke(fake_inputs)
                 except AssertionError:
                     return self.prepare_inputs(
                         fake_inputs,

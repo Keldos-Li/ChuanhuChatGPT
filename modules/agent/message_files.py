@@ -25,6 +25,8 @@ class MessageFileProjection:
     unresolved_artifacts: Dict[str, str] = field(default_factory=dict)
     _original_rows: List[list] = field(default_factory=list, repr=False)
 
+    user_files: Dict[int, list] = field(default_factory=dict)
+
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
@@ -201,7 +203,7 @@ def _align_rows_dynamic(source_indices, raw_indices, score):
 
 
 def project_message_files(rows, cloud_items, artifacts, *, session_id, conversation_id,
-                          current_turn_id=None, answer_row=None):
+                          current_turn_id=None, answer_row=None, input_messages=None, pending_input_files=()):
     """Build a raw view plus stable text-assistant and artifact anchor maps.
 
     ``answer_row`` is an explicit raw-row index for the current turn, supplied
@@ -254,6 +256,12 @@ def project_message_files(rows, cloud_items, artifacts, *, session_id, conversat
         anchors[current_row] = _anchor(scope, 'turn', current_turn_id)
 
     projection = MessageFileProjection(projected, anchors, {}, set(), conversation_id, {}, original)
+    for source_index, row_index in aligned.items():
+        user = source[source_index]['user']
+        entry = (input_messages or {}).get(_digest(user['content'])) if user else None
+        if isinstance(entry, dict) and entry.get('files'): projection.user_files[row_index] = deepcopy(entry['files'])
+    if answer_row is not None and pending_input_files and answer_row not in projection.user_files:
+        projection.user_files[answer_row] = deepcopy(pending_input_files)
     grouped = {}
     conflicting = set()
     for record in artifacts or []:
@@ -357,6 +365,12 @@ def render_projection(projection, format_user: Callable[[str], str], format_assi
                 rendered.append(deepcopy(value))
                 continue
             prefix = formatter(value)
+            if role == 'user' and projection.user_files.get(index):
+                cards = []
+                for file in projection.user_files[index]:
+                    name = str(file.get('name', '附件')); extension = name.rsplit('.', 1)[-1].upper() if '.' in name else 'FILE'
+                    cards.append('<span class="agent-input-card"><span class="agent-input-icon" aria-hidden="true">' + html.escape(extension[:4]) + '</span><span class="agent-input-card-text"><span class="agent-input-name" title="' + html.escape(name, quote=True) + '">' + html.escape(name) + '</span><span class="agent-input-meta">' + html.escape(extension) + '</span></span></span>')
+                prefix = '<div class="agent-user-file-source" hidden>' + ''.join(cards) + '</div>' + prefix
             if not isinstance(prefix, str):
                 raise TypeError('message formatters must return strings')
             payload = {'v': 1, 'conversation': projection.conversation_id, 'key': key, 'role': role,

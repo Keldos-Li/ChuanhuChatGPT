@@ -619,3 +619,41 @@ img.avatar-image {
 #chatbot-area.agent-mode #chuanhu-chatbot .bubble-wrap { padding-top: 16px; padding-bottom: 16px; }
 
 /* Match the existing sidebar Accordion heading weight for this nested panel. */
+
+/* 输入附件复用当前输入框，不改变普通聊天的布局。 */
+#agent-pending-files { display: none !important; }
+#chatbot-input-tb-row > .agent-pending-cards {
+    display: flex; flex-wrap: nowrap; flex: 0 0 100%; width: 0; min-width: 100%; max-width: 100%;
+    gap: 8px; overflow-x: auto; padding: 12px 12px 4px; box-sizing: border-box;
+    scrollbar-width: thin; overscroll-behavior-x: contain;
+}
+.agent-pending-cards[hidden], .agent-user-file-source { display: none !important; }
+#chatbot-input-tb-row.agent-composer-has-files { flex-wrap: wrap; }
+.agent-input-card {
+    display: flex; align-items: center; gap: 10px; position: relative;
+    flex: 0 0 220px; min-width: 0; max-width: 100%; padding: 10px 12px;
+    box-sizing: border-box; border-radius: 12px;
+    background: var(--background-fill-secondary); color: var(--body-text-color);
+    border: 1px solid var(--border-color-primary);
+}
+.agent-input-icon {
+    display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 34px;
+    background: var(--primary-500); color: white; font-size: 9px; font-weight: 600;
+    border-radius: 4px; clip-path: polygon(0 0, 70% 0, 100% 25%, 100% 100%, 0 100%);
+}
+.agent-input-card-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.agent-input-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.agent-input-meta { color: var(--body-text-color-subdued); font-size: 11px; }
+.agent-input-remove-card {
+    position: absolute; right: 3px; top: 3px; width: 24px; height: 24px;
+    padding: 0; border-radius: 50%; font-size: 18px; line-height: 24px;
+    color: var(--body-text-color); background: var(--background-fill-primary);
+    opacity: 0; cursor: pointer; border: 1px solid var(--border-color-primary);
+}
+.agent-input-card:hover .agent-input-remove-card, .agent-input-card:focus-within .agent-input-remove-card { opacity: 1; }
+.agent-input-remove-card:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 2px; }
+.agent-input-remove-card:disabled { cursor: not-allowed; }
+.agent-user-files { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin: 0 0 8px auto; max-width: calc(100% - 64px); }
+.agent-user-files .agent-input-card { flex-basis: 220px; }
+@media (hover: none) { .agent-input-remove-card { opacity: 1; } }
+@media (max-width: 499px) { .agent-input-card { flex-basis: 190px; } }

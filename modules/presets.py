@@ -155,7 +155,7 @@ DEFAULT_METADATA = {
 # Additional metadata for online and local models
 MODEL_METADATA = {
     "OpenAI Agent": {
-        "model_name": "gpt-6-astra",
+        "model_name": "gpt-6.1-sol",
         "model_type": "OpenAIAgents",
         "description": "model.openai_agent.description",
         "system": "Perform only the requested task. Keep your final answer concise. Use files in /workspace for deliverables.",

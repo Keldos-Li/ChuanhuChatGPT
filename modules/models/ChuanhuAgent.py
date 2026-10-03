@@ -175,7 +175,7 @@ class ChuanhuAgent_Client(BaseLLMModel):
         retriever = VectorStoreRetriever(
             vectorstore=self.index, search_type="similarity", search_kwargs={"k": 6}
         )
-        relevant_documents = retriever.get_relevant_documents(query)
+        relevant_documents = retriever.invoke(query)
         reference_results = [
             [d.page_content.strip("�"), os.path.basename(d.metadata["source"])]
             for d in relevant_documents
