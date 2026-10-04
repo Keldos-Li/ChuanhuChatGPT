@@ -471,5 +471,15 @@ test('body pending feedback disappears when its owned file becomes ready',()=>{
     link.click();assert.deepEqual(f.hits,['file:owned']);
 });
 
+test('card and body downloads keep full Unicode filename and isolated native URL', () => {
+    const f=fixture({activeConversation:'conversation'});const row=f.row('turn');const card=f.card('owned','turn');
+    card.dataset.remotePath='/workspace/outputs/报告 空格.txt';card.dataset.downloadName='报告 空格.txt';
+    const body=bodyLink(f,row,'artifact:owned');f.chat.append(row);f.cards.append(card);f.nativeFiles(['owned']);f.start();
+    const native=f.native.querySelector('td.download a[href]');const original=native.getAttribute('href');
+    f.owned(row)[0].click();assert.equal(native.getAttribute('download'),'报告 空格.txt');assert.equal(native.getAttribute('href'),original);
+    body.click();assert.equal(native.getAttribute('download'),'报告 空格.txt');assert.equal(native.getAttribute('href'),original);
+    assert.deepEqual(f.hits,['file:owned','file:owned']);
+});
+
 console.log(`Artifact cards: ${passed} passed, ${failed} failed`);
 if (failed) process.exitCode = 1;

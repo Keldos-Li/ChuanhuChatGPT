@@ -2,6 +2,7 @@
 import html
 import json
 import inspect
+import re
 from functools import wraps
 from uuid import uuid4
 from copy import deepcopy
@@ -98,7 +99,9 @@ class ArtifactPanel:
             error = ('：' + str(record['error'])) if record.get('error') else ''
             escape = lambda value: html.escape(str(value), quote=True)
             basename, extension = split_filename(record['name'])
-            cards.append('<button type="button" class="model-file-card agent-file-card" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-remote-path="' + escape(record.get('remote_path', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
+            download_name = re.sub(r'[\\/\x00-\x1f\x7f]', '_', record['name'])
+            if download_name in ('', '.', '..'): download_name = 'artifact'
+            cards.append('<button type="button" class="model-file-card agent-file-card" data-download-name="' + escape(download_name) + '" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-remote-path="' + escape(record.get('remote_path', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
                          + file_icon(record['name']) + '<span class="model-file-content" data-file-part="content">'
                          + '<span class="model-file-name" data-file-part="name" title="' + escape(record['name']) + '"><span class="model-file-basename" data-file-part="basename">' + escape(basename) + '</span></span>'
                          + '<span class="model-file-meta" data-file-part="meta"><span class="model-file-extension">' + escape(file_type_label(record['name'])) + '</span> · <span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'

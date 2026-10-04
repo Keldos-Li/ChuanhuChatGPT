@@ -130,6 +130,9 @@
             if (index < 0 || links.length !== ids.length || !links[index]) {
                 feedback('文件链接正在准备，请稍后重试'); return;
             }
+            // The native URL keeps its isolated cache identity. The same-origin
+            // download hint supplies the original filename for both card/link.
+            links[index].setAttribute('download', card.dataset.downloadName || 'artifact');
             links[index].click();
         } else if (card.dataset.fileAction === 'retry') {
             const input = app.querySelector('#model-output-retry-id textarea, #model-output-retry-id input');
