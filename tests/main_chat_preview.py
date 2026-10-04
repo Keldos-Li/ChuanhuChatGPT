@@ -38,7 +38,52 @@ def build(language='zh_CN', hide_my_key=True):
     print('Synthetic input fixtures:',fixtures)
     env=install(ROOT,temporary/'history',language,presets)
     presets.HISTORY_DIR = str(temporary/'history')
+    if os.environ.get('CHUANHU_TRACE_LIFECYCLE'):
+        original_chat = env.base.BaseLLMModel._run_chat
+        def traced_chat(model, operation, *args, **kwargs):
+            try:
+                yield from original_chat(model, operation, *args, **kwargs)
+            finally:
+                print('LIFECYCLE CHAT_END', time.time()*1000, model.history_file_path, model._chat_running, flush=True)
+        env.base.BaseLLMModel._run_chat = traced_chat
+        original_delete = env.wrappers['delete_last_conversation']
+        def traced_delete(model, chatbot, request: gr.Request = None):
+            print('LIFECYCLE DELETE_BEGIN', time.time()*1000, model.history_file_path, getattr(model, '_chat_running', False), flush=True)
+            result = original_delete(model, chatbot, request=request)
+            print('LIFECYCLE DELETE_END', time.time()*1000, flush=True)
+            return result
+        env.wrappers['delete_last_conversation'] = traced_delete
+        original_boundary = AgentPanel.boundary_values
+        def traced_boundary(panel, capabilities):
+            callback = original_boundary(panel, capabilities)
+            def values(model, request: gr.Request):
+                result = callback(model, request)
+                print('LIFECYCLE END_BOUNDARY', time.time()*1000, model.history_file_path, getattr(model, '_chat_running', False), flush=True)
+                return result
+            return values
+        AgentPanel.boundary_values = traced_boundary
     from modules.history_selection import load_history_model
+    if os.environ.get('CHUANHU_TRACE_HISTORY'):
+        import traceback
+        agent_class = env.agents.OpenAIAgentsClient
+        original_setattr = agent_class.__setattr__
+        def trace_setattr(model, key, value):
+            if key == '_choice_epoch':
+                print('EPOCH TRACE', getattr(model, '_conversation_id', None), value, ''.join(traceback.format_stack(limit=4)), flush=True)
+            original_setattr(model, key, value)
+        agent_class.__setattr__ = trace_setattr
+        original_history_value = AgentPanel.history_value
+        def trace_history_value(panel, model):
+            result = original_history_value(panel, model)
+            print('RADIO TRACE', model._conversation_id, model.history_file_path, model.chatbot, result, flush=True)
+            return result
+        AgentPanel.history_value = trace_history_value
+        original_load = load_history_model
+        def load_history_model(model, filename, request: gr.Request = None):
+            print('HISTORY TRACE INPUT', model._conversation_id, model.agent_choice_target, model._retired, filename, flush=True)
+            result = original_load(model, filename, request=request)
+            print('HISTORY TRACE OUTPUT', getattr(result[0], '_conversation_id', None), flush=True)
+            return result
     import modules.webui as webui
     webui.get_html = lambda filename: (ROOT/"web_assets"/"html"/filename).read_text()
     utility_source = ast.parse((ROOT/'modules/utils.py').read_text())
@@ -49,7 +94,15 @@ def build(language='zh_CN', hide_my_key=True):
     # Keep assets real, but all private journals/history inside a synthetic folder.
     from main_chat_mock import MainChatMock
     synthetic_service=MainChatMock()
-    env.agents.worker_messages=synthetic_service.worker
+    if os.environ.get('CHUANHU_TRACE_LIFECYCLE'):
+        def traced_worker(command, *args, **kwargs):
+            for message in synthetic_service.worker(command, *args, **kwargs):
+                if message.get('type') == 'result' and message.get('outcome') in ('completed', 'cancelled', 'failed'):
+                    print('LIFECYCLE AGENT_TERMINAL_RESULT', time.time()*1000, command.get('action'), message.get('session_id'), message.get('outcome'), flush=True)
+                yield message
+        env.agents.worker_messages = traced_worker
+    else:
+        env.agents.worker_messages=synthetic_service.worker
     source=ast.parse((ROOT/'ChuanhuChatbot.py').read_text())
     block=next(node for node in source.body if isinstance(node,ast.With))
     layout=[]
@@ -83,17 +136,22 @@ def build(language='zh_CN', hide_my_key=True):
     gr.Chatbot.postprocess=scope['postprocess']
     # Exact actual event-chain source, no substitute dropdown or chat callbacks.
     event_prefixes=('cancelBtn.click(', 'user_input.submit(', 'submitBtn.click(',
-                    'retryBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(',
-                    'emptyBtn.click(', 'historySelectList.select(', 'uploadHistoryBtn.upload(', 'historyDeleteBtn.click(')
+                    'retryBtn.click(', 'delFirstBtn.click(', 'delLastBtn.click(', 'model_select_dropdown.input(', 'systemPromptTxt.change(',
+                    'emptyBtn.click(', 'historyIntentBtn.click(', 'uploadHistoryBtn.upload(', 'historyDeleteBtn.click(')
     events=[node for node in block.body
             if (isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id.endswith('_args') for target in node.targets))
             or (isinstance(node,ast.Expr) and ast.unparse(node).startswith(event_prefixes))]
     with gr.Blocks(theme=presets.small_and_beautiful_theme,analytics_enabled=False,title='ChuanhuChat — OFFLINE MAIN CHAT') as demo:
         exec(compile(ast.Module(body=layout,type_ignores=[]),str(ROOT/'ChuanhuChatbot.py'),'exec'),namespace)
-        def initial():
-            model=env.factory.get_model('GPT3.5 Turbo',user_name='')[0]
-            return model,model.system_prompt
-        demo.load(initial,outputs=[namespace['current_model'],namespace['systemPromptTxt']])
+        namespace['agent_panel'].history_list = namespace['historySelectList']
+        def initial(request: gr.Request):
+            model=env.factory.get_model('GPT3.5 Turbo',user_name='',request=request)[0]
+            histories=sorted((temporary/'history').glob('*.json'),key=lambda path:path.stat().st_mtime,reverse=True)
+            if histories: model=load_history_model(model,str(histories[0]),request=request)[0]
+            caps=namespace['capability_ui'].stream_values(model)
+            caps[0]=dict(caps[0],value=model._selection_name)
+            return model,model.system_prompt,*caps,env.base.init_history_list(model.user_name,prepend=model.history_file_path.removesuffix('.json'))
+        demo.load(initial,outputs=[namespace['current_model'],namespace['systemPromptTxt'],*namespace['capability_ui'].stream_outputs,namespace['historySelectList']]).then(namespace['agent_panel'].values,[namespace['current_model']],namespace['agent_panel'].outputs).then(namespace['agent_panel'].chat_value,[namespace['current_model']],[namespace['chatbot']]).then(namespace['capability_ui'].values,[namespace['current_model']],namespace['capability_ui'].outputs).then(namespace['agent_panel'].observe_history,[namespace['current_model']],namespace['agent_panel'].history_outputs,queue=True,concurrency_limit=None,show_progress='hidden').then(namespace['agent_panel'].history_boundary_values(namespace['capability_ui']),[namespace['current_model']],[*namespace['agent_panel'].outputs,*namespace['capability_ui'].outputs],show_progress='hidden')
         exec(compile(ast.Module(body=events,type_ignores=[]),str(ROOT/'ChuanhuChatbot.py'),'exec'),namespace)
     webui.reload_javascript()
     env.agents.shared.chuanhu_path=str(temporary)

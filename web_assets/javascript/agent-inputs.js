@@ -39,6 +39,10 @@
         const input = (event.composedPath ? event.composedPath() : [event.target])
             .find(node => node?.matches?.('#agent-upload-files input[type=file]'));
         if (!input || !input.files?.length) return;
+        if (window.chuanhuBeginUpload) {
+            if (!window.chuanhuBeginUpload(Array.from(input.files))) { event.preventDefault(); event.stopImmediatePropagation(); input.value = ''; }
+            return;
+        }
         // Gradio can recreate this input when a model changes while a previous
         // upload is still in flight. Keep that batch's conversation immutable
         // until its upload callback has captured it.
@@ -58,8 +62,10 @@
         if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
         const button = (event.composedPath ? event.composedPath() : [event.target])
             .find(node => node?.matches?.('button'));
-        if (button?.matches?.('.agent-input-remove-card')) {
+        if (button?.matches?.('.agent-input-remove-card, .agent-upload-retry')) {
             event.preventDefault(); event.stopImmediatePropagation();
+            if (button.dataset.uploadId) { window.chuanhuUploadRemove?.(button.dataset.uploadId); return; }
+            if (button.dataset.uploadRetry) { window.chuanhuUploadRetry?.(); return; }
             if (window.chuanhuInputBusy?.() || window.chuanhuAgentUploading) return;
             const app = root(), input = app.querySelector('#agent-input-remove-payload textarea, #agent-input-remove-payload input');
             const trigger = app.querySelector('#agent-input-remove');

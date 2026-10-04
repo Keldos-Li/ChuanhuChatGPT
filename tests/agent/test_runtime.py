@@ -534,3 +534,15 @@ def test_repeated_uncertain_recovery_preserves_baseline_and_submission_receipt()
     assert again['turn_id'] is None and again['outcome'] == 'incomplete' and again['text'] == ''
     assert again['baseline_turn_ids'] == ['old'] and again['submission_started'] is True
     assert not client.submitted
+
+
+def test_terminal_reconciliation_does_not_request_artifact_listing():
+    client = FakeClient(saved_turn='completed')
+    client.saved_items = [{'id': 'a', 'type': 'message', 'role': 'assistant', 'turn_id': 't1',
+                           'content': [{'type': 'output_text', 'text': 'final'}]}]
+    def forbidden(*args, **kwargs):
+        raise AssertionError('File listing must not block terminal text reconciliation')
+    client.beta.agents.sessions.artifacts.list = forbidden
+    state = runtime.TurnState(session_id='sess_test', turn_id='t1', outcome='completed')
+    runtime._reconcile_terminal(client, state)
+    assert state.sync_complete is True and state.outcome == 'completed'

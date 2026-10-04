@@ -48,8 +48,10 @@ def predict(current_model, inputs, chatbot, use_websearch=False, files=None, rep
             inputs = consume_submission(current_model, inputs)
             if files: require_capability(current_model, 'input_attachments')
             if use_websearch: require_capability(current_model, 'external_websearch')
-            iterator = current_model.predict(inputs, chatbot, use_websearch, files, reply_language)
-            first = next(iterator)
+            execute = current_model.background_predict if getattr(current_model, 'is_hosted_agent', False) else current_model.predict
+            iterator = execute(inputs, chatbot, use_websearch, files, reply_language)
+            if not getattr(current_model, 'is_hosted_agent', False): first = next(iterator)
+        if getattr(current_model, 'is_hosted_agent', False): first = next(iterator)
         yield first
         yield from iterator
     except StopIteration:
@@ -80,6 +82,9 @@ def load_chat_history(current_model, new_history_file_path=None, request: gr.Req
 
 
 def delete_chat_history(current_model, filename, request: gr.Request = None):
+    from modules.agent.tasks import TASKS
+    if TASKS.find_history(current_model.user_name, filename) is not None:
+        raise gr.Error('此历史仍有后台任务，完成或确认停止后再删除')
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
     with model_lock(current_model):
@@ -88,13 +93,52 @@ def delete_chat_history(current_model, filename, request: gr.Request = None):
         return current_model.delete_chat_history(filename)
 
 
-def interrupt(current_model, request: gr.Request = None):
+def interrupt(current_model, target=None, request: gr.Request = None):
+    from modules.agent.tasks import TASKS
+    def stop_task(task):
+        result = task.stop()
+        if getattr(current_model, '_conversation_id', None) == task.conversation:
+            task.project(current_model)
+            if task.model is not current_model:
+                message = task.model.take_completed_ui_errors()
+                if message:
+                    from uuid import uuid4
+                    operation = uuid4().hex
+                    current_model.record_ui_error(message, operation=operation, source='stop')
+                    current_model.complete_error_operation(operation, source='stop')
+        return result
+    if request is not None and current_model.user_name != (request.username or ''):
+        raise gr.Error('此任务不属于当前登录用户')
     if getattr(current_model, "is_hosted_agent", False) and request is not None:
         current_model.bind_owner(request)
+    if target is not None:
+        if (not isinstance(target, dict) or set(target) != {'conversation', 'generation'}
+                or not isinstance(target['conversation'], str) or not target['conversation']
+                or not isinstance(target['generation'], (str, type(None)))):
+            raise gr.Error('停止目标已变化，请在当前对话重新点击停止')
+        task = TASKS.find_conversation(current_model.user_name, target['conversation'])
+        if task is not None:
+            if task.generation != target['generation']: return '原任务已结束，未停止后续任务'
+            return stop_task(task)
+        if (not getattr(current_model, 'is_hosted_agent', False)
+                or current_model._conversation_id != target['conversation']
+                or current_model._state.get('generation') != target['generation']):
+            return '原任务当前没有本地观察，请打开该历史确认状态；未停止当前任务'
     with model_lock(current_model):
+        if target is not None and (current_model._conversation_id != target['conversation']
+                or current_model._state.get('generation') != target['generation']):
+            return '原任务已结束，未停止后续任务'
         if getattr(current_model, '_pending_send', None):
             current_model._pending_send = None
             return '本次输入尚未提交，已取消'
+    if getattr(current_model, 'is_hosted_agent', False):
+        task = TASKS.find(current_model)
+        if task is not None:
+            if target is not None and task.generation != target['generation']:
+                return '原任务已结束，未停止后续任务'
+            return stop_task(task)
+        if target is not None:
+            return current_model.interrupt(expected_generation=target['generation'])
     return current_model.interrupt() or i18n("msg.status.stop_requested")
 
 
@@ -157,7 +201,20 @@ def rename_chat_history(current_model, filename, request: gr.Request = None):
 def auto_name_chat_history(current_model, name_chat_method, user_question, single_turn_checkbox, request: gr.Request = None):
     if getattr(current_model, 'is_hosted_agent', False) and request is not None:
         current_model.bind_owner(request)
-    return current_model.auto_name_chat_history(name_chat_method, user_question, single_turn_checkbox)
+    envelope = user_question if isinstance(user_question, dict) else None
+    with model_lock(current_model):
+        if isinstance(user_question, dict):
+            if (user_question.get('target') != id(current_model)
+                    or user_question.get('token') != getattr(current_model, '_submission_token', None)
+                    or getattr(current_model, '_submission_history_path', None) != current_model.history_file_path):
+                return gr.update()
+            user_question = user_question['text']
+        if getattr(current_model, '_chat_retired', False) or getattr(current_model, '_retired', False):
+            return gr.update()
+        if not getattr(current_model, 'is_hosted_agent', False):
+            # Ordinary naming and rename must stay in the same reservation.
+            return current_model.auto_name_chat_history(name_chat_method, user_question, single_turn_checkbox)
+    return current_model.auto_name_chat_history(name_chat_method, user_question, single_turn_checkbox, submission=envelope)
 
 
 def export_markdown(current_model, filename, chatbot, request: gr.Request = None):
@@ -560,8 +617,27 @@ def save_file(filename, model):
     # check if history file path matches user_name
     # if user access control is not enabled, user_name is empty, don't check
     assert os.path.basename(os.path.dirname(history_file_path)) == model.user_name or model.user_name == ""
-    with open(history_file_path, "w", encoding="utf-8") as f:
-        json.dump(json_s, f, ensure_ascii=False, indent=4)
+    import tempfile
+    # Streaming saves must not reorder Radio's index-keyed rows under a click.
+    # Advance recency when a user turn starts; keep it stable through its frames.
+    stable_times = None
+    if os.path.isfile(history_file_path):
+        previous_stat = os.stat(history_file_path)
+        with open(history_file_path, "r", encoding="utf-8") as previous_file:
+            previous_json = json.load(previous_file)
+        user_turns = lambda rows: sum(isinstance(row, dict) and row.get('role') == 'user' for row in rows)
+        if user_turns(previous_json['history']) == user_turns(history):
+            stable_times = (previous_stat.st_atime_ns, previous_stat.st_mtime_ns)
+    fd, temporary = tempfile.mkstemp(prefix=".chat-", dir=os.path.dirname(history_file_path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(json_s, f, ensure_ascii=False, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        if stable_times is not None: os.utime(temporary, ns=stable_times)
+        os.replace(temporary, history_file_path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
 
     save_md_file(history_file_path)
     return history_file_path
@@ -646,11 +722,9 @@ def get_history_list(user_name=""):
 
 def init_history_list(user_name="", prepend=None):
     history_names = get_history_names(user_name)
-    if prepend is not None and prepend not in history_names:
-        history_names.insert(0, prepend)
-    return gr.Radio(
-        choices=history_names, value=history_names[0] if history_names else ""
-    )
+    # A reserved filename is not a history entry. Only select persisted chats.
+    selected = prepend if prepend in history_names else None
+    return gr.Radio(choices=history_names, value=selected)
 
 
 def filter_history(user_name, keyword):
@@ -966,17 +1040,14 @@ def get_corresponding_file_type_by_model_name(selected_model_name):
 
 
 def new_auto_history_filename(username):
-    latest_file = get_first_history_name(username)
-    if latest_file:
-        with open(
-            os.path.join(HISTORY_DIR, username, latest_file + ".json"),
-            "r",
-            encoding="utf-8",
-        ) as f:
-            if len(f.read()) == 0:
-                return latest_file
     now = i18n("ui.history.new_chat_prefix") + datetime.datetime.now().strftime("%m-%d %H-%M")
-    return f"{now}.json"
+    root = os.path.join(HISTORY_DIR, username)
+    filename = f"{now}.json"
+    index = 2
+    while os.path.lexists(os.path.join(root, filename)):
+        filename = f"{now} ({index}).json"
+        index += 1
+    return filename
 
 
 def get_history_filepath(username):

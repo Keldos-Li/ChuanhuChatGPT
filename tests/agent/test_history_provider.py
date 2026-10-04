@@ -6,7 +6,7 @@ from agent_fixtures import complete, env, request, select, send
 
 
 @pytest.mark.parametrize('name', ['GPT3.5 Turbo', 'OpenAI Agent'])
-@pytest.mark.parametrize('identifier', ['stem', 'filename', 'absolute'])
+@pytest.mark.parametrize('identifier', [None, ''])
 def test_current_unsaved_draft_preserves_model_and_ui(env, monkeypatch, name, identifier):
     from copy import deepcopy
     from modules.history_selection import load_history_model
@@ -17,8 +17,7 @@ def test_current_unsaved_draft_preserves_model_and_ui(env, monkeypatch, name, id
     model.temperature = 0.37
     model._pending_input_text = 'Synthetic unsent input'
     filename = model.history_file_path
-    target = {'stem': filename.removesuffix('.json'), 'filename': filename,
-              'absolute': str(env.history_dir / filename)}[identifier]
+    target = identifier
     before = deepcopy({key: getattr(model, key, None) for key in (
         'history_file_path', 'history', 'chatbot', 'system_prompt', 'temperature',
         '_state', '_tool_settings', '_pending_input_text', '_conversation_id')})

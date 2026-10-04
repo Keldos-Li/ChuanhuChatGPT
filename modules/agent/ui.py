@@ -10,7 +10,7 @@ import gradio as gr
 from modules.agent.tools import FUNCTIONS, tool_availability
 from modules.agent.operations import OperationScope
 from modules.agent.file_icons import file_icon, file_size_label, file_type_label, split_filename
-from modules.model_capabilities import capabilities
+from modules.model_capabilities import capabilities, model_lock
 from modules.presets import i18n
 
 MODEL_EFFORTS = {
@@ -181,7 +181,7 @@ class AgentPanel:
                 (arg for arg in args if hasattr(arg, 'chatbot')), None)
             local = self.activity_value(model, values[index])
             if header:
-                if _agent(model): values[index] = ''
+                if _agent(model) and not (isinstance(values[index], dict) and values[index].get('__type__') == 'update' and 'value' not in values[index]): values[index] = ''
                 return (*values, local)
             values[index] = local
             return tuple(values) if isinstance(result, (tuple, list)) else values[0]
@@ -212,6 +212,9 @@ class AgentPanel:
         if isinstance(rows, dict) and rows.get('__type__') == 'update':
             if 'value' not in rows: return rows
             return dict(rows, value=self.render_chat(model, rows['value']))
+        if rows and (getattr(model, '_running', False) or getattr(model, '_background_busy', False)) and rows[-1][1] is None:
+            rows = deepcopy(rows)
+            rows[-1] = [rows[-1][0], '']
         return render_projection(message_file_projection(model, rows), self.format_user, self.format_assistant)
 
     def chat_value(self, model, request: gr.Request):
@@ -235,7 +238,7 @@ class AgentPanel:
         if not _agent(model): return gr.update(value=[], label='{}', interactive=False)
         with model._lock:
             if interactive is None:
-                interactive = not (model._running or bool(getattr(model, '_pending_send', None)) or model._needs_sync
+                interactive = not (model._running or getattr(model, '_background_busy', False) or bool(getattr(model, '_pending_send', None)) or model._needs_sync
                                    or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed'))
             records = model._input_stager.snapshot() if model._input_stager is not None else ()
             metadata = {'target': model._conversation_id, 'ids': [record.input_id for record in records], 'files': [{'id':record.input_id,'name':record.name,'basename':split_filename(record.name)[0],'size':record.size,
@@ -252,6 +255,7 @@ class AgentPanel:
     def output_components(self):
         self.artifacts = ArtifactPanel()
         self.activity = gr.Markdown('', visible=False, elem_id='agent-activity-feedback')
+        self.stop_target = gr.JSON(value=None, visible=False)
         with gr.Column(visible=False, elem_id='agent-browser-requests', min_width=0, scale=0) as self.browser_group:
             self.request_id = gr.Dropdown(label='当前网站请求', choices=[])
             self.browser_html = gr.HTML()
@@ -285,7 +289,7 @@ class AgentPanel:
             self.availability = gr.Dataframe(headers=[i18n('ui.toolbox.agent.' + key) for key in ('capability', 'status', 'description')], datatype=['str'] * 3, interactive=False, wrap=True, visible=False)
             self.fork = gr.Button(i18n('ui.toolbox.agent.fork'), visible=False)
             self.tool_revision = gr.Number(value=0, precision=0, visible=False)
-            self.config_target = gr.Textbox(visible=False)
+            self.config_target = gr.Textbox(visible=False, elem_id="agent-config-target")
     @staticmethod
     def config_from_inputs(network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp):
         return {'network': network, 'code_execution': code, 'web_search': search, 'search_mode': mode,
@@ -300,6 +304,50 @@ class AgentPanel:
         if not model._state.get('session_id'):
             return dict(config, tool_search=False, programmatic_tool_calling=False)
         return config
+
+    def wrap_model_change(self, change, capability_ui, legacy_outputs):
+        outputs = list(dict.fromkeys([legacy_outputs[0], *self.outputs, *capability_ui.stream_outputs, *legacy_outputs[1:]]))
+        @wraps(change)
+        def change_with_ui(*args, **kwargs):
+            result = list(change(*args, **kwargs))
+            model = result[0]
+            if _agent(model): result[2] = gr.update(value=self.render_chat(model, model.chatbot))
+            values = dict(zip(legacy_outputs, result))
+            values.update(zip(self.outputs, self.values(model)))
+            values.update(zip(capability_ui.stream_outputs, capability_ui.stream_values(model)))
+            return tuple(values[component] for component in outputs)
+        return change_with_ui
+
+    def wrap_reset(self, reset, capability_ui):
+        @wraps(reset)
+        def reset_with_ui(model, remain_system_prompt=False, request: gr.Request = None):
+            with model_lock(model):
+                if _agent(model):
+                    if request is not None: model.bind_owner(request)
+                    if getattr(model, "_pending_send", None):
+                        raise gr.Error("消息尚在提交，请等待提交完成")
+                    previous = model
+                    model = previous.new_view()
+                    previous.retire()
+                result = reset(model, remain_system_prompt, request=request)
+                # Publish the new visit before the cleared chat/Radio in the
+                # same response, not in a later dependency callback.
+                return (model, *capability_ui.stream_values(model), *result)
+        return reset_with_ui
+
+    def wrap_history_load(self, load, capability_ui=None):
+        @wraps(load)
+        def load_with_selection(model, filename, request: gr.Request = None):
+            with model_lock(model):
+                result = load(model, filename, request=request)
+                if not hasattr(result[0], 'chatbot'):
+                    return (*result, *((gr.update(),) if capability_ui is not None else ()), gr.update())
+                # A rejected stale click must restore the authoritative Radio
+                # selection instead of leaving a selected label over a draft.
+                marker = (() if capability_ui is None else
+                          (capability_ui.stream_values(result[0])[capability_ui.stream_outputs.index(capability_ui.marker)],))
+                return (*result, *marker, self.history_value(result[0]))
+        return load_with_selection
 
     def wrap_transfer(self, transfer):
         def transfer_input(inputs, current_model=None, agent_model=None, agent_reasoning='default', agent_choice_revision=None, agent_files=None,
@@ -327,7 +375,7 @@ class AgentPanel:
     def sidebar_values(self, model):
         if not hasattr(self, 'sidebar'): return []
         enabled = _agent(model)
-        locked = enabled and (bool(model._state.get('session_id')) or model._running or model._needs_sync
+        locked = enabled and (bool(model._state.get('session_id')) or model._running or getattr(model, '_background_busy', False) or model._needs_sync
                               or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed')
                               or bool(getattr(model, '_pending_send', None)))
         return [gr.update(label='Agent' if enabled else self.sidebar[-1]),
@@ -359,7 +407,7 @@ class AgentPanel:
             return ([gr.update(visible=getattr(self, 'model_panel_visible', False), open=getattr(self, 'model_panel_visible', False))] if hasattr(self, 'accordion') else []) + ([gr.update(visible=False)] if hasattr(self, 'separator') else []) + ([gr.update(visible=False)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=False), gr.update(visible=False), '', gr.update(), gr.update(),
                     gr.update(visible=False), gr.update(choices=[], value=None), '', *[gr.update(visible=False)] * 4,
                     *ArtifactPanel.values(model), *[gr.update()] * 12] + ([gr.update(visible=False), gr.update(value=[], interactive=False), gr.update(value=[], interactive=False), ''] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + ['', '']
-        busy = model._running or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
+        busy = model._running or getattr(model, '_background_busy', False) or bool(getattr(model, '_pending_send', None)) or model._state.get('outcome') not in ('not_started', 'completed', 'cancelled', 'failed') or model._needs_sync
         next_model, next_reasoning = model.agent_model_choice
         cards = model._pending_actions
         chosen = cards[0]['request_id'] if cards else None
@@ -378,11 +426,20 @@ class AgentPanel:
     def stream_outputs(self):
         outputs = [self.model, self.reasoning, self.browser_group, self.request_id, self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit, *self.artifacts.outputs]
         if hasattr(self, 'input_files'): outputs += [self.input_files, self.input_picker]
+        if hasattr(self, 'history_list'): outputs += [self.history_list]
         return outputs
+
+    def history_value(self, model):
+        from modules.models.base_model import get_history_names
+        from pathlib import Path
+        names = get_history_names(model.user_name)
+        selected = Path(model.history_file_path).name.removesuffix('.json')
+        return gr.update(choices=names, value=selected if selected in names else None)
 
     def stream_values(self, model, request=None):
         values = self.values(model, request=request, include_config=False)
-        return [values[self.outputs.index(component)] for component in self.stream_outputs]
+        return [self.history_value(model) if component is getattr(self, 'history_list', None)
+                else values[self.outputs.index(component)] for component in self.stream_outputs]
 
     def boundary_values(self, capability_ui):
         def values_at_boundary(model, request: gr.Request):
@@ -404,7 +461,8 @@ class AgentPanel:
         def predict_with_ui(model, inputs, chatbot, use_websearch=False, files=None, reply_language=None, agent_files=None, request: gr.Request = None):
             def controls():
                 if compact and not _agent(model):
-                    return [gr.update() for _ in [*self.stream_outputs, *capability_ui.stream_outputs]]
+                    return [self.history_value(model) if component is getattr(self, 'history_list', None) else gr.update()
+                            for component in [*self.stream_outputs, *capability_ui.stream_outputs]]
                 return [*(self.stream_values(model, request=request) if compact else self.values(model, request=request, include_config=False)),
                         *(capability_ui.stream_values(model) if compact else capability_ui.values(model))]
             if _agent(model): files = agent_files
@@ -420,19 +478,30 @@ class AgentPanel:
                     return
             updates = FrameUpdates()
             target, owner = (model._conversation_id, model._owner) if operation else (None, None)
+            visit = model.agent_choice_target if operation else None
             try:
                 projected = ((self.render_chat(model, chat), status) for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request))
                 try:
                     for chat, status in _chat_frames(projected):
-                        if operation and (model._retired or model._conversation_id != target or model._owner != owner
-                                          or getattr(model, '_predict_error_operation', None) != operation): return
+                        if operation and (model._retired or model._conversation_id != target or model._owner != owner or model.agent_choice_target != visit
+                                          or getattr(model, '_predict_error_operation', None) != operation):
+                            yield tuple(gr.update() for _ in [None, None, *(self.stream_outputs if compact else self.outputs), *(capability_ui.stream_outputs if compact else capability_ui.outputs)])
+                            return
                         yield chat, status, *updates.changes(controls())
                 except gr.Error as error:
                     if operation is None: raise
                     model.record_ui_error(str(error), operation=operation)
-                if operation and (model._retired or model._conversation_id != target or model._owner != owner or getattr(model, '_predict_error_operation', None) != operation): return
+                if operation and (model._retired or model._conversation_id != target or model._owner != owner or model.agent_choice_target != visit or getattr(model, '_predict_error_operation', None) != operation):
+                    yield tuple(gr.update() for _ in [None, None, *(self.stream_outputs if compact else self.outputs), *(capability_ui.stream_outputs if compact else capability_ui.outputs)])
+                    return
                 final_chat = gr.update(value=self.render_chat(model, model.chatbot)) if _agent(model) else gr.update()
+                final_generation = model._state.get('generation') if operation else None
                 yield final_chat, (model._status() if _agent(model) else gr.update()), *updates.changes(controls())
+                if operation and (model._retired or model.agent_choice_target != visit or model._conversation_id != target
+                        or model._owner != owner or getattr(model, '_predict_error_operation', None) != operation
+                        or model._state.get('generation') != final_generation):
+                    yield tuple(gr.update() for _ in [None, None, *(self.stream_outputs if compact else self.outputs), *(capability_ui.stream_outputs if compact else capability_ui.outputs)])
+                    return
                 if operation is not None: model.complete_error_operation(operation)
             finally:
                 if operation is not None:
@@ -455,7 +524,7 @@ class AgentPanel:
                     if tuple(str(path) for path in files or []) == model._pending_upload_paths:
                         update.pop('value', None)
                     return update
-            self.input_files.change(stage_files, [current_model, self.input_files], [self.input_files], queue=False)
+            self.input_files.change(stage_files, [current_model, self.input_files], [self.input_files], queue=False, show_progress='hidden')
             def remove_files(model, payload, request: gr.Request):
                 if not _agent(model):
                     yield '', '', self.input_value(model)
@@ -486,9 +555,9 @@ class AgentPanel:
                 yield message, gr.update(value=[]), self.input_value(model)
                 model.complete_error_operation(operation)
             upload_event = self.input_picker.upload(self.status_callback(upload_files, input_feedback=True), [current_model, self.input_picker, self.input_target],
-                                     [self.input_feedback, self.input_picker, self.input_files], queue=True, concurrency_limit=None,
-                js='(model, files, target) => { window.chuanhuAgentUploadStaging = true; window.chuanhuRefreshSendButton?.(); return [model, files, window.chuanhuAgentUploadTarget || target]; }')
-            upload_event.then(None, [], [], queue=False, js='() => { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; window.chuanhuRefreshSendButton?.(); }').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
+                                     [self.input_feedback, self.input_picker, self.input_files], queue=True, concurrency_limit=None, show_progress='hidden',
+                js='(model, files, target) => { files = window.chuanhuUploadStaging?.(files) ?? files; if (!window.chuanhuUploadStaging) window.chuanhuAgentUploadStaging = true; window.chuanhuRefreshSendButton?.(); return [model, files, window.chuanhuAgentUploadTarget || target]; }')
+            upload_event.then(None, [self.input_files], [], queue=False, js='(files) => { if (window.chuanhuUploadCommitted) window.chuanhuUploadCommitted(files); else { window.chuanhuAgentUploading = false; window.chuanhuAgentUploadStaging = false; window.chuanhuRefreshSendButton?.(); } }').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         def choose_settings(model, name, effort, revision, target, request: gr.Request):
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort, revision, target=target)
@@ -547,16 +616,33 @@ class AgentPanel:
             updates = FrameUpdates()
             def current():
                 return not model._retired and model.agent_choice_target == visit and model._conversation_id == target and model._owner == owner and getattr(model, '_history_epoch', None) == epoch
-            for chat, status in _chat_frames(model.observe_history(error_operation=epoch)):
-                if not current(): return
+            from modules.agent.tasks import TASKS
+            task = TASKS.find(model)
+            if task is None and not model._needs_sync: return
+            if task is None and model._needs_sync:
+                task = TASKS.start(model, lambda: model.observe_history(error_operation=epoch))
+            model._history_epoch = epoch
+            source = task.subscribe(model) if task is not None else model.observe_history(error_operation=epoch)
+            for chat, status in _chat_frames(source):
+                if not current():
+                    yield tuple(gr.update() for _ in self.history_outputs)
+                    return
                 extras = (*capability_ui.stream_values(model), *self.stream_values(model, request=request)) if capability_ui is not None else ()
                 yield self.render_chat(model, chat), status, *updates.changes(extras)
-            if not current(): return
+            if not current():
+                yield tuple(gr.update() for _ in self.history_outputs)
+                return
             extras = (*capability_ui.stream_values(model), *self.stream_values(model, request=request)) if capability_ui is not None else ()
             with model._lock:
-                if not current(): return
-                model._history_ui_complete_scope = OperationScope.capture(model)
+                stale = not current()
+                if not stale: model._history_ui_complete_scope = OperationScope.capture(model)
+            if stale:
+                yield tuple(gr.update() for _ in self.history_outputs)
+                return
             yield gr.update(value=self.render_chat(model, model.chatbot)), model._status(), *updates.changes(extras)
+            if not current():
+                yield tuple(gr.update() for _ in self.history_outputs)
+                return
             model.complete_error_operation(epoch)
         self.observe_history = self.status_callback(observe_history, 1)
         def retry_file(model, identifier, request: gr.Request):
@@ -566,12 +652,19 @@ class AgentPanel:
                 scope = OperationScope.capture(model)
                 updates = FrameUpdates()
                 for _, status in model.retry_artifact(identifier, error_operation=operation):
-                    if not scope.current(model): return
+                    if not scope.current(model):
+                        yield tuple(gr.update() for _ in [None, *self.stream_outputs])
+                        return
                     yield status, *updates.changes(self.stream_values(model, request=request))
             except gr.Error as error:
-                if 'scope' in locals() and not scope.current(model): return
+                if 'scope' in locals() and not scope.current(model):
+                    yield tuple(gr.update() for _ in [None, *self.stream_outputs])
+                    return
                 model.record_ui_error(str(error), operation=operation)
                 yield tuple(gr.update() for _ in [None, *self.stream_outputs])
+            if 'scope' in locals() and not scope.current(model):
+                yield tuple(gr.update() for _ in [None, *self.stream_outputs])
+                return
             if 'scope' in locals() and scope.current(model): model.complete_error_operation(operation)
         self.artifacts.retry.click(self.status_callback(retry_file), [current_model, self.artifacts.retry_id], [status_display, *self.stream_outputs], show_progress='hidden').then(self.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
         self.request_id.input(browser_form, [current_model, self.request_id], [self.browser_html, self.approve, self.deny, self.cancel_request, self.login_submit])

@@ -52,7 +52,7 @@ def test_startup_select_preserves_current_draft_without_clicks(tmp_path, model_n
                 time.sleep(0.1)
             assert marker.exists(), (tmp_path / 'server.log').read_text()
             result = json.loads(marker.read_text())
-            assert result == {'selection': 'Synthetic unsaved draft', 'preserved': True,
+            assert result == {'selection': None, 'preserved': True,
                               'updates_only': True, 'history_files': 0}, result
             # Callback completion can precede the browser's initial render.
             deadline = time.monotonic() + 15
@@ -65,7 +65,7 @@ def test_startup_select_preserves_current_draft_without_clicks(tmp_path, model_n
                 if 'Synthetic unsent input' in rendered or time.monotonic() >= deadline:
                     break
                 time.sleep(0.1)
-            assert 'radio "Synthetic unsaved draft" [checked]' in rendered
+            assert 'radio "Synthetic unsaved draft"' not in rendered
             assert 'Synthetic unsent input' in rendered
             assert rendered.count('Synthetic preserved UI value') == 22
             assert model_name in rendered
@@ -113,9 +113,12 @@ def serve(port, marker, model_name):
         outputs = [state, gr.Dropdown(choices=[model_name], value=model_name)]
         outputs += [gr.Textbox(value='Synthetic preserved UI value') for _ in range(22)]
         gr.Textbox(value='Synthetic unsent input', elem_id='unsent-input')
-        app.load(lambda: (model, gr.Radio(choices=['Synthetic unsaved draft', 'Synthetic saved history'],
-                                          value='Synthetic unsaved draft')), outputs=[state, radio])
-        radio.select(automatic_selection, [state, radio], outputs)
+        def initial():
+            from modules.models.base_model import init_history_list
+            automatic_selection(model, None)
+            return model, init_history_list(model.user_name, prepend=model.history_file_path.removesuffix('.json'))
+        app.load(initial, outputs=[state, radio])
+        radio.input(automatic_selection, [state, radio], outputs)
     app.launch(server_name='127.0.0.1', server_port=int(port))
 
 

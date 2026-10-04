@@ -51,6 +51,12 @@ class BindingStore:
         with self._connect() as db:
             db.execute('INSERT OR REPLACE INTO bindings VALUES (?, ?, ?)', (owner, history_key(path), json.dumps(record, ensure_ascii=False)))
 
+    def copy_binding(self, owner, before, after):
+        """Retain source authority until the history file migration completes."""
+        with self._connect() as db:
+            db.execute('INSERT INTO bindings SELECT owner, ?, record FROM bindings WHERE owner=? AND history=?',
+                       (history_key(after), owner, history_key(before)))
+
     def rename(self, owner, before, after):
         with self._connect() as db:
             db.execute('UPDATE bindings SET history=? WHERE owner=? AND history=?', (history_key(after), owner, history_key(before)))

@@ -659,7 +659,7 @@ img.avatar-image {
 #agent-pending-files { display: none !important; }
 #chatbot-input-tb-row > .agent-pending-cards {
     display: flex; flex-wrap: nowrap; flex: 0 0 100%; width: 0; min-width: 100%; max-width: 100%;
-    gap: 8px; overflow-x: auto; padding: 12px 12px 4px; box-sizing: border-box;
+    gap: 8px; overflow-x: auto; padding: 12px 12px 8px; box-sizing: border-box;
     scrollbar-width: thin; overscroll-behavior-x: contain;
 }
 .agent-pending-cards[hidden], .agent-user-file-source { display: none !important; }
@@ -669,7 +669,7 @@ img.avatar-image {
     flex: 0 0 220px; min-width: 0; max-width: 100%; padding: 10px 12px;
     box-sizing: border-box; border-radius: 12px;
     background: var(--background-fill-secondary); color: var(--body-text-color);
-    border: 1px solid var(--border-color-primary);
+    border: 0;
 }
 .agent-file-card--mini .agent-input-icon {
     display: inline-flex; flex: 0 0 28px; width: 28px; height: 34px;
@@ -677,15 +677,23 @@ img.avatar-image {
 .agent-file-card--mini .agent-input-card-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .agent-file-card--mini .agent-input-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .agent-file-card--mini .agent-input-meta { color: var(--body-text-color-subdued); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-input-remove-card {
-    position: absolute; right: 3px; top: 3px; width: 24px; height: 24px;
-    padding: 0; border-radius: 50%; font-size: 18px; line-height: 24px;
-    color: var(--body-text-color); background: var(--background-fill-primary);
-    opacity: 0; cursor: pointer; border: 1px solid var(--border-color-primary);
+#chatbot-input-tb-row .agent-input-remove-card {
+    position: absolute; right: -5px; top: -5px; width: 22px; height: 22px;
+    padding: 0; border-radius: 50%; font-size: 18px; line-height: 22px;
+    color: #fff; background: #60636b;
+    opacity: 0; cursor: pointer; border: 0;
 }
-.agent-input-card:hover .agent-input-remove-card, .agent-input-card:focus-within .agent-input-remove-card { opacity: 1; }
+#chatbot-input-tb-row .agent-input-card:hover .agent-input-remove-card, #chatbot-input-tb-row .agent-input-card:focus-within .agent-input-remove-card { opacity: 1; }
 .agent-input-remove-card:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 2px; }
 .agent-input-remove-card:disabled { cursor: not-allowed; }
 .agent-user-files { margin: 0 0 calc(12px - var(--spacing-xxl) - var(--spacing-lg)) auto; }
-@media (hover: none) { .agent-input-remove-card { opacity: 1; } }
+@media (hover: none) { #chatbot-input-tb-row .agent-input-remove-card { opacity: 1; } }
 @media (max-width: 499px) { .agent-file-card--mini { flex-basis: 190px; } }
+
+/* Native transport UI stays outside the composer and chat; mini cards own progress. */
+#agent-upload-files > .wrap { display: none !important; }
+.agent-upload-progress svg { width: 28px; height: 28px; transform: rotate(-90deg); }
+.agent-upload-progress circle { fill: none; stroke-width: 3; }
+.agent-upload-track { stroke: var(--border-color-primary); }
+.agent-upload-value { stroke: var(--primary-500); stroke-linecap: round; }
+.agent-upload-retry { border: 0; padding: 0; background: none; color: var(--primary-500); font-size: 11px; cursor: pointer; }

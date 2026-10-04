@@ -51,14 +51,13 @@ var currentTime = new Date().getTime();
 let windowWidth = window.innerWidth; // 初始窗口宽度
 
 function addInit() {
-    var needInit = {chatbotIndicator, uploaderIndicator};
-
     chatbotIndicator = gradioApp().querySelector('#chuanhu-chatbot > div.wrap');
     uploaderIndicator = gradioApp().querySelector('#upload-index-file > div.wrap');
     uploaderIndicator2 = gradioApp().querySelector('#upload-index-file');
     chatListIndicator = gradioApp().querySelector('#history-select-dropdown > div.wrap');
     modelSelectIndicator = gradioApp().querySelector('#gr-model-description > div.wrap');
 
+    var needInit = {chatbotIndicator, uploaderIndicator, chatListIndicator, modelSelectIndicator};
     for (let elem in needInit) {
         if (needInit[elem] == null) {
             // addInited = false;
@@ -232,11 +231,13 @@ function refreshSendButton() {
                 new Set(ids).size === ids.length && ids.length === preview.querySelectorAll('tr.file').length;
         } catch (_) { /* A partial/stale preview is not a ready attachment. */ }
     }
-    const uploading = conversation && (window.chuanhuAgentUploading || window.chuanhuAgentUploadStaging ||
+    const uploading = conversation && (window.chuanhuAgentUploading || window.chuanhuAgentUploadStaging || window.chuanhuUploadHasPending?.() ||
         app.querySelector('#agent-upload-files .uploading, #agent-upload-files .file-preview-holder'));
     // Gradio hides Send while a turn is running, including remote states that
     // can outlive the local busy flag. Never undo that state on an input event.
-    const blocked = textarea.disabled || button.hidden || button.classList.contains('hidden') ||
+    const configTarget = app.querySelector('#agent-config-target textarea, #agent-config-target input');
+    const awaitingTarget = conversation && configTarget && configTarget.value !== conversation;
+    const blocked = awaitingTarget || textarea.disabled || button.hidden || button.classList.contains('hidden') ||
         window.chuanhuInputBusy?.() || uploading;
     const disabled = Boolean(blocked || !(textarea.value.trim() || hasAttachments));
     if (button.disabled !== disabled) button.disabled = disabled;
@@ -401,6 +402,8 @@ function setScrollShadow() {
 function setPopupBoxPosition() {
     const screenWidth = window.innerWidth;
     const screenHeight = window.innerHeight;
+    popupWrapper = gradioApp().querySelector('#popup-wrapper');
+    if (!popupWrapper) return;
     popupWrapper.style.height = `${screenHeight}px`;
     popupWrapper.style.width = `${screenWidth}px`;
     // const popupBoxWidth = 680;
@@ -449,6 +452,7 @@ function setAutocomplete() {
 }
 
 function clearChatbot(a, b) {
+    window.chuanhuClearHistoryIntent?.();
     window.chuanhuAgentPendingDraft = null;
     clearHistoryHtml();
     // clearMessageRows();
@@ -469,13 +473,13 @@ function chatbotContentChanged(attempt = 1, force = false) {
 
             gradioApp().querySelectorAll('#chuanhu-chatbot .message-wrap .message.bot').forEach(addChuanhuButton);
 
-            if (chatbotIndicator.classList.contains('hide')) { // generation finished
+            if (chatbotIndicator?.classList.contains('hide')) { // generation finished
                 setLatestMessage();
                 enableChatListClick();
                 setChatList();
             }
 
-            if (!chatbotIndicator.classList.contains('translucent')) { // message deleted
+            if (!chatbotIndicator?.classList.contains('translucent')) { // message deleted
                 var checkLatestAdded = setInterval(() => {
                     var latestMessageNow = gradioApp().querySelector('#chuanhu-chatbot .message-wrap .message.bot:last-of-type');
                     if (latestMessageNow && latestMessageNow.querySelector('.message-btn-row')) {
@@ -494,11 +498,11 @@ function chatbotContentChanged(attempt = 1, force = false) {
 
 var chatbotObserver = new MutationObserver(() => {
     chatbotContentChanged(1);
-    if (chatbotIndicator.classList.contains('hide')) {
+    if (chatbotIndicator?.classList.contains('hide')) {
         // setLatestMessage();
         chatbotContentChanged(2);
     }
-    if (!chatbotIndicator.classList.contains('translucent')) {
+    if (!chatbotIndicator?.classList.contains('translucent')) {
         chatbotContentChanged(2);
     }
 

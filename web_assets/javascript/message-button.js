@@ -81,7 +81,7 @@ function addChuanhuButton(botElement) {
     
     // if (!rawMessage && !mdMessage) {
     //     // 现在动态更新会导致 svelte.js 的 flush 出错，所以生成时不更新
-    //     if (chatbotIndicator.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
+    //     if (gradioApp().querySelector('#chuanhu-chatbot > div.wrap')?.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
 
     //     // convertBotMessage(gradioButtonMsg);
     //     rawMessage = botElement.querySelector('.raw-message');
@@ -104,7 +104,7 @@ function addChuanhuButton(botElement) {
     addGeneratingLoader(botElement);
     
     // 改成生成时不添加按钮好了……
-    if (chatbotIndicator.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
+    if (gradioApp().querySelector('#chuanhu-chatbot > div.wrap')?.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
 
 
 
@@ -218,7 +218,7 @@ function setLatestMessage() {
             message.querySelector('.generating-loader')?.remove();
         }
     });
-    if (chatbotIndicator.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
+    if (gradioApp().querySelector('#chuanhu-chatbot > div.wrap')?.classList.contains('generating') && window.chuanhuTurnTerminal?.() !== true) return;
     if (latestMessage) addLatestMessageButtons(latestMessage);
 }
 
@@ -294,7 +294,19 @@ function addLatestMessageButtons(botElement) {
 }
 
 function addGeneratingLoader(botElement) {
-    if (botElement.innerText.trim() === '' && chatbotIndicator.classList.contains('generating')) {
+    if (gradioApp().querySelector('#chatbot-area')?.classList.contains('agent-mode')) {
+        const text = botElement.querySelector('.md-message');
+        const waiting = window.chuanhuInputBusy?.() && !window.chuanhuTurnTerminal?.() && text && !text.textContent.trim();
+        if (waiting && !botElement.querySelector('.generating-loader')) {
+            const loader = document.createElement('div');
+            loader.className = 'generating-loader';
+            loader.setAttribute('aria-label', '等待回答');
+            botElement.appendChild(loader);
+        }
+        if (!waiting) botElement.querySelector('.generating-loader')?.remove();
+        return;
+    }
+    if (botElement.innerText.trim() === '' && gradioApp().querySelector('#chuanhu-chatbot > div.wrap')?.classList.contains('generating')) {
         var generatingLoader = document.createElement('div');
         generatingLoader.classList.add('generating-loader');
         botElement.appendChild(generatingLoader);

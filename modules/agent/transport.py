@@ -104,6 +104,9 @@ def worker_messages(command, connection=None):
             snapshot.update({key: message[key] for key in ('session_id', 'turn_id', 'submission_started', 'baseline_turn_ids') if key in message})
             terminal_received = terminal_received or message['type'] in ('result', 'error', 'capabilities')
             yield message
+            # A worker result is the operation boundary; process teardown must
+            # not keep the UI queue open after the authoritative result.
+            if message['type'] in ('result', 'error', 'capabilities'): break
     except (BrokenPipeError, OSError):
         yield {'type': 'error', **snapshot, 'outcome': 'incomplete',
                'message': '本地连接已中断，云端任务状态尚未确认；请重新连接原会话查看结果。'}
@@ -114,12 +117,17 @@ def worker_messages(command, connection=None):
                 process.stdin.close()
             except OSError:
                 pass
+        # Reaping a local worker is independent of the cloud operation result.
+        # Stop it immediately, then close pipes/reap off the Gradio queue thread.
         if process.poll() is None:
             process.terminate()
+        def reap():
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-        process.stdout.close()
-        thread.join(timeout=1)
+            finally:
+                process.stdout.close()
+                thread.join(timeout=1)
+        threading.Thread(target=reap, daemon=True).start()

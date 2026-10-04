@@ -28,7 +28,7 @@ def test_single_line_basename_and_extension_size_metadata_preserve_download_iden
     assert label.find('span[@class="model-file-basename"]').text==stem
     assert label.find('span[@class="model-file-extension"]') is None
     meta=card.find('.//span[@class="model-file-meta"]')
-    assert ''.join(meta.itertext())==file_type_label(name)+' · 1 字节'
+    assert ''.join(meta.itertext())==file_type_label(name)+' · 0.00 KB'
     assert ArtifactPanel.values(model)[2]['value']==['/tmp/synthetic']
 
 
@@ -188,7 +188,7 @@ async function exercise(queue) {
     observer_chains=[ast.unparse(node) for node in ast.walk(tree) if isinstance(node,ast.Expr) and 'agent_panel.observe_history' in ast.unparse(node)]
     assert any(text.startswith('demo.load(') for text in observer_chains)
     assert any(text.startswith('model_select_dropdown.input(') for text in observer_chains)
-    assert any(text.startswith('historySelectList.select(') for text in observer_chains)
+    assert any(text.startswith('historyIntentBtn.click(') for text in observer_chains)
 
 
 def test_each_user_artifact_retry_reports_its_own_failure_once(env,monkeypatch):
@@ -232,7 +232,8 @@ def test_retired_observer_never_emits_final_agent_ui_frame(env,monkeypatch):
         iterator=panel.observe_history(model,gr.Request(session_hash='synthetic-history'))
         assert all(isinstance(value,dict) and value==gr.update() for value in next(iterator))
         next(iterator);model._retired=True
-        assert list(iterator)==[]
+        tail=list(iterator)
+        assert len(tail)==1 and all(value==gr.update() for value in tail[0])
     finally:app.close()
 
 

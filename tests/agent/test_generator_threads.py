@@ -28,7 +28,7 @@ def test_network_command_generator_does_not_keep_thread_owned_lock(env,monkeypat
         busy=asyncio.create_task(anyio.to_thread.run_sync(occupy_previous_worker))
         try:
             while not occupied.is_set():await asyncio.sleep(.005)
-            assert worker_ids[0]==ownership[0], 'Test must occupy the thread that produced the previous yield'
+            assert worker_ids[0]!=ownership[0], 'Agent execution belongs to its independent background thread'
             print('FIRST_YIELD_AND_OCCUPIED_THREAD',ownership[0])
             final=await app.process_api(0,[None,'关网',[]],state=state,request=req,iterator=first['iterator'])
             assert not final['is_generating']

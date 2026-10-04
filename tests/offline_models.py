@@ -76,7 +76,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     shared.state = SimpleNamespace(multi_api_key=False)
     sys.modules['modules.shared'] = shared
     helpers = dict(vars(presets), html=html, capabilities=capabilities, require_capability=require_capability, model_lock=model_lock, reserve_submission=reserve_submission, consume_submission=consume_submission, gr=gr, os=os, re=re, json=json, logging=logging, time=time,
-                   traceback=traceback, Enum=Enum, shared=shared, RLock=RLock, deepcopy=deepcopy,
+                   traceback=traceback, Enum=Enum, shared=shared, RLock=RLock, deepcopy=deepcopy, uuid4=uuid4,
                    HISTORY_DIR=str(history_dir), GRADIO_CACHE=str(history_dir/'cache'),
                    hide_history_when_not_logged_in=False,
                    get_first_history_name=lambda user='':uuid4().hex+'.json',
@@ -126,7 +126,7 @@ def install(root, history_dir=None, language='zh_CN', presets=None):
     definitions(root/'modules/models/models.py', {'_get_model','get_model','change_model'}, vars(factory))
     sys.modules[factory.__name__] = factory
     wrappers = dict(helpers)
-    names = {'predict','retry','interrupt','billing_info','reset','load_chat_history','set_system_prompt','handle_file_upload',
+    names = {'delete_first_conversation','delete_last_conversation','predict','retry','interrupt','billing_info','reset','load_chat_history','set_system_prompt','handle_file_upload',
              'start_outputing','end_outputing','transfer_input','reset_textbox','auto_name_chat_history','upload_chat_history','delete_chat_history'}
     definitions(root/'modules/utils.py', names, wrappers)
     return SimpleNamespace(root=root, presets=presets, base=base, factory=factory, agents=agents,

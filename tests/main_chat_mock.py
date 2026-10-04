@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from threading import Event, RLock, Thread
 import json
+import os
 import tempfile
 import time
 from types import SimpleNamespace
@@ -64,7 +65,7 @@ class MainChatMock:
     def _execute(self,sid,prompt):
         state=self.sessions[sid]
         try:
-            duration=15 if any(word in prompt.lower() for word in ('slow','慢')) else .8
+            duration=float(os.environ.get("CHUANHU_SYNTHETIC_SLOW_SECONDS", "15")) if any(word in prompt.lower() for word in ('slow','慢')) else .8
             if state['cancel'].wait(duration):return self._finish(sid,'cancelled','模拟任务已停止')
             wants_login=any(word in prompt.lower() for word in ('login','登录'))
             if wants_login or any(word in prompt.lower() for word in ('permission','授权')):
@@ -91,7 +92,9 @@ class MainChatMock:
         folder=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))
         for index in range(count):
             place=folder/str(index);place.mkdir()
-            path=place/('同名文件.txt' if index<2 else '可重试文件.txt');path.write_text('Synthetic artifact '+str(index),encoding='utf-8')
+            name=('同名文件.txt' if index<2 else '可重试文件.txt')
+            if os.environ.get('CHUANHU_SYNTHETIC_UNIQUE_DOWNLOADS'): name=sid+'-'+str(index)+'-'+uuid4().hex+'.txt'
+            path=place/name;path.write_text('Synthetic artifact '+str(index)+' '+sid+' '+uuid4().hex,encoding='utf-8')
             state['artifacts'].append({'id':'artifact_'+uuid4().hex,'session_id':sid,'turn_id':state['turn_id'],'name':path.name,'path':str(path),'type':'text/plain','size':path.stat().st_size,'status':'ready','fail_once':index==2})
 
     def worker(self,command):

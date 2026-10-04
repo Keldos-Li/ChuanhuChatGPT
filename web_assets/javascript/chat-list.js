@@ -51,6 +51,11 @@ function setChatList() {
 }
 
 function disableChatListClick() {
+    // Agent execution belongs to the conversation, not the selected view.
+    if (window.chuanhuInputTarget?.() === '#agent-upload-files') {
+        enableChatListClick();
+        return;
+    }
     var chatList = gradioApp().querySelector('fieldset#history-select-dropdown');
     var labels = chatList?.querySelectorAll('label');
     if (!labels?.length) return;

@@ -2,6 +2,50 @@
 (function () {
     let snapshot = {};
     let queued = false;
+    let historyIntent = null;
+    let latestHistoryIntent = null;
+    window.chuanhuClearHistoryIntent = () => { historyIntent = latestHistoryIntent = null; };
+    window.chuanhuHistorySelection = filename => {
+        const selected = historyIntent;
+        historyIntent = null;
+        return selected && (filename === undefined || selected.filename === filename) ? selected : null;
+    };
+    function captureHistoryIntent(event, keyboardTarget = null) {
+        if (event.type === 'pointerdown' && event.button !== 0) return;
+        const target = keyboardTarget || event.composedPath?.()[0] || event.target;
+        if (target?.closest?.('button, a, .chat-selected-btns')) return;
+        const input = target?.matches?.('#history-select-dropdown input[type=radio]') ? target
+            : target?.closest?.('#history-select-dropdown label')?.querySelector('input[type=radio]');
+        if (input?.disabled) return;
+        if (event.isTrusted && input?.matches?.('#history-select-dropdown input[type=radio]')) {
+            // Read the current response synchronously. The capability observer
+            // may not have copied the new visit into snapshot yet.
+            const marker = root().querySelector('#model-capability-state [data-model-capabilities]');
+            let visit = snapshot.history_visit;
+            try { visit = JSON.parse(marker?.dataset.modelCapabilities || '{}').history_visit || visit; } catch (_) {}
+            const labelKey = input.closest?.('label')?.dataset?.testid;
+            const filename = labelKey?.endsWith('-radio-label') ? labelKey.slice(0, -12)
+                : typeof input.__value === 'string' ? input.__value : input.value;
+            historyIntent = {filename, visit};
+            latestHistoryIntent = {...historyIntent, sentVisit: visit};
+            root().querySelector('button#history-intent-submit, #history-intent-submit button')?.click();
+        }
+    }
+    document.addEventListener('pointerdown', captureHistoryIntent, true);
+    document.addEventListener('keydown', event => {
+        if ([' ', 'Enter'].includes(event.key) && event.target?.matches?.('#history-select-dropdown input[type=radio]')) {
+            event.preventDefault(); captureHistoryIntent(event);
+        }
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+            const radios = Array.from(root().querySelectorAll('#history-select-dropdown input[type=radio]:not(:disabled)'));
+            const index = radios.indexOf(event.composedPath?.()[0] || event.target);
+            if (index >= 0) {
+                event.preventDefault();
+                const next = radios[(index + (['ArrowUp', 'ArrowLeft'].includes(event.key) ? -1 : 1) + radios.length) % radios.length];
+                next.focus(); next.click(); captureHistoryIntent(event, next);
+            }
+        }
+    }, true);
     const root = () => typeof gradioApp === 'function' ? gradioApp() : document;
     // Mutation actions require an explicit capability, including during initial load.
     const explicitActions = new Set(['regenerate', 'history_delete']);
@@ -18,6 +62,16 @@
         if (!marker) return;
         const wasTerminal = snapshot.turn_terminal === true;
         try { snapshot = JSON.parse(marker.dataset.modelCapabilities); } catch (_) { return; }
+        if (latestHistoryIntent && snapshot.history_filename === latestHistoryIntent.filename
+                && snapshot.history_visit !== latestHistoryIntent.sentVisit) {
+            latestHistoryIntent = historyIntent = null;
+        } else if (latestHistoryIntent && snapshot.history_visit && latestHistoryIntent.sentVisit !== snapshot.history_visit) {
+            // Keep the last explicit user choice through an earlier selection's
+            // atomic response; programmatic Radio updates never create intent.
+            latestHistoryIntent.sentVisit = snapshot.history_visit;
+            historyIntent = {filename: latestHistoryIntent.filename, visit: snapshot.history_visit};
+            app.querySelector('button#history-intent-submit, #history-intent-submit button')?.click();
+        }
         const chatArea = app.querySelector("#chatbot-area");
         if (chatArea && chatArea.classList.contains("agent-mode") !== (snapshot.agent_tools === true)) {
             chatArea.classList.toggle("agent-mode", snapshot.agent_tools === true);
@@ -42,6 +96,18 @@
         const hasMore = ['input_attachments','knowledge','single_turn','external_websearch'].some(window.chuanhuSupports);
         if (more && more.hidden === hasMore) more.hidden = !hasMore;
         if (!wasTerminal && snapshot.turn_terminal === true && typeof setLatestMessage === 'function') setLatestMessage();
+        const last = app.querySelector('#chuanhu-chatbot .message-wrap .message.bot:last-of-type');
+        if (snapshot.agent_tools && last) {
+            const text = last.querySelector('.md-message');
+            const waiting = snapshot.busy && !snapshot.turn_terminal && text && !text.textContent.trim();
+            if (waiting && !last.querySelector('.generating-loader')) {
+                const loader = document.createElement('div');
+                loader.className = 'generating-loader';
+                loader.setAttribute('aria-label', '等待回答');
+                last.appendChild(loader);
+            }
+            if (!waiting) last.querySelector('.generating-loader')?.remove();
+        }
         window.chuanhuRefreshSendButton?.();
         window.chuanhuRefreshArtifactCards?.();
         window.chuanhuClearSubmittedDraft?.(snapshot.submitted_draft);

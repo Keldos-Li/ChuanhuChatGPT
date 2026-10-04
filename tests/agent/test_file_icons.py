@@ -56,7 +56,7 @@ def test_composer_user_and_bot_use_identical_icon_renderer_and_escape_names():
     pending = json.loads(AgentPanel.input_value(model, interactive=True)['label'])['files'][0]
     assert pending['extension'] == 'CSV'
     assert pending['basename'] == 'name"<&'
-    assert pending['size_label'] == '12 字节'
+    assert pending['size_label'] == '0.01 KB'
     assert pending['icon'] == file_icon(name, input_card=True)
     projection = MessageFileProjection([['hello', 'answer']], {}, {}, set(), 'chat',
         _original_rows=[['hello', 'answer']], user_files={0:[{'name':name, 'size':12}]})
@@ -65,7 +65,7 @@ def test_composer_user_and_bot_use_identical_icon_renderer_and_escape_names():
     assert 'agent-input-card agent-file-card' in user
     assert 'name&quot;&lt;&amp;.CsV' in user
     assert '>name&quot;&lt;&amp;</span>' in user
-    assert '<span class="agent-input-meta" data-file-part="meta">CSV · 12 字节</span>' in user
+    assert '<span class="agent-input-meta" data-file-part="meta">CSV · 0.01 KB</span>' in user
     bot = ArtifactPanel.values(model)[1]['value']
     assert file_icon(name) in bot
     assert 'model-file-card agent-file-card' in bot
@@ -73,14 +73,14 @@ def test_composer_user_and_bot_use_identical_icon_renderer_and_escape_names():
         assert f'data-file-part="{part}"' in user
         assert f'data-file-part="{part}"' in bot
     assert 'name&quot;&lt;&amp;.CsV' in bot
-    assert '<span class="model-file-extension">CSV</span> · <span class="model-file-size">12 字节</span>' in bot
+    assert '<span class="model-file-extension">CSV</span> · <span class="model-file-size">0.01 KB</span>' in bot
 
 
 def test_long_and_missing_extension_metadata_has_one_separator_and_bounded_type():
     for name, label in [('file.unknownextensionlong', 'UNKNO…'), ('README', 'FILE'), ('.env', 'FILE')]:
         assert file_type_label(name) == label
         meta = file_type_label(name) + ' · ' + file_size_label(1234)
-        assert meta == label + ' · 1,234 字节'
+        assert meta == label + ' · 1.21 KB'
         assert meta.count(' · ') == 1
 
 
@@ -95,3 +95,7 @@ def test_pending_and_user_titles_share_compound_suffix_rules_and_keep_full_hint(
         _original_rows=[['hello', 'answer']], user_files={0:[{'name':name, 'size':12}]})
     user = render_projection(projection, lambda text:text, lambda text:text)[0][0]
     assert f'title="{name}"><span data-file-part="basename">{basename}</span>' in user
+
+@pytest.mark.parametrize('size,label', [(0, '0.00 KB'), (1023, '1.00 KB'), (1024, '1.00 KB'), (1024**2, '1.00 MB'), (1024**3, '1.00 GB'), (None, '大小待确认'), (-1, '大小待确认')])
+def test_size_units(size, label):
+    assert file_size_label(size) == label

@@ -15,3 +15,19 @@ class OperationScope:
 
     def current(self, model):
         return not model._retired and self == self.capture(model, history_target=self.history_path is not None)
+
+
+@dataclass(frozen=True)
+class TaskScope:
+    """Execution identity does not depend on a browser visit or retirement."""
+    owner: str
+    conversation: str
+    history_path: str
+    generation: str | None
+
+    @classmethod
+    def capture(cls, model, **_):
+        return cls(model._owner, model._conversation_id, model.history_file_path, model._state.get('generation'))
+
+    def current(self, model):
+        return self == self.capture(model)

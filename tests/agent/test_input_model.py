@@ -68,13 +68,24 @@ def test_upload_failure_creates_no_turn_and_preserves_empty_session(env,tmp_path
 
 def test_stop_during_upload_never_runs_message(env,tmp_path,monkeypatch):
     model,paths,service,calls=staged(env,tmp_path,monkeypatch,('slow-upload.txt',))
+    ready,release=threading.Event(),threading.Event()
+    original=env.agents.worker_messages
+    def worker(command):
+        for message in original(command):
+            yield message
+            preparation=message.get('preparation') or {}
+            if command['action']=='prepare_inputs' and preparation.get('session_id') and preparation.get('outcome')=='preparing':
+                ready.set();assert release.wait(5)
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
     iterator=env.wrappers['predict'](model,'cancel',[],files=paths,request=request())
-    next(iterator);next(iterator);next(iterator)
+    next(iterator);assert ready.wait(3)
     session=model._state['session_id']
-    model.interrupt();list(iterator)
-    assert [c['action'] for c in calls]==['prepare_inputs']
-    assert model._state['session_id']==session and model.history==[]
-    assert model._state['outcome']=='not_started'
+    try:
+        model.interrupt();release.set();list(iterator)
+        assert [c['action'] for c in calls]==['prepare_inputs']
+        assert model._state['session_id']==session and model.history==[]
+        assert model._state['outcome']=='not_started'
+    finally:release.set();model._background_task.thread.join(5);iterator.close()
 
 
 def test_no_environment_rejects_before_any_upload_or_turn(env,tmp_path,monkeypatch):

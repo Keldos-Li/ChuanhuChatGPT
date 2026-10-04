@@ -36,7 +36,10 @@ def file_type_label(name):
 
 
 def file_size_label(size):
-    return f'{size:,} 字节' if isinstance(size, int) else '大小待确认'
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        return '大小待确认'
+    divisor, unit = (1024 ** 3, 'GB') if size >= 1024 ** 3 else ((1024 ** 2, 'MB') if size >= 1024 ** 2 else (1024, 'KB'))
+    return f'{size / divisor:.2f} {unit}'
 
 
 def file_icon(name, *, input_card=False):

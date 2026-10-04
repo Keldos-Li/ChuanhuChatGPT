@@ -98,7 +98,9 @@ def test_original_reattach_content_regression_through_real_model_and_runtime(env
 def test_prepared_cancelled_file_is_also_fresh_after_different_attachment_turn(env, tmp_path, monkeypatch, with_second_file):
     model, original, second, client, commands, reads = wired_model(env, tmp_path, monkeypatch)
     model.stage_input_files([str(original)])
-    iterator = env.wrappers['predict'](model, 'stop before sending', [], files=[str(original)], request=request())
+    # Exercise the preparation executor directly so cancellation is placed at
+    # the exact installed-file boundary, independent of UI snapshot coalescing.
+    iterator = model.predict('stop before sending', [], files=[str(original)])
     for _ in iterator:
         if model._installed_inputs:
             model.interrupt()

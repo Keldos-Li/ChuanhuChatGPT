@@ -167,21 +167,29 @@ def test_actual_gradio_diff_stream_removes_provisional_reference_rows(env,monkey
             yield {'type':'result','session_id':'s','turn_id':'t','outcome':'completed','sync_complete':True,'items':[user,answer]}
         elif command['action']=='download':yield {'type':'result','artifacts':[]}
     monkeypatch.setattr(env.agents,'worker_messages',worker)
+    frames=[];expected=[]
     with gr.Blocks(analytics_enabled=False) as app:
         current=gr.State();prompt=gr.Textbox();chat=gr.Chatbot();status=gr.Markdown();selector=gr.Dropdown();marker=gr.HTML();button=gr.Button()
         caps=CapabilityUI([],selector,marker)
         panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components()
-        button.click(panel.wrap_predict(env.wrappers['predict'],caps),[current,prompt,chat],[chat,status,*panel.outputs,*caps.outputs])
+        projected = panel.wrap_predict(env.wrappers['predict'],caps)
+        def capture(current_model, inputs, chatbot, request: gr.Request):
+            from modules.agent.message_files import decode_rows
+            for values in projected(current_model, inputs, chatbot, request=request):
+                chat_value = values[0].get('value') if isinstance(values[0], dict) else values[0]
+                expected.append(decode_rows(chat_value, model._conversation_id))
+                yield values
+        button.click(capture,[current,prompt,chat],[chat,status,*panel.outputs,*caps.outputs])
     state=SessionState(app);state[current._id]=model
-    frames=[];expected=[]
     async def exercise():
         iterator=None
         while True:
             result=await app.process_api(0,[None,'new request',ordinary.chatbot],state=state,
                 request=gr.Request(session_hash='real-stream'),session_hash='real-stream',iterator=iterator)
             frames.append({'generating':result['is_generating'],'data':deepcopy(result['data'])})
-            expected.append(deepcopy(model._display))
-            if not result['is_generating']:break
+            if not result['is_generating']:
+                expected.append(deepcopy(expected[-1]))
+                break
             iterator=result['iterator']
     try:asyncio.run(exercise())
     finally:app.close()
@@ -281,13 +289,18 @@ def test_history_observer_waiting_permission_exposes_same_main_stop(env,monkeypa
     from modules.model_capabilities import CapabilityUI
     model=select(env);model._state={'session_id':'sess_test','turn_id':'turn_one','generation':'g','outcome':'incomplete'}
     model._session_settings=model._current_settings();model._needs_sync=True
+    from threading import Event
+    release = Event()
     calls=[]
     def worker(command):
         calls.append(command['action'])
         if command['action']=='observe':
             yield {'type':'progress','session_id':'sess_test','turn_id':'turn_one','outcome':'requires_action','required_actions':[{'request_id':'req','turn_id':'turn_one','request':{'type':'browser_origin_access','origin':'https://example.com'}}]}
+            assert release.wait(5)
             yield {'type':'result','session_id':'sess_test','turn_id':'turn_one','outcome':'cancelled','required_actions':[]}
-        elif command['action']=='cancel':yield {'type':'result','outcome':'cancel_requested'}
+        elif command['action']=='cancel':
+            release.set()
+            yield {'type':'result','outcome':'cancel_requested'}
         elif command['action']=='download':yield {'type':'result','artifacts':[]}
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     with gr.Blocks(analytics_enabled=False) as app:
@@ -314,13 +327,15 @@ def test_history_observer_waiting_permission_exposes_same_main_stop(env,monkeypa
         updates=[entry['data'][2+caps.stream_outputs.index(main_stop)] for entry in results if isinstance(entry['data'][2+caps.stream_outputs.index(main_stop)],dict)]
         assert any(update.get('visible') is False for update in updates)
     try:asyncio.run(exercise())
-    finally:app.close()
+    finally:release.set();app.close()
 
 
 def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypatch):
     from pathlib import Path
     import tempfile
     from modules.model_capabilities import CapabilityUI
+    from threading import Event
+    prepared_seen, first_ready_seen = Event(), Event()
     model=select(env)
     path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'one.txt';path.write_text('1')
     def worker(command):
@@ -328,8 +343,10 @@ def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypat
         elif command['action']=='download':
             records=[{'id':'a','name':'one.txt','type':'text/plain','size':1,'status':'preparing'},{'id':'b','name':'two.txt','type':'text/plain','size':2,'status':'preparing'}]
             yield {'type':'progress','artifacts':records}
+            assert prepared_seen.wait(5)
             records=[dict(records[0],status='ready',path=str(path)),records[1]]
             yield {'type':'progress','artifacts':records}
+            assert first_ready_seen.wait(5)
             yield {'type':'result','artifacts':[records[0],dict(records[1],status='failed',error='unavailable')]}
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     with gr.Blocks(analytics_enabled=False) as app:
@@ -343,17 +360,22 @@ def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypat
         req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'files',[]],state=state,request=req);rows=[]
         while True:
             update=result['data'][2+panel.outputs.index(panel.artifacts.list)]
-            if isinstance(update,dict) and update.get('value'):rows.append(artifact_rows(update['value']))
+            if isinstance(update,dict) and update.get('value'):
+                visible=artifact_rows(update['value']);rows.append(visible)
+                if len(visible)==2 and all(row[3]=='准备中' for row in visible): prepared_seen.set()
+                if len(visible)==2 and visible[0][3]=='' and visible[1][3]=='准备中': first_ready_seen.set()
             if not result['is_generating']:break
             result=await app.process_api(index,[None,'files',[]],state=state,request=req,iterator=result['iterator'])
         assert any(len(r)==2 and all(row[3]=='准备中' for row in r) for r in rows)
         assert any(len(r)==2 and r[0][3]=='' and r[1][3]=='准备中' for r in rows)
     try:asyncio.run(exercise())
-    finally:app.close()
+    finally:prepared_seen.set();first_ready_seen.set();app.close()
 
 
 def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypatch):
     from modules.model_capabilities import CapabilityUI
+    from threading import Event
+    release = Event()
     model=select(env);downloads=[]
     def worker(command):
         if command['action']=='run':
@@ -362,6 +384,7 @@ def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypat
         elif command['action']=='download':
             downloads.append('started')
             yield dict(type='progress',artifacts=[])
+            assert release.wait(5)
             yield dict(type='result',artifacts=[])
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     with gr.Blocks(analytics_enabled=False) as app:
@@ -375,19 +398,15 @@ def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypat
     async def exercise():
         inputs=[None,'hello',[]];req=gr.Request(session_hash='ui')
         result=await app.process_api(index,inputs,state=state,request=req)
-        while model._state.get('outcome')!='completed':
-            assert all(state.blocks_config.blocks[c._id].interactive is False for c in (panel.model,panel.reasoning))
-            result=await app.process_api(index,inputs,state=state,request=req,iterator=result['iterator'])
-        # 生产 compact 路径在回答终态立即解锁，不等后续文件下载。
-        assert not downloads and not model._running
-        assert all(state.blocks_config.blocks[c._id].interactive is True for c in (panel.model,panel.reasoning))
-        result=await app.process_api(index,inputs,state=state,request=req,iterator=result['iterator'])
-        assert downloads and result['is_generating']
-        assert all(state.blocks_config.blocks[c._id].interactive is True for c in (panel.model,panel.reasoning))
+        # The same conversation remains reserved through file finalization.
+        assert all(state.blocks_config.blocks[c._id].interactive is False for c in (panel.model,panel.reasoning))
+        release.set()
         while result['is_generating']:
             result=await app.process_api(index,inputs,state=state,request=req,iterator=result['iterator'])
+        assert downloads and not model._background_busy
+        assert all(state.blocks_config.blocks[c._id].interactive is True for c in (panel.model,panel.reasoning))
     try:asyncio.run(exercise())
-    finally:app.close()
+    finally:release.set();app.close()
 
 
 def test_prompt_change_after_session_is_rejected_and_effective_value_kept(env,monkeypatch):
@@ -441,3 +460,71 @@ def test_single_file_retry_streams_preparing_and_result_without_losing_other_fil
     try:asyncio.run(exercise())
     finally:app.close()
     assert len(calls)==1 and model._state['session_id']=='sess_test'
+
+
+def test_predict_final_frame_then_switch_then_eof_is_noop(env):
+    model=select(env)
+    app,panel,state=panel_app(model)
+    caps=SimpleNamespace(outputs=[],stream_outputs=[],values=lambda model:[],stream_values=lambda model:[])
+    def source(*args,**kwargs):
+        yield model.chatbot,'final'
+    stream=panel.wrap_predict(source,caps)(model,'input',[],request=request())
+    next(stream)
+    next(stream)  # final frame has been delivered; iterator not resumed to EOF
+    model.retire()
+    tail=next(stream)
+    assert all(value==gr.update() for value in tail)
+    with pytest.raises(StopIteration):next(stream)
+
+
+def test_header_wrapper_preserves_noop_when_old_agent_view_retires(env):
+    model=select(env)
+    panel=AgentPanel()
+    result=panel.status_callback(lambda model:gr.update(),header=True)(model)
+    assert result==(gr.update(),gr.update())
+
+
+def test_ui_generators_never_yield_while_holding_model_lock():
+    import ast
+    from pathlib import Path
+    tree=ast.parse((Path(__file__).parents[2]/'modules/agent/ui.py').read_text())
+    for node in ast.walk(tree):
+        if isinstance(node,ast.With) and any('_lock' in ast.unparse(item.context_expr) for item in node.items):
+            assert not any(isinstance(child,(ast.Yield,ast.YieldFrom)) for child in ast.walk(node))
+
+
+def test_history_final_frame_then_switch_then_eof_is_noop(env,monkeypatch):
+    from modules.agent.tasks import TASKS
+    model=select(env);app,panel,state=panel_app(model)
+    task=SimpleNamespace(subscribe=lambda view:iter([(view.chatbot,'done')]))
+    monkeypatch.setattr(TASKS,'find',lambda *args:task)
+    stream=panel.observe_history(model,request=request())
+    next(stream);next(stream);next(stream)
+    model.retire()
+    assert all(value==gr.update() for value in next(stream))
+    with pytest.raises(StopIteration):next(stream)
+
+
+def test_retry_first_frame_stale_is_noop(env,monkeypatch):
+    model=select(env);app,panel,state=panel_app(model)
+    def retry(*args,**kwargs):
+        model.retire()
+        yield model.chatbot,'obsolete'
+    monkeypatch.setattr(model,'retry_artifact',retry)
+    callback=next(fn.fn for fn in app.fns if fn.fn.__name__=='retry_file')
+    stream=callback(model,'artifact',request=request())
+    assert all(value==gr.update() for value in next(stream))
+    with pytest.raises(StopIteration):next(stream)
+
+
+def test_predict_final_frame_then_new_operation_cannot_replay_old_final(env):
+    model=select(env);app,panel,state=panel_app(model)
+    caps=SimpleNamespace(outputs=[],stream_outputs=[],values=lambda model:[],stream_values=lambda model:[])
+    def source(*args,**kwargs):yield model.chatbot,'final'
+    stream=panel.wrap_predict(source,caps)(model,'input',[],request=request())
+    next(stream);next(stream)
+    model._predict_error_operation='next operation'
+    model._state['generation']='next generation'
+    assert all(value==gr.update() for value in next(stream))
+    with pytest.raises(StopIteration):next(stream)
+    assert model._predict_error_operation=='next operation'

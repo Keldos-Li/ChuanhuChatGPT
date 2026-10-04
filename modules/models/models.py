@@ -205,6 +205,9 @@ def get_model(model_name, lora_model_path=None, access_key=None, temperature=Non
         with original_model._lock:
             if request is not None:
                 original_model.bind_owner(request)
+            if model_name == original_model._selection_name:
+                return (original_model, '', gr.update(), gr.update(), gr.update(), gr.update(),
+                        i18n(original_model.description), True)
             if (original_model._state.get('session_id')
                     and model_name != original_model._selection_name):
                 raise gr.Error('Agent 会话开始后不能切换其他模型，请新建聊天或打开其他历史记录')

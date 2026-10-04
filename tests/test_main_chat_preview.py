@@ -37,7 +37,9 @@ async def exercise():
     chat_frames = []
 
     async def call(name, inputs, expected_error=None):
+        nonlocal model
         index = functions[name]
+        if 'current_id' in locals(): model = state[current_id]
         if name=='transfer_input' and len(inputs)==2:
             current=state[app.fns[functions['initial']].outputs[0]._id]
             choice=getattr(current,'agent_model_choice',('gpt-6-astra',None))
@@ -65,6 +67,7 @@ async def exercise():
             if not result['is_generating']: break
             result = await app.process_api(index, inputs, state=state, request=request,
                                            iterator=result['iterator'])
+        model = state[app.fns[functions['initial']].outputs[0]._id]
         if name in ('predict_with_ui','observe_history','upload_files','remove_files','login','retry_file'):
             try:
                 await app.process_api(functions['emit_ui_error'],[None],state=state,request=request)
@@ -90,7 +93,8 @@ async def exercise():
         assert saved == 'Ordinary  title.json'
         assert any(choice[0] == 'Ordinary  title' for choice in title[0]['choices'])
         reset = await call('reset', [None, False])
-        assert reset[0] == [] and model.history == []
+        chat_index = next(i for i, component in enumerate(app.fns[functions["reset"]].outputs) if isinstance(component, gr.Chatbot))
+        assert reset[chat_index] == [] and model.history == []
         restored = await call('load_history_model', [None, saved[:-5]])
         assert model.chatbot[0][0] == 'Ordinary: title!'
         assert 'class="user-message"' in restored[4]['value'][0][0]

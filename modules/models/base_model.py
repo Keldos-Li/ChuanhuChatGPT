@@ -16,7 +16,7 @@ from itertools import islice
 from threading import Condition, RLock, Thread
 from typing import Any, Dict, List, Optional
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, TypeVar, Union
-from uuid import UUID
+from uuid import UUID, uuid4
 from langchain_core.outputs import ChatGenerationChunk, GenerationChunk
 from gradio.utils import get_upload_folder
 from gradio.processing_utils import save_file_to_cache
@@ -301,6 +301,7 @@ class BaseLLMModel:
         self._chat_lock = RLock()
         self._chat_running = False
         self._chat_retired = False
+        self._history_visit = uuid4().hex
 
         self.default_single_turn = config["single_turn"]
         self.default_temperature = config["temperature"]
@@ -705,6 +706,8 @@ class BaseLLMModel:
         else:
             self.history.append(construct_user(inputs))
 
+        self.chatbot = deepcopy(chatbot) + [[fake_inputs, '']]
+        self.auto_save(self.chatbot)
         start_time = time.time()
         try:
             if self.stream:
@@ -919,6 +922,8 @@ class BaseLLMModel:
     def reset(self, remain_system_prompt=False):
         if getattr(self, '_pending_send', None) or self._chat_running:
             raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
+        self._submission_token = None
+        self._history_visit = uuid4().hex
         self.history = []
         self.chatbot = []
         self.all_token_counts = []
@@ -1014,7 +1019,7 @@ class BaseLLMModel:
 
         self.history_file_path = filename
         save_file(filename, self)
-        return init_history_list(self.user_name)
+        return init_history_list(self.user_name, prepend=os.path.basename(self.history_file_path).removesuffix('.json'))
 
     def auto_name_chat_history(
         self, name_chat_method, user_question, single_turn_checkbox
@@ -1067,11 +1072,13 @@ class BaseLLMModel:
                     logging.error("Uploaded content is not valid JSON. Using default history.")
             else:
                 logging.warning("Unexpected type for new_history_file_content. Using default history.")
-        return *self.load_chat_history(), init_history_list(self.user_name)
+        return *self.load_chat_history(), init_history_list(self.user_name, prepend=os.path.basename(self.history_file_path).removesuffix('.json'))
 
     def load_chat_history(self, new_history_file_path=None):
         if getattr(self, '_pending_send', None) or self._chat_running:
             raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
+        self._submission_token = None
+        self._history_visit = uuid4().hex
         logging.debug(f"{self.user_name} 加载对话历史中……")
         if new_history_file_path is not None:
             self.history_file_path = new_history_file_path

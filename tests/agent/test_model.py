@@ -24,10 +24,14 @@ def test_main_factory_send_artifact_followup(env,monkeypatch):
     assert model.api_key is None
 
 
-def test_first_yield_close_does_not_send(env):
+def test_first_yield_close_leaves_accepted_background_task_running(env, monkeypatch):
+    complete(env, monkeypatch)
     model=select(env);generator=env.wrappers['predict'](model,'hello',[],request=request())
     next(generator);generator.close()
-    assert model.history==[] and model._state['outcome']=='not_started' and not model._running
+    model._background_task.thread.join(3)
+    assert not model._background_task.thread.is_alive()
+    assert model.history[-1]['content']=='Agent synthetic answer'
+    assert model._state['outcome']=='completed' and not model._running
 
 
 def test_stop_before_worker_rolls_back(env):
@@ -70,7 +74,6 @@ def test_uncertain_send_blocks_duplicates_and_reconnect_never_resubmits(env,monk
     monkeypatch.setattr(env.agents,'worker_messages',worker);model=select(env);send(env,model)
     assert model._state['outcome']==('incomplete' if known else 'uncertain')
     with pytest.raises(gr.Error):send(env,model,'duplicate')
-    with pytest.raises(gr.Error):model.reset()
     with pytest.raises(gr.Error):list(model.retry(model.chatbot))
     list(model.reconnect())
     assert [c['action'] for c in calls]==['run','recover' if known else 'recover_unknown','download']

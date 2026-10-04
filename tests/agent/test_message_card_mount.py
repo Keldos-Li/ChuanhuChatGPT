@@ -91,7 +91,7 @@ def test_ready_cards_have_native_button_semantics_and_no_redundant_visible_downl
     visible = ''.join(card.itertext())
     assert '可下载' not in visible and '下载文件' not in visible
     assert ''.join(card.find('.//span[@class="model-file-name"]').itertext()) == 'same'
-    assert ''.join(card.find('.//span[@class="model-file-meta"]').itertext()) == 'TXT · 1,234 字节'
+    assert ''.join(card.find('.//span[@class="model-file-meta"]').itertext()) == 'TXT · 1.21 KB'
     assert card.find('.//span[@class="model-file-feedback"]').get('aria-live') == 'polite'
     assert json.loads(values[2]['label']) == ['file"<&\'']
     assert values[2]['value'] == ['/tmp/file/same.txt']

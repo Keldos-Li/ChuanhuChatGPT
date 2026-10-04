@@ -210,7 +210,7 @@ def _public_settings(session):
     return {'agent': public_agent, 'environment': public_environment}
 
 
-def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, submission_started=False):
+def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, submission_started=False, *, include_artifacts=True):
     try:
         session = as_dict(client.beta.agents.sessions.retrieve(session_id))
         roots, session_turns = None, None
@@ -233,7 +233,7 @@ def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, subm
         unique = OrderedDict((item['id'], item) for item in items if isinstance(item.get('id'), str))
         artifact_error = None
         try:
-            artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100))
+            artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100)) if include_artifacts else []
         except Exception as error:
             artifacts, artifact_error = [], str(_error(error))
         outcome = turn.get('status') if turn else 'incomplete'
@@ -317,7 +317,7 @@ def _process_events(client, events, state, settings, on_progress, *, read_only=F
 
 def _reconcile_terminal(client, state):
     try:
-        saved = inspect_saved(client, state.session_id, state.turn_id)
+        saved = inspect_saved(client, state.session_id, state.turn_id, include_artifacts=False)
         # Stream terminal events are also cloud facts. A lagging read must not
         # downgrade them or erase newer finalized output.
         if saved['turn_id'] != state.turn_id or saved['outcome'] != state.outcome:
@@ -426,7 +426,7 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
         # The stream must be connected before the first history/status request.
         with client.beta.agents.sessions.events.stream(session_id) as stream:
             events = BufferedEvents(stream)
-            saved = inspect_saved(client, session_id, turn_id, baseline_turn_ids, submission_started)
+            saved = inspect_saved(client, session_id, turn_id, baseline_turn_ids, submission_started, include_artifacts=False)
             _seed(state, saved)
             state.snapshot_partial_ids = {identifier for identifier,item in state.items.items() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('status') not in TERMINAL}
             if on_progress: on_progress(state)

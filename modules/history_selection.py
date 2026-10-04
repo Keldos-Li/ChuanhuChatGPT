@@ -9,6 +9,19 @@ from modules.model_capabilities import is_busy, model_lock
 
 def load_history_model(current_model, filename, request: gr.Request = None):
     """显式切换历史可以离开 Agent；普通模型下拉切换仍受会话锁约束。"""
+    if isinstance(filename, dict):
+        with model_lock(current_model):
+            if getattr(current_model, '_retired', False) or getattr(current_model, '_chat_retired', False):
+                return tuple(gr.update() for _ in range(24))
+            expected = current_model.agent_choice_target if getattr(current_model, 'is_hosted_agent', False) else getattr(current_model, '_history_visit', '')
+            if (set(filename) != {'filename', 'visit'} or filename['visit'] != expected
+                    or not isinstance(filename['filename'], str)):
+                return (current_model, *(gr.update() for _ in range(23)))
+            # Keep visit validation and loading in the same reentrant lock.
+            return load_history_model(current_model, filename['filename'], request)
+    # Clearing the selection for a new draft is not a request to open a file.
+    if filename in (None, ''):
+        return (current_model, *(gr.update() for _ in range(23)))
     from modules import shared
     from modules.presets import HISTORY_DIR, MODEL_METADATA, i18n
     from modules.models.models import get_model
@@ -23,7 +36,8 @@ def load_history_model(current_model, filename, request: gr.Request = None):
                 current_model.bind_owner(request)
         else:
             username = current_model.user_name
-        if is_busy(current_model):
+        agent_current = getattr(current_model, 'is_hosted_agent', False)
+        if (not agent_current and is_busy(current_model)) or getattr(current_model, '_pending_send', None):
             raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
         root = (Path(HISTORY_DIR) / username).resolve()
         chosen = Path(filename)
@@ -38,21 +52,6 @@ def load_history_model(current_model, filename, request: gr.Request = None):
             if not isinstance(saved, dict) or not isinstance(saved['history'], list) or not isinstance(saved['chatbot'], list):
                 raise ValueError
         except FileNotFoundError:
-            # Gradio 4.29 emits select when a server update selects the new-chat
-            # item. That item reserves a filename before any history is saved.
-            current_path = getattr(current_model, 'history_file_path', None)
-            if current_path:
-                draft = Path(current_path)
-                if not draft.is_absolute():
-                    draft = root / draft
-                if draft.suffix != '.json':
-                    draft = Path(str(draft) + '.json')
-                if (not draft.is_symlink() and draft.resolve().parent == root
-                        and draft.resolve() == chosen.resolve()
-                        and not current_model.history and not current_model.chatbot
-                        and not getattr(current_model, '_state', {}).get('session_id')):
-                    # Keep model, parameters, UI values and pending input intact.
-                    return (current_model, *(gr.update() for _ in range(23)))
             raise gr.Error(i18n('ui.history.file_missing')) from None
         except (OSError, ValueError, KeyError):
             raise gr.Error(i18n('ui.history.file_invalid')) from None
@@ -73,7 +72,7 @@ def load_history_model(current_model, filename, request: gr.Request = None):
             raise gr.Error('历史记录使用的模型当前不可用，请先恢复该模型配置')
 
         current_selection = getattr(current_model, '_selection_name', current_model.model_name)
-        model = current_model
+        model = current_model.new_view() if agent_current else current_model
         header = (gr.update(),) * 5
         if selection != current_selection:
             # 不转交另一个服务商的密钥，也不从 JSON 恢复密钥或连接地址。
@@ -83,6 +82,13 @@ def load_history_model(current_model, filename, request: gr.Request = None):
                 raise gr.Error('历史记录使用的模型无法初始化')
             header = (created[3], created[4], created[5], created[6], created[1])
         values = list(model.load_chat_history(chosen.name))
+        if getattr(model, "is_hosted_agent", False):
+            from modules.agent.tasks import TASKS
+            task = TASKS.find(model, chosen.name)
+            if task is not None and model._connection_reference() == task.model._connection_reference():
+                task.project(model)
+                model._background_task = task
+                values[2] = gr.update(value=model.chatbot)
         values[2] = dict(values[2], label=selection)
         if model is not current_model:
             if getattr(current_model, 'is_hosted_agent', False):
