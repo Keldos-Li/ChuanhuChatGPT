@@ -463,6 +463,8 @@
             "filename_placeholder": "Set file name: default is .json, optional is .md",
             "invalid_filename": "Please enter a valid file name, do not include the following special characters: ",
             "load_from_list": "Load dialog from list",
+            "file_missing": "History file does not exist",
+            "file_invalid": "Unable to read history or invalid history format",
             "new_chat_prefix": "New Chat ",
             "rename": "Rename this chat",
             "save": "💾 Save Dialog",

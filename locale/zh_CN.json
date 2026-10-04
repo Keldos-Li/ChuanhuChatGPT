@@ -463,6 +463,8 @@
             "filename_placeholder": "设置文件名: 默认为.json，可选为.md",
             "invalid_filename": "请输入有效的文件名，不要包含以下特殊字符：",
             "load_from_list": "从列表中加载对话",
+            "file_missing": "历史文件不存在",
+            "file_invalid": "历史记录无法读取或格式无效",
             "new_chat_prefix": "新对话 ",
             "rename": "重命名该对话",
             "save": "💾 保存对话",

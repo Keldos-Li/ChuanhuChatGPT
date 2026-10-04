@@ -455,6 +455,8 @@
             "filename_placeholder": "ファイル名を設定: デフォルトは.json、.mdを選択できます",
             "invalid_filename": "有効なファイル名を入力してください。以下の特殊文字は使用しないでください：",
             "load_from_list": "リストから会話を読込",
+            "file_missing": "履歴ファイルが存在しません",
+            "file_invalid": "履歴を読み込めないか、形式が無効です",
             "new_chat_prefix": "新しい会話 ",
             "rename": "会話の名前を変更",
             "save": "💾 会話を保存",

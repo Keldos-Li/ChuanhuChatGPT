@@ -5,6 +5,72 @@ import json
 from agent_fixtures import complete, env, request, select, send
 
 
+@pytest.mark.parametrize('name', ['GPT3.5 Turbo', 'OpenAI Agent'])
+@pytest.mark.parametrize('identifier', ['stem', 'filename', 'absolute'])
+def test_current_unsaved_draft_preserves_model_and_ui(env, monkeypatch, name, identifier):
+    from copy import deepcopy
+    from modules.history_selection import load_history_model
+    monkeypatch.setattr(env.presets, 'HISTORY_DIR', str(env.history_dir), raising=False)
+    model = select(env, name=name)
+    model.reset()
+    model.system_prompt = 'Synthetic draft prompt'
+    model.temperature = 0.37
+    model._pending_input_text = 'Synthetic unsent input'
+    filename = model.history_file_path
+    target = {'stem': filename.removesuffix('.json'), 'filename': filename,
+              'absolute': str(env.history_dir / filename)}[identifier]
+    before = deepcopy({key: getattr(model, key, None) for key in (
+        'history_file_path', 'history', 'chatbot', 'system_prompt', 'temperature',
+        '_state', '_tool_settings', '_pending_input_text', '_conversation_id')})
+    def forbidden(*args, **kwargs):
+        raise AssertionError('A current draft must not reset, reload or create a model')
+    monkeypatch.setattr(model, 'reset', forbidden)
+    monkeypatch.setattr(model, 'load_chat_history', forbidden)
+    monkeypatch.setattr(env.factory, 'get_model', forbidden)
+    result = load_history_model(model, target, request())
+    assert result[0] is model and len(result) == 24
+    assert all(value == {'__type__': 'update'} for value in result[1:])
+    assert {key: getattr(model, key, None) for key in before} == before
+    assert not list(env.history_dir.glob('*.json'))
+
+
+@pytest.mark.parametrize('case', ['other', 'populated', 'chatbot', 'bound', 'outside', 'symlink', 'owner', 'corrupt', 'busy'])
+def test_draft_exception_does_not_hide_invalid_history(env, monkeypatch, tmp_path, case):
+    from modules.history_selection import load_history_model
+    monkeypatch.setattr(env.presets, 'HISTORY_DIR', str(env.history_dir), raising=False)
+    model = select(env)
+    model.reset()
+    target = model.history_file_path
+    expected = '历史文件不存在'
+    incoming = request()
+    if case == 'other':
+        target = 'New synthetic missing draft.json'
+    elif case == 'populated':
+        model.history = [{'role': 'user', 'content': 'Synthetic content'}]
+    elif case == 'chatbot':
+        model.chatbot = [['Synthetic question', None]]
+    elif case == 'bound':
+        model._state['session_id'] = 'synthetic_existing_session'
+    elif case == 'outside':
+        target = str(tmp_path / 'outside.json')
+        model.history_file_path = target
+        expected = '当前登录用户'
+    elif case == 'symlink':
+        (env.history_dir / target).symlink_to(tmp_path / 'missing.json')
+        expected = '当前登录用户'
+    elif case == 'owner':
+        incoming = request(username='someone-else')
+        expected = '当前登录用户'
+    elif case == 'corrupt':
+        (env.history_dir / target).write_text('{invalid')
+        expected = '历史记录无法读取或格式无效'
+    elif case == 'busy':
+        model._pending_send = 'synthetic_pending_send'
+        expected = '正在提交或生成'
+    with pytest.raises(Exception, match=expected):
+        load_history_model(model, target, incoming)
+
+
 def test_started_agent_rejects_manual_provider_change(env, monkeypatch):
     complete(env, monkeypatch)
     model = select(env)
@@ -181,7 +247,7 @@ def test_invalid_saved_history_remains_an_error_after_reset(env, monkeypatch, co
     (env.history_dir / 'broken.json').write_text(contents)
     with pytest.raises(Exception, match='历史记录无法读取或格式无效'):
         load_history_model(model, 'broken', request())
-    with pytest.raises(Exception, match='历史记录无法读取或格式无效'):
+    with pytest.raises(Exception, match='历史文件不存在'):
         load_history_model(model, 'missing', request())
 
 

@@ -10,7 +10,7 @@ from modules.model_capabilities import is_busy, model_lock
 def load_history_model(current_model, filename, request: gr.Request = None):
     """显式切换历史可以离开 Agent；普通模型下拉切换仍受会话锁约束。"""
     from modules import shared
-    from modules.presets import HISTORY_DIR, MODEL_METADATA
+    from modules.presets import HISTORY_DIR, MODEL_METADATA, i18n
     from modules.models.models import get_model
     from modules.agent.store import BindingStore, owner_identity
 
@@ -37,8 +37,25 @@ def load_history_model(current_model, filename, request: gr.Request = None):
             saved = json.loads(chosen.read_text(encoding='utf-8'))
             if not isinstance(saved, dict) or not isinstance(saved['history'], list) or not isinstance(saved['chatbot'], list):
                 raise ValueError
+        except FileNotFoundError:
+            # Gradio 4.29 emits select when a server update selects the new-chat
+            # item. That item reserves a filename before any history is saved.
+            current_path = getattr(current_model, 'history_file_path', None)
+            if current_path:
+                draft = Path(current_path)
+                if not draft.is_absolute():
+                    draft = root / draft
+                if draft.suffix != '.json':
+                    draft = Path(str(draft) + '.json')
+                if (not draft.is_symlink() and draft.resolve().parent == root
+                        and draft.resolve() == chosen.resolve()
+                        and not current_model.history and not current_model.chatbot
+                        and not getattr(current_model, '_state', {}).get('session_id')):
+                    # Keep model, parameters, UI values and pending input intact.
+                    return (current_model, *(gr.update() for _ in range(23)))
+            raise gr.Error(i18n('ui.history.file_missing')) from None
         except (OSError, ValueError, KeyError):
-            raise gr.Error('历史记录无法读取或格式无效') from None
+            raise gr.Error(i18n('ui.history.file_invalid')) from None
 
         selection = saved.get('model_selection')
         if selection is None:

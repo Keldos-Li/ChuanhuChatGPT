@@ -455,6 +455,8 @@
             "filename_placeholder": "파일 이름 설정: 기본값: .json, 선택: .md",
             "invalid_filename": "유효한 파일 이름을 입력하세요. 다음 특수 문자를 포함하지 마세요: ",
             "load_from_list": "리스트에서 대화 불러오기",
+            "file_missing": "기록 파일이 없습니다",
+            "file_invalid": "기록을 읽을 수 없거나 형식이 잘못되었습니다",
             "new_chat_prefix": "새 대화 ",
             "rename": "대화 이름 변경",
             "save": "💾 대화 저장",

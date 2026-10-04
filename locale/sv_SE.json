@@ -455,6 +455,8 @@
             "filename_placeholder": "Ställ in filnamn: standard är .json, valfritt är .md",
             "invalid_filename": "Ange ett giltigt filnamn, använd inte följande specialtecken: ",
             "load_from_list": "Ladda dialog från lista",
+            "file_missing": "Historikfilen finns inte",
+            "file_invalid": "Historiken kan inte läsas eller har ett ogiltigt format",
             "new_chat_prefix": "Ny dialog ",
             "rename": "Byt namn på dialogen",
             "save": "💾 Spara Dialog",

@@ -455,6 +455,8 @@
             "filename_placeholder": "Đặt tên tệp: mặc định là .json, tùy chọn là .md",
             "invalid_filename": "Vui lòng nhập tên tệp hợp lệ, không chứa các ký tự đặc biệt sau: ",
             "load_from_list": "Tải cuộc trò chuyện từ danh sách",
+            "file_missing": "Tệp lịch sử không tồn tại",
+            "file_invalid": "Không thể đọc lịch sử hoặc định dạng lịch sử không hợp lệ",
             "new_chat_prefix": "Cuộc trò chuyện mới ",
             "rename": "Đổi tên cuộc trò chuyện này",
             "save": "💾 Lưu Cuộc trò chuyện",
