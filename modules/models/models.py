@@ -47,7 +47,6 @@ def _get_model(
                 model = original_model
             else:
                 model = OpenAIAgentsClient(model_name, user_name=user_name, owner=owner, api_key=access_key)
-            msg += " — " + i18n("model.openai_agent.selection_notice")
         elif model_type == ModelType.OpenAIVision or model_type == ModelType.OpenAI:
             logging.info(f"正在加载 OpenAI 模型: {model_name}")
             from .OpenAIVision import OpenAIVisionClient

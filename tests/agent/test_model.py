@@ -1,6 +1,16 @@
 """模型协议与实际本地存储的离线回归测试。"""
 from agent_fixtures import *
 
+def test_agent_selection_logs_model_without_explanatory_notice(env, caplog):
+    import logging
+    with caplog.at_level(logging.INFO):
+        model = select(env)
+    expected = env.factory.i18n('msg.status.model_set') + ' OpenAI Agent'
+    assert expected in [record.getMessage() for record in caplog.records]
+    assert not any(env.factory.i18n('model.openai_agent.selection_notice') in record.getMessage()
+                   for record in caplog.records)
+    assert model.is_hosted_agent
+
 def test_main_factory_send_artifact_followup(env,monkeypatch):
     calls,file=complete(env,monkeypatch,True);model=select(env)
     output=send(env,model)
