@@ -610,12 +610,14 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
             usageTxt], show_progress=False
     )
 
+    history_load_legacy_outputs_args = [current_model, model_select_dropdown, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, lora_select_dropdown, user_api_key, keyTxt, modelDescription, status_display]
+    history_load_outputs_args = list(dict.fromkeys([*history_load_legacy_outputs_args, *agent_panel.outputs, *capability_ui.outputs, historySelectList]))
     load_history_from_file_args = dict(
-        fn=agent_panel.wrap_history_load(load_history_model, capability_ui),
+        fn=agent_panel.wrap_history_load(load_history_model, capability_ui, legacy_outputs=history_load_legacy_outputs_args),
         trigger_mode="always_last",
         js='(model, filename) => { const selected = window.chuanhuHistorySelection?.() || null; if (selected) window.chuanhuAgentPendingDraft = null; return [model, selected]; }',
         inputs=[current_model, historySelectList],
-        outputs=[current_model, model_select_dropdown, saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, lora_select_dropdown, user_api_key, keyTxt, modelDescription, status_display, capability_marker, historySelectList],
+        outputs=history_load_outputs_args,
     )
 
     refresh_history_args = dict(
@@ -756,7 +758,7 @@ with gr.Blocks(theme=small_and_beautiful_theme) as demo:
         show_progress='hidden',
         js='(a,b)=>{return clearChatbot(a,b);}',
     ).then(agent_panel.values, [current_model], agent_panel.outputs, show_progress='hidden').then(agent_panel.chat_value, [current_model], [chatbot], show_progress='hidden').then(capability_ui.values, [current_model], capability_ui.outputs, show_progress='hidden')
-    historyIntentBtn.click(**load_history_from_file_args).then(agent_panel.values, [current_model], agent_panel.outputs, show_progress='hidden').then(agent_panel.chat_value, [current_model], [chatbot], show_progress='hidden').then(capability_ui.values, [current_model], capability_ui.outputs, show_progress='hidden').then(agent_panel.observe_history, [current_model], agent_panel.history_outputs, queue=True, concurrency_limit=None, show_progress='hidden').then(agent_panel.history_boundary_values(capability_ui), [current_model], [*agent_panel.outputs, *capability_ui.outputs], show_progress='hidden').then(agent_panel.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
+    historyIntentBtn.click(**load_history_from_file_args).then(agent_panel.observe_history, [current_model], agent_panel.history_outputs, queue=True, concurrency_limit=None, show_progress='hidden').then(agent_panel.history_boundary_values(capability_ui), [current_model], [*agent_panel.outputs, *capability_ui.outputs], show_progress='hidden').then(agent_panel.emit_ui_error, [current_model], [], queue=False, concurrency_limit=None)
     uploadHistoryBtn.upload(upload_chat_history, [current_model, uploadHistoryBtn], [
                         saveFileName, systemPromptTxt, chatbot, single_turn_checkbox, temperature_slider, top_p_slider, n_choices_slider, stop_sequence_txt, max_context_length_slider, max_generation_slider, presence_penalty_slider, frequency_penalty_slider, logit_bias_txt, user_identifier_txt, use_streaming_checkbox, downloadHistoryJSONBtn, downloadHistoryMarkdownBtn, historySelectList]).then(**refresh_history_args).then(agent_panel.values, [current_model], agent_panel.outputs, show_progress='hidden').then(agent_panel.chat_value, [current_model], [chatbot], show_progress='hidden').then(capability_ui.values, [current_model], capability_ui.outputs, show_progress='hidden')
     historySearchTextbox.input(

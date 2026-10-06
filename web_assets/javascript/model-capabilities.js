@@ -55,6 +55,20 @@
     window.chuanhuInputBusy = () => snapshot.busy === true;
     window.chuanhuTurnTerminal = () => snapshot.turn_terminal === true;
     window.chuanhuInputConversation = () => snapshot.input_target || '';
+    window.chuanhuRefreshAgentLoader = bot => {
+        const state = bot.querySelector('.agent-reply-state');
+        const waiting = snapshot.agent_tools && snapshot.busy && !snapshot.turn_terminal && state &&
+            state.dataset.conversationId === snapshot.input_target && state.dataset.turnId === snapshot.agent_turn_id &&
+            state.dataset.waiting === 'true';
+        let loader = bot.querySelector('.generating-loader');
+        if (waiting && !loader) {
+            loader = document.createElement('div');
+            loader.className = 'generating-loader';
+            loader.setAttribute('aria-label', '等待回答');
+            bot.prepend(loader);
+        }
+        if (!waiting) loader?.remove();
+    };
     function apply() {
         queued = false;
         const app = root();
@@ -96,18 +110,8 @@
         const hasMore = ['input_attachments','knowledge','single_turn','external_websearch'].some(window.chuanhuSupports);
         if (more && more.hidden === hasMore) more.hidden = !hasMore;
         if (!wasTerminal && snapshot.turn_terminal === true && typeof setLatestMessage === 'function') setLatestMessage();
-        const last = app.querySelector('#chuanhu-chatbot .message-wrap .message.bot:last-of-type');
-        if (snapshot.agent_tools && last) {
-            const text = last.querySelector('.md-message');
-            const waiting = snapshot.busy && !snapshot.turn_terminal && text && !text.textContent.trim();
-            if (waiting && !last.querySelector('.generating-loader')) {
-                const loader = document.createElement('div');
-                loader.className = 'generating-loader';
-                loader.setAttribute('aria-label', '等待回答');
-                last.appendChild(loader);
-            }
-            if (!waiting) last.querySelector('.generating-loader')?.remove();
-        }
+        if (snapshot.agent_tools) app.querySelectorAll('#chuanhu-chatbot .message-wrap .message.bot')
+            .forEach(window.chuanhuRefreshAgentLoader);
         window.chuanhuRefreshSendButton?.();
         window.chuanhuRefreshArtifactCards?.();
         window.chuanhuClearSubmittedDraft?.(snapshot.submitted_draft);

@@ -28,6 +28,8 @@ STATUS = {'starting': '正在连接', 'in_progress': '正在运行', 'requires_a
           'completed': '已完成', 'failed': '执行失败', 'not_started': '准备就绪',
           'incomplete': '暂时无法确认状态', 'uncertain': '暂时无法确认状态'}
 _UNSPECIFIED_GENERATION = object()
+_SYNC_WARNING = '云端历史尚未完整同步，现有回答已保留'
+_SYNC_NOTICE = '当前轮已结束，但云端历史尚未完整同步；回答已保留，请重新连接后继续'
 _bindings = {}  # Backward-compatible test hook; authority lives in BindingStore.
 _bindings_lock = RLock()
 _session_locks = {}
@@ -88,6 +90,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._conversation_id = uuid4().hex
         self._state = {'outcome': 'not_started'}
         self._display, self._artifacts, self._cloud_items = [], [], []
+        self._transcript, self._transcript_preview = None, []
+        self._item_receipts = []
+        self._activity_records = []
         self._active_input_cards = []
         self._answer_index = self._answer_row = None
         self._session_settings = None
@@ -96,6 +101,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._reasoning = None
         self._pending_actions = []
         self._notice = ''
+        self._sync_notice_receipt = None
         self._unavailable = False
         self._connection_mismatch = False
         self._fork_previous = None
@@ -193,12 +199,25 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         if message.get('type') == 'error' or message.get('outcome') == 'failed' or preparation.get('outcome') == 'failed':
             self.record_ui_error(message.get('message') or preparation.get('error') or 'Agent 执行失败', operation=operation)
         if message.get('sync_complete') is False:
-            self.record_ui_error('云端历史尚未完整同步，现有回答已保留', operation=operation)
+            self.record_ui_error(_SYNC_WARNING, operation=operation)
         if message.get('artifact_error'):
             self.record_ui_error('文件获取失败：' + str(message['artifact_error']), operation=operation)
         for record in message.get('artifacts', []):
             if record.get('status') == 'failed':
                 self.record_ui_error(record.get('error') or '文件获取失败，可重试', ('artifact', record.get('id'), record.get('error')), operation=operation)
+
+    def _resolve_sync_warning(self, operation=None):
+        # Resolve only this operation's obsolete sync warning after safe merge.
+        operation = operation or getattr(self, '_predict_error_operation', None) or self._state.get('generation')
+        self._ui_errors = [record for record in getattr(self, '_ui_errors', [])
+            if not (record['owner'] == self._owner and record['conversation'] == self._conversation_id
+                    and record['generation'] == self._state.get('generation') and record['operation'] == operation
+                    and record['source'] is None and record['message'] == _SYNC_WARNING)]
+        getattr(self, '_ui_error_seen', set()).discard((self._conversation_id, operation, None, _SYNC_WARNING))
+        receipt = (self._owner, self._conversation_id, self._state.get('generation'), operation)
+        if self._notice == _SYNC_NOTICE and self._sync_notice_receipt == receipt:
+            self._notice = ''
+            self._sync_notice_receipt = None
 
     def _execution_scope(self, **kwargs):
         return (TaskScope if getattr(self, "_task_backend", False) else OperationScope).capture(self, **kwargs)
@@ -275,6 +294,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 and not (getattr(self, '_task_backend', False) and self.history)): return
         state = {key: deepcopy(value) for key, value in self._state.items() if key not in ('required_actions', 'settings', 'items')}
         record = {'state': state, 'conversation_id': self._conversation_id, 'artifacts': deepcopy(self._artifacts),
+                  'transcript': self._private_transcript(), 'transcript_preview': deepcopy(self._transcript_preview),
+                  'item_receipts': deepcopy(self._item_receipts),
                   'settings': deepcopy(self._session_settings), 'connection_ref': self._connection_reference(),
                   'items': deepcopy(self._cloud_items), 'auto_named': self._auto_named, 'first_prompt': self._first_prompt,
                   'next_model_settings': self._pending_model_settings,
@@ -282,6 +303,22 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                                   else 'uncertain' if self._state.get('outcome') not in TERMINAL else 'settled')}
         record.update(self._input_binding())
         self._store().put(self._owner, self.history_file_path, record)
+
+    def _private_transcript(self):
+        # Even a redacted display field named authorization is forbidden by
+        # BindingStore. Keep that guard intact; omit these inert display fields.
+        denied = {'api_key', 'authorization', 'password', 'access_token', 'credential_values'}
+        def clean(value):
+            if isinstance(value, dict): return {key: clean(item) for key, item in value.items() if key.lower() not in denied}
+            if isinstance(value, list): return [clean(item) for item in value]
+            return value
+        snapshot = clean(deepcopy(self._transcript))
+        if snapshot:
+            for old, new in zip(self._transcript['timeline'], snapshot['timeline']):
+                if old != new: new.setdefault('capture', {})['omitted'] = True
+            for old, new in zip(self._transcript['turns'], snapshot['turns']):
+                if old != new: new.setdefault('error_capture', {})['omitted'] = True
+        return snapshot
 
     def adopt_local_history(self, original):
         self.history = deepcopy(original.history)
@@ -291,6 +328,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._restore_binding()
 
     def _restore_binding(self):
+        self._activity_records = []
         self._choice_epoch = uuid4().hex
         self._active_input_cards = []
         self._cancel_requested = self._cancel_sent = False
@@ -325,6 +363,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     artifact.update(status='failed', error='本地下载缓存已失效，可重新获取')
                     artifact.pop('path', None)
             self._cloud_items = binding.get('items', [])
+            self._transcript = deepcopy(binding.get('transcript'))
+            self._transcript_preview = deepcopy(binding.get('transcript_preview', []))
+            self._item_receipts = deepcopy(binding.get('item_receipts', []))
             self._session_settings = binding.get('settings')
             if self._session_settings:
                 self.model_name = self._session_settings['model']
@@ -351,6 +392,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._state = {'outcome': 'not_started'}
         self._conversation_id = uuid4().hex
         self._artifacts, self._cloud_items, self._pending_actions = [], [], []
+        self._transcript, self._transcript_preview = None, []
+        self._item_receipts = []
+        self._activity_records = []
         self._active_input_cards = []
         self._answer_index = self._answer_row = self._session_settings = None
         self._needs_sync = self._connection_mismatch = self._unavailable = False
@@ -553,7 +597,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 raise gr.Error('请先停止或确认当前任务状态，再创建独立会话')
             self.auto_save(self.chatbot)
             backup = {name: deepcopy(getattr(self, name)) for name in
-                ('history_file_path', '_state', '_session_settings', '_tool_settings', 'system_prompt', '_artifacts', '_cloud_items', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch', 'model_name', '_reasoning', '_pending_model_settings', '_input_context', '_installed_inputs', '_input_seed_reference', '_input_messages')}
+                ('history_file_path', '_state', '_session_settings', '_tool_settings', 'system_prompt', '_artifacts', '_cloud_items', '_transcript', '_transcript_preview', '_item_receipts', '_activity_records', 'history', 'chatbot', '_display', '_conversation_id', '_auto_named', '_first_prompt', '_answer_index', '_answer_row', '_needs_sync', '_unavailable', '_connection_mismatch', 'model_name', '_reasoning', '_pending_model_settings', '_input_context', '_installed_inputs', '_input_seed_reference', '_input_messages')}
             self.new_auto_history_filename()
             self._fresh()
             self._fork_previous = backup
@@ -623,21 +667,137 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             unique[item['id']] = {'id': item['id'], 'role': item['role'], 'content': content, 'turn_id': item.get('turn_id'), 'phase': item.get('phase')}
         return list(unique.values())
 
+    def _capture_transcript(self, message):
+        from modules.agent import transcript
+        from modules.agent.tool_logging import known_secrets
+        items = message.get('items', [])
+        occurrences = {int(key): value for key, value in message.get('item_occurrences', {}).items()}
+        for index, item in enumerate(items):
+            source = item.get('id') if isinstance(item, dict) else None
+            if not isinstance(source, str): source = None
+            receipts = {record['receipt'] for record in self._item_receipts if source and record.get('source_id') == source}
+            if index not in occurrences and len(receipts) == 1: occurrences[index] = receipts.pop()
+        mappings = [dict(record, wire_sha256=digest) for digest, record in self._input_messages.items()] if items else []
+        from modules.agent.activity import safe_records
+        observed=safe_records(message.get('activity',self._activity_records))
+        incoming = transcript.normalize(items, scope_id=self._conversation_id,
+            turns=message.get('turns', []), artifacts=message.get('transcript_artifacts', message.get('artifacts', [])),
+            input_mappings=mappings, capture=message.get('capture', {'items': 'complete' if message.get('sync_complete') is True and isinstance(message.get('items'), list) else 'partial' if items else 'not_collected'}),
+            occurrence_ids=occurrences,
+            session_id=self._state.get('session_id'), secrets=known_secrets(self),activity=observed)
+        authoritative = (message.get('sync_complete') is True and isinstance(message.get('items'), list)
+                         and incoming['capture']['items'] == 'complete')
+        previous = self._transcript
+        if previous is None and 'items' not in message and self.history:
+            previous = self.history_document({'history': self.history, 'chatbot': self._display})['agent_transcript']
+        snapshot = transcript.merge(previous, incoming, authoritative=authoritative) if previous else incoming
+        # Keep actual application receipts privately. After the caller explicitly
+        # bridges a null-ID occurrence to an API ID, future GETs can match that
+        # exact ID; never bridge by page position or message text.
+        receipts = {record['receipt']: record for record in self._item_receipts}
+        valid_sources = {entry.get('source_id') for entry in incoming['timeline']}
+        for index, receipt in occurrences.items():
+            source = items[index].get('id')
+            if not isinstance(source, str) or source not in valid_sources: source = None
+            receipts[receipt] = {'receipt': receipt, 'source_id': source}
+        if len(receipts) > transcript.MAX_RECORDS: raise transcript.TranscriptError('Too many application message receipts')
+        if previous:
+            old_entries={entry['id']:entry for entry in previous['timeline']}
+            for entry in snapshot['timeline']:
+                old=old_entries.get(entry['id'])
+                if old and old.get('turn_ref')==entry.get('turn_ref'):
+                    for key in ('elapsed_ms','output_index'):
+                        if key not in entry and key in old:entry[key]=old[key]
+        self._transcript = snapshot
+        if isinstance(message.get('activity'),list):
+            self._activity_records=observed
+        self._item_receipts = list(receipts.values())
+        current_turn = self._state.get('turn_id')
+        turn_refs = {turn['id']: turn.get('source_id') for turn in self._transcript['turns']}
+        if authoritative or any(entry['kind'] == 'message' and entry.get('role') == 'user'
+                and current_turn and turn_refs.get(entry.get('turn_ref')) == current_turn for entry in incoming['timeline']):
+            self._transcript_preview = []
+        return authoritative
+
+    def history_document(self, document):
+        """Display data only; private run/cache bindings never enter JSON."""
+        from modules.agent import transcript
+        from modules.agent.tool_logging import known_secrets
+        secrets = known_secrets(self)
+        if self._transcript is None or (not self._transcript['timeline'] and self._input_seed_reference is not None):
+            reference = self._legacy_document(document)
+            if self._transcript_preview:
+                reference = self._legacy_document(dict(document, history=self.history[:-2], chatbot=_rows(self.history[:-2])))
+            snapshot = transcript.migrate(reference, scope_id=self._conversation_id, secrets=secrets)['agent_transcript']
+        else:
+            snapshot = deepcopy(self._transcript)
+        if self._transcript_preview:
+            preview = deepcopy(self._transcript_preview)
+            if self._answer_index is not None and self._answer_index < len(self.history):
+                preview[-1]['content'] = [{'type': 'output_text', 'text': self.history[self._answer_index]['content']}]
+            mappings = [{'wire_sha256': hashlib.sha256(preview[0]['content'][0]['text'].encode()).hexdigest(), 'files': deepcopy(self._active_input_cards)}]
+            occurrences = {index: item['id'] for index, item in enumerate(preview)}
+            for item in preview: item['id'] = None
+            incoming = transcript.normalize(preview, scope_id=self._conversation_id, input_mappings=mappings,
+                                            capture={'items': 'partial'}, secrets=secrets, occurrence_ids=occurrences)
+            snapshot = transcript.merge(snapshot, incoming)
+        return transcript.migrate(dict(document, history_format={'name': 'chuanhu', 'version': 2}, agent_transcript=snapshot),
+                                  scope_id=self._conversation_id, secrets=secrets)
+
+    @staticmethod
+    def _legacy_document(document):
+        # Old ordinary histories store native image cells separately from text.
+        # Their inert filenames remain in chatbot for migrate's metadata cards;
+        # image paths are never converted to prompts or opened by this adapter.
+        if isinstance(document, dict) and 'agent_transcript' not in document and isinstance(document.get('history'), list):
+            history = [item for item in document['history'] if not (isinstance(item, dict) and item.get('role') == 'image')]
+            if len(history) != len(document['history']): return dict(document, history=history)
+        return document
+
+    def _load_document(self, wire, *, scope_id, imported=False):
+        from modules.agent import transcript
+        from modules.agent.tool_logging import known_secrets
+        if len(wire.encode()) > transcript.MAX_DOCUMENT_BYTES: raise transcript.TranscriptError('History exceeds the document size limit')
+        try: document = json.loads(wire)
+        except (ValueError, RecursionError): raise transcript.TranscriptError('Invalid history JSON') from None
+        document = transcript.migrate(self._legacy_document(document), scope_id=scope_id, secrets=known_secrets(self))
+        return transcript.loads(transcript.serialize(document), scope_id=scope_id, secrets=known_secrets(self), imported=True) if imported else document
+
+    def _transcript_messages(self):
+        return [dict(id=entry['id'], role=entry['role'], turn_id=entry.get('turn_ref'),
+                     content='\n'.join(part['text'] for part in entry['content'] if part['type'] == 'text'))
+                for entry in (self._transcript or {}).get('timeline', []) if entry['kind'] == 'message']
+
     def _sync_items(self, items):
         self._cloud_items = self._message_items(items)
         from modules.agent.message_files import group_turn_messages
-        self.history = [{'role': item['role'], 'content': self._project_input_text(item['content']) if item['role']=='user' else item['content']} for item in group_turn_messages(self._cloud_items)]
-        if not self._cloud_items and self._input_seed_reference is not None:
+        source = self._transcript_messages() if self._transcript is not None else self._cloud_items
+        self.history = [{'role': item['role'], 'content': self._project_input_text(item['content']) if item['role']=='user' else item['content']} for item in group_turn_messages(source)]
+        if not source and self._input_seed_reference is not None:
             # The empty session was created only to prepare files. These local
             # references have not been sent yet and must survive reconnect.
             self.history = deepcopy(self._input_seed_reference)
-        if any(item['role']=='user' for item in self._cloud_items): self._input_seed_reference = None
+        if any(item['role']=='user' for item in source): self._input_seed_reference = None
         self._display = _rows(self.history)
         self._answer_index = len(self.history) - 1 if self.history and self.history[-1]['role'] == 'assistant' else None
         self._answer_row = len(self._display) - 1 if self._answer_index is not None else None
+        # Keep the live text destination after a user-only authoritative
+        # snapshot. Ownership comes from the canonical turn, not row text.
+        current_refs = {turn['id'] for turn in (self._transcript or {}).get('turns', [])
+                        if turn.get('source_id') == self._state.get('turn_id') and self._state.get('turn_id')}
+        current_users = [item for item in source if item['role'] == 'user' and item.get('turn_id') in current_refs]
+        if current_refs and self._answer_index is not None and source[-1].get('turn_id') not in current_refs:
+            self._answer_index = self._answer_row = None
+        if (self._state.get('outcome') not in TERMINAL and len(current_users) == 1
+                and source and source[-1] is current_users[0]
+                and not any(item['role'] == 'assistant' and item.get('turn_id') in current_refs for item in source)):
+            self.history.append({'role': 'assistant', 'content': ''})
+            self._answer_index, self._answer_row = len(self.history) - 1, len(self._display) - 1
+            # Preserve None for canonical row alignment until text arrives.
 
     def _log_final_answer(self, message):
         if (message.get('type') != 'result' or self._state.get('outcome') not in TERMINAL
+                or message.get('sync_complete') is False
                 or not any(key in message for key in ('text', 'items'))):
             return
         turn_id = self._state.get('turn_id')
@@ -645,8 +805,13 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             return
         if isinstance(message.get('items'), list):
             from modules.agent.message_files import group_turn_messages
-            current_items = [item for item in self._message_items(message['items'])
-                             if item.get('turn_id') == turn_id and item['role'] == 'assistant']
+            if self._transcript is not None:
+                current_refs = {turn['id'] for turn in self._transcript['turns'] if turn.get('source_id') == turn_id}
+                current_items = [item for item in self._transcript_messages()
+                                 if item.get('turn_id') in current_refs and item['role'] == 'assistant']
+            else:
+                current_items = [item for item in self._message_items(message['items'])
+                                 if item.get('turn_id') == turn_id and item['role'] == 'assistant']
             answer = '\n\n'.join(item['content'] for item in group_turn_messages(current_items) if item['content'])
         else:
             answer = message.get('text', '') if message.get('turn_id') == turn_id else ''
@@ -667,7 +832,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._tool_log = ToolLog()
         self._tool_log.observe(self, message, artifacts)
 
-    def _accept(self, message, generation, *, restoring=False, error_operation=None, scope=None):
+    def _accept(self, message, generation, *, restoring=False, error_operation=None, scope=None, log_updates=None):
         if scope is not None and not scope.current(self): return False
         if (self._retired and not getattr(self, "_task_backend", False)) or self._state.get('generation') != generation: return False
         session = message.get('session_id')
@@ -698,9 +863,19 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._history_submission_saved_generation = generation
         outcome = message.get('outcome')
         if outcome and (not self._cancel_requested or outcome in TERMINAL): self._state['outcome'] = outcome
-        if (message.get('sync_complete') or message.get('history_authoritative')) and isinstance(message.get('items'), list):
+        items_complete = False
+        if any(isinstance(message.get(key), list) for key in ('items', 'artifacts', 'transcript_artifacts')):
+            try: items_complete = self._capture_transcript(message)
+            except ValueError as error:
+                self._needs_sync = True
+                self._notice = '部分历史缺少稳定消息身份或无法安全合并，已有记录已保留；请重新连接读取完整记录'
+                self.record_ui_error(self._notice, operation=error_operation)
+                raise gr.Error(self._notice) from error
+        if (items_complete or message.get('history_authoritative')) and isinstance(message.get('items'), list):
             self._sync_items(message['items'])
-            if message.get('sync_complete'): self._needs_sync = False
+            if items_complete:
+                self._needs_sync = False
+                self._resolve_sync_warning(error_operation)
         elif self._answer_index is not None and 'text' in message:
             if isinstance(message.get('items'), list):
                 known = {item['id']: item for item in self._cloud_items}
@@ -708,9 +883,15 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self._cloud_items = list(known.values())
             self.history[self._answer_index]['content'] = str(message['text'])
             self._display[self._answer_row][1] = self.history[self._answer_index]['content']
-        if message.get('sync_complete') is False:
+            if message.get('type') == 'result' and self._state.get('outcome') in TERMINAL and not isinstance(message.get('items'), list):
+                self._transcript = self.history_document({'history': self.history, 'chatbot': self._display})['agent_transcript']
+                self._transcript_preview = []
+        if message.get('sync_complete') is False or (message.get('sync_complete') is True and not items_complete):
             self._needs_sync = True
-            self._notice = '当前轮已结束，但云端历史尚未完整同步；回答已保留，请重新连接后继续'
+            self._notice = _SYNC_NOTICE
+            operation = error_operation or getattr(self, '_predict_error_operation', None) or self._state.get('generation')
+            self._sync_notice_receipt = (self._owner, self._conversation_id, self._state.get('generation'), operation)
+            self.record_ui_error(_SYNC_WARNING, operation=operation)
         if 'required_actions' in message:
             self._pending_actions = [] if self._cancel_requested else deepcopy(message['required_actions'])
         if self._state.get('outcome') in TERMINAL: self._pending_actions = []
@@ -723,8 +904,19 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         if isinstance(message.get('artifacts'), list):
             self._merge_artifacts(message['artifacts'])
         self._record_message_error(message, operation=error_operation)
-        self._log_final_answer(message)
-        self._log_tool_results(message, self._artifacts if 'artifacts' in message else ())
+        should_log = not restoring if log_updates is None else log_updates
+        sync_unconfirmed = message.get('sync_complete') is True and not items_complete
+        if should_log:
+            if not sync_unconfirmed: self._log_final_answer(message)
+            self._log_tool_results(message, self._artifacts if 'artifacts' in message else ())
+        if (message.get('type') == 'result' and self._state.get('outcome') in TERMINAL
+                and message.get('sync_complete') is not False and not sync_unconfirmed
+                and (message.get('sync_complete') is True or message.get('history_authoritative') is True or 'text' in message)
+                and self._state.get('session_id') and self._state.get('turn_id')):
+            # Private receipt: terminal progress is not authoritative completion.
+            # Persist alongside run state so a new view/process can distinguish
+            # a historical final snapshot from the first reconciled result.
+            self._state['log_reconciled'] = {'session_id': self._state['session_id'], 'turn_id': self._state['turn_id']}
         self._remember()
         if getattr(self, '_task_backend', False):
             import time
@@ -747,10 +939,22 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 record.update(status='failed', error='文件缓存校验失败，请重新获取')
                 record.pop('path', None)
         previous = {record['id']: record for record in self._artifacts}
-        previous.update((record['id'], record) for record in records if isinstance(record.get('id'), str))
+        for record in records:
+            if not isinstance(record.get('id'), str): continue
+            old = previous.get(record['id'])
+            if (old and old.get('status') == 'ready' and record.get('status') == 'preparing'
+                    and old.get('session_id') == record.get('session_id')
+                    and old.get('turn_id') == record.get('turn_id')):
+                path = Path(old.get('path', ''))
+                trusted_root = Path(shared.chuanhu_path).resolve() / 'agent_data' / 'artifacts' / hashlib.sha256(self.user_name.encode()).hexdigest()
+                if (not path.is_symlink() and path.is_file() and
+                        ((root in path.resolve().parents and any(parent.name.startswith('chuanhu-agent-artifacts-') for parent in path.parents))
+                         or trusted_root in path.resolve().parents)):
+                    record = dict(old, **{key:value for key,value in record.items() if key not in ('status','path','error')})
+            previous[record['id']] = record
         self._artifacts = list(previous.values())
 
-    def _download(self, generation, artifact_ids=None, *, error_operation=None, scope=None):
+    def _download(self, generation, artifact_ids=None, *, error_operation=None, scope=None, log_updates=True):
         with self._lock:
             if getattr(self, "_background_busy", False): self._task_phase = "downloading"
             scope = scope or self._execution_scope()
@@ -787,11 +991,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     record.pop('path', None)
             with self._lock:
                 if not scope.current(self): return
-                previous = {record['id']: record for record in self._artifacts}
-                previous.update((record['id'], record) for record in records)
+                self._merge_artifacts(records)
+                self._capture_transcript({'artifacts': self._artifacts, 'capture': {'items': 'not_collected', 'artifacts': 'partial'}})
                 self._record_message_error(dict(message, artifacts=records), operation=error_operation)
-                self._artifacts = list(previous.values())
-                self._log_tool_results(message, records)
+                if log_updates: self._log_tool_results(message, records)
                 self._remember()
             yield deepcopy(self._display), self._status()
 
@@ -893,6 +1096,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self.history.extend([{'role': 'user', 'content': display_input}, {'role': 'assistant', 'content': ''}])
             self._answer_index, self._answer_row = len(self.history) - 1, len(self._display) - 1
             self._active_input_cards = [{'id':record.input_id,'name':record.name,'size':record.size} for record in input_records]
+            self._transcript_preview = [dict(id='local-' + generation + '-' + role, type='message', role=role,
+                turn_id='local-' + generation, content=[{'type': 'input_text' if role == 'user' else 'output_text', 'text': display_input if role == 'user' else ''}])
+                for role in ('user', 'assistant')]
             self._running = True
             self._draft_submitted = self._draft_acknowledged = False
             self._cancel_requested = self._cancel_sent = False
@@ -968,6 +1174,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             with self._lock:
                 if scope.current(self):
                     if not started:
+                        self._transcript_preview = []
                         self._active_input_cards = previous_input_cards
                         rollback = self._input_rollback_state(previous[0], generation)
                         self._state, self.history, self._display, self._answer_index, self._answer_row = (rollback, *previous[1:])
@@ -1023,6 +1230,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self._state['outcome'] = 'uncertain'
             session = self._state.get('session_id')
             original_generation = self._state.get('generation')
+            resume_logs = self._state.get('log_reconciled') != {'session_id': self._state.get('session_id'), 'turn_id': self._state.get('turn_id')}
+            restored_turn = self._state.get('turn_id')
             if not session and self._state.get('outcome') != 'uncertain': return
             if not session and not original_generation: return
             target = self._conversation_id
@@ -1048,7 +1257,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         # Never replace preserved history with a partial error snapshot.
                         chat = deepcopy(self._display)
                     else:
-                        if not self._accept(message, generation, restoring=True, error_operation=observer): continue
+                        if not self._accept(message, generation, restoring=True, error_operation=observer, log_updates=resume_logs or bool(message.get('turn_id') and message['turn_id'] != restored_turn)): continue
                         self.chatbot = deepcopy(self._display)
                         chat = deepcopy(self._display)
                 if self._cancel_requested and message.get('type') != 'error':
@@ -1060,7 +1269,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 yield chat, self._status()
                 if message.get('type') == 'error' or late_stop_failure: return
             if not cancelled() and self._state.get('outcome') in TERMINAL and self._state.get('session_id'):
-                yield from self._download(generation, error_operation=observer)
+                yield from self._download(generation, error_operation=observer, log_updates=resume_logs or self._state.get('turn_id') != restored_turn)
         finally:
             with self._lock:
                 if not cancelled():
@@ -1089,6 +1298,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                            'turn_id': self._state.get('turn_id'), 'run_id': generation,
                            'baseline_turn_ids': self._state.get('baseline_turn_ids'), 'submission_started': self._state.get('submission_started') is True,
                            'tool_settings': (self._session_settings or {}).get('tools', self._tool_settings)}
+            resume_logs = self._state.get('log_reconciled') != {'session_id': self._state.get('session_id'), 'turn_id': self._state.get('turn_id')}
+            restored_turn = self._state.get('turn_id')
             scope = self._execution_scope(history_target=True)
         if empty_result is not None:
             yield empty_result
@@ -1103,7 +1314,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         self._notice = '历史尚未同步完整，现有内容已保留：' + message.get('message', '')
                         self._needs_sync = True
                         message = {key: value for key, value in message.items() if key not in ('outcome', 'items', 'sync_complete')}
-                    if not self._accept(message, generation, restoring=True, scope=scope): continue
+                    if not self._accept(message, generation, restoring=True, scope=scope, log_updates=resume_logs or bool(message.get('turn_id') and message['turn_id'] != restored_turn)): continue
                     self.chatbot = deepcopy(self._display)
                     if self._state.get('outcome') in TERMINAL:
                         self.auto_save(self.chatbot)
@@ -1111,7 +1322,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 if self._cancel_requested: self._cancel(generation, error_operation=getattr(self, '_predict_error_operation', None) or generation, error_source=None)
                 yield deepcopy(self._display), self._status()
             if scope.current(self) and self._state.get('outcome') in TERMINAL and self._state.get('session_id'):
-                yield from self._download(generation, scope=scope)
+                yield from self._download(generation, scope=scope, log_updates=resume_logs or self._state.get('turn_id') != restored_turn)
                 if scope.current(self): yield deepcopy(self._display), self._status()
         finally:
             with self._lock:
@@ -1176,10 +1387,19 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             if chosen:
                 root = (Path(HISTORY_DIR) / self.user_name).resolve()
                 candidate = Path(chosen) if Path(chosen).is_absolute() else root / chosen
-                if candidate.resolve().parent != root:
+                if candidate.suffix != '.json': candidate = Path(str(candidate) + '.json')
+                if candidate.is_symlink() or candidate.resolve().parent != root:
                     raise gr.Error('只能读取当前登录用户的聊天历史')
+            from modules.agent import transcript
+            from modules.agent.tool_logging import known_secrets
+            try:
+                source_wire = candidate.read_text(encoding='utf-8')
+                document = self._load_document(source_wire, scope_id=self._conversation_id, imported=self._importing)
+            except transcript.TranscriptError as error:
+                raise gr.Error(str(error)) from None
+            document.setdefault('system', self.system_prompt)
             explicit_instructions = self.system_prompt
-            result = list(super().load_chat_history(new_history_file_path))
+            result = list(super().load_chat_history(new_history_file_path, _document=document))
             self.system_prompt = explicit_instructions  # Imported history is reference data, never authority.
             self.metadata = {}
             self.stream = True
@@ -1188,6 +1408,18 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._display = deepcopy(self.chatbot)
             self._notice = ''
             self._restore_binding()
+            if document['agent_transcript']['scope_id'] != self._conversation_id:
+                document = transcript.loads(transcript.serialize(document), scope_id=self._conversation_id,
+                                            secrets=known_secrets(self), imported=True)
+            saved = document['agent_transcript']
+            self._transcript = (self._transcript if self._transcript == saved or any(entry.get('identity') == 'unresolved' for entry in (self._transcript or {}).get('timeline', []))
+                                else transcript.merge(saved, self._transcript)) if self._transcript is not None else saved
+            from modules.agent.message_files import group_turn_messages
+            self.history = [{'role': item['role'], 'content': item['content']} for item in group_turn_messages(self._transcript_messages())]
+            self.chatbot = _rows(self.history)
+            self._display = deepcopy(self.chatbot)
+            self._answer_index = len(self.history) - 1 if self.history and self.history[-1]['role'] == 'assistant' else None
+            self._answer_row = len(self._display) - 1 if self._answer_index is not None else None
             result[1], result[2], result[14] = self.system_prompt, gr.update(value=self.chatbot), True
             return tuple(result)
 
@@ -1196,7 +1428,15 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._assert_idle()
             self._remember()
             self._importing = True
-            try: return super().upload_chat_history(new_history_file_content)
+            try:
+                from modules.agent import transcript
+                from modules.agent.tool_logging import known_secrets
+                if isinstance(new_history_file_content, bytes):
+                    document = self._load_document(new_history_file_content.decode('utf-8'), scope_id=uuid4().hex, imported=True)
+                    new_history_file_content = transcript.serialize(document).encode('utf-8')
+                return super().upload_chat_history(new_history_file_content)
+            except (transcript.TranscriptError, UnicodeError) as error:
+                raise gr.Error(str(error)) from None
             finally: self._importing = False
 
     def reset(self, remain_system_prompt=False):

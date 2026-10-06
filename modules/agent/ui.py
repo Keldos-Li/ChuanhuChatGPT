@@ -31,6 +31,9 @@ def _agent(model):
 
 def message_file_projection(model, rows=None):
     from modules.agent.message_files import project_message_files
+    from modules.agent.transcript_view import project_transcript
+    projected = project_transcript(model, deepcopy(model._display if rows is None else rows))
+    if projected is not None: return projected
     return project_message_files(deepcopy(model._display if rows is None else rows), model._cloud_items, model._artifacts,
         session_id=model._state.get('session_id'), conversation_id=model._conversation_id,
         current_turn_id=model._state.get('turn_id'), answer_row=model._answer_row, input_messages=getattr(model, '_input_messages', {}),
@@ -212,10 +215,10 @@ class AgentPanel:
         if isinstance(rows, dict) and rows.get('__type__') == 'update':
             if 'value' not in rows: return rows
             return dict(rows, value=self.render_chat(model, rows['value']))
-        if rows and (getattr(model, '_running', False) or getattr(model, '_background_busy', False)) and rows[-1][1] is None:
-            rows = deepcopy(rows)
-            rows[-1] = [rows[-1][0], '']
-        return render_projection(message_file_projection(model, rows), self.format_user, self.format_assistant)
+        # Align identities against raw cells before making a waiting cell visible.
+        # Converting None to '' first loses the canonical user-only row match.
+        projection = message_file_projection(model, rows)
+        return render_projection(projection, self.format_user, self.format_assistant)
 
     def chat_value(self, model, request: gr.Request):
         if not _agent(model): return gr.update()
@@ -311,7 +314,8 @@ class AgentPanel:
         def change_with_ui(*args, **kwargs):
             result = list(change(*args, **kwargs))
             model = result[0]
-            if _agent(model): result[2] = gr.update(value=self.render_chat(model, model.chatbot))
+            if _agent(model):
+                result[2] = self.render_chat(model, result[2])
             values = dict(zip(legacy_outputs, result))
             values.update(zip(self.outputs, self.values(model)))
             values.update(zip(capability_ui.stream_outputs, capability_ui.stream_values(model)))
@@ -335,18 +339,30 @@ class AgentPanel:
                 return (model, *capability_ui.stream_values(model), *result)
         return reset_with_ui
 
-    def wrap_history_load(self, load, capability_ui=None):
+    def wrap_history_load(self, load, capability_ui=None, *, legacy_outputs=None):
+        outputs = (list(dict.fromkeys([*legacy_outputs, *self.outputs, *capability_ui.outputs, self.history_list]))
+                   if legacy_outputs is not None else None)
         @wraps(load)
         def load_with_selection(model, filename, request: gr.Request = None):
             with model_lock(model):
                 result = load(model, filename, request=request)
-                if not hasattr(result[0], 'chatbot'):
-                    return (*result, *((gr.update(),) if capability_ui is not None else ()), gr.update())
-                # A rejected stale click must restore the authoritative Radio
-                # selection instead of leaving a selected label over a draft.
+                current = result[0]
+                if not hasattr(current, 'chatbot'):
+                    return tuple(gr.update() for _ in outputs) if outputs is not None else (*result, *((gr.update(),) if capability_ui is not None else ()), gr.update())
+                if _agent(current) and isinstance(result[4], dict) and 'value' in result[4]:
+                    result = (*result[:4], self.render_chat(current, result[4]), *result[5:])
+                if outputs is not None:
+                    values = dict(zip(legacy_outputs, result))
+                    values.update(zip(self.outputs, self.values(current, request=request)))
+                    for component, update in zip(capability_ui.outputs, capability_ui.values(current)):
+                        previous = values.get(component)
+                        values[component] = dict(previous, **update) if isinstance(previous, dict) and isinstance(update, dict) else update
+                    values[self.history_list] = self.history_value(current)
+                    if _agent(current): current._history_ui_projection_visit = current.agent_choice_target
+                    return tuple(values[component] for component in outputs)
                 marker = (() if capability_ui is None else
-                          (capability_ui.stream_values(result[0])[capability_ui.stream_outputs.index(capability_ui.marker)],))
-                return (*result, *marker, self.history_value(result[0]))
+                          (capability_ui.stream_values(current)[capability_ui.stream_outputs.index(capability_ui.marker)],))
+                return (*result, *marker, self.history_value(current))
         return load_with_selection
 
     def wrap_transfer(self, transfer):
@@ -454,7 +470,10 @@ class AgentPanel:
                 scope = getattr(model, '_history_ui_complete_scope', None)
                 if scope is None or not scope.current(model): return [gr.update() for _ in outputs]
                 model._history_ui_complete_scope = None
-                return [*self.values(model, request=request, include_config=False), *capability_ui.values(model)]
+                values = [*self.values(model, request=request, include_config=False), *capability_ui.values(model)]
+                previous = getattr(model, '_history_ui_previous_values', {})
+                model._history_ui_previous_values = {}
+                return [gr.update() if value == previous.get(component._id) else value for component, value in zip(outputs, values)]
         return history_values_at_boundary
 
     def wrap_predict(self, predict, capability_ui, compact=False):
@@ -614,13 +633,29 @@ class AgentPanel:
             model._history_ui_complete_scope = None
             epoch = uuid4().hex
             updates = FrameUpdates()
+            presented = {}
+            if capability_ui is not None:
+                presented = {component._id: deepcopy(value) for component, value in zip([*self.outputs, *capability_ui.outputs], [*self.values(model, request=request, include_config=False), *capability_ui.values(model)])}
+                if getattr(model, '_history_ui_projection_visit', None) == visit:
+                    updates.changes((*capability_ui.stream_values(model), *self.stream_values(model, request=request)))
+            def remember_controls(extras):
+                for component, value in zip([*capability_ui.stream_outputs, *self.stream_outputs] if capability_ui is not None else [], extras):
+                    presented[component._id] = deepcopy(value)
+            previous_chat = deepcopy(self.render_chat(model, model.chatbot))
+            def chat_change(chat):
+                nonlocal previous_chat
+                rendered = self.render_chat(model, chat)
+                value = rendered.get('value') if isinstance(rendered, dict) else rendered
+                if value == previous_chat: return gr.update()
+                previous_chat = deepcopy(value)
+                return rendered
             def current():
                 return not model._retired and model.agent_choice_target == visit and model._conversation_id == target and model._owner == owner and getattr(model, '_history_epoch', None) == epoch
             from modules.agent.tasks import TASKS
             task = TASKS.find(model)
             if task is None and not model._needs_sync: return
             if task is None and model._needs_sync:
-                task = TASKS.start(model, lambda: model.observe_history(error_operation=epoch))
+                task = TASKS.start(model, lambda: model.observe_history(error_operation=epoch), read_only=model._state.get('outcome') in ('completed', 'cancelled', 'failed'))
             model._history_epoch = epoch
             source = task.subscribe(model) if task is not None else model.observe_history(error_operation=epoch)
             for chat, status in _chat_frames(source):
@@ -628,18 +663,22 @@ class AgentPanel:
                     yield tuple(gr.update() for _ in self.history_outputs)
                     return
                 extras = (*capability_ui.stream_values(model), *self.stream_values(model, request=request)) if capability_ui is not None else ()
-                yield self.render_chat(model, chat), status, *updates.changes(extras)
+                remember_controls(extras)
+                yield chat_change(chat), status, *updates.changes(extras)
             if not current():
                 yield tuple(gr.update() for _ in self.history_outputs)
                 return
             extras = (*capability_ui.stream_values(model), *self.stream_values(model, request=request)) if capability_ui is not None else ()
             with model._lock:
                 stale = not current()
-                if not stale: model._history_ui_complete_scope = OperationScope.capture(model)
+                if not stale:
+                    remember_controls(extras)
+                    model._history_ui_previous_values = presented
+                    model._history_ui_complete_scope = OperationScope.capture(model)
             if stale:
                 yield tuple(gr.update() for _ in self.history_outputs)
                 return
-            yield gr.update(value=self.render_chat(model, model.chatbot)), model._status(), *updates.changes(extras)
+            yield chat_change(gr.update(value=model.chatbot)), model._status(), *updates.changes(extras)
             if not current():
                 yield tuple(gr.update() for _ in self.history_outputs)
                 return

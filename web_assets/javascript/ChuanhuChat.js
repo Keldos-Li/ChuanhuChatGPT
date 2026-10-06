@@ -67,7 +67,7 @@ function addInit() {
 
     chatbotObserver.observe(chatbotIndicator, { attributes: true, childList: true, subtree: true });
     chatListObserver.observe(chatListIndicator, { attributes: true });
-    modelSelectObserver.observe(modelSelectIndicator, { attributes: true });
+    modelSelectObserver.observe(gradioApp().querySelector('#gr-model-description'), { childList: true, subtree: true, characterData: true });
     setUploader();
     setPasteUploader();
     setDragUploader();

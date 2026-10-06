@@ -295,15 +295,7 @@ function addLatestMessageButtons(botElement) {
 
 function addGeneratingLoader(botElement) {
     if (gradioApp().querySelector('#chatbot-area')?.classList.contains('agent-mode')) {
-        const text = botElement.querySelector('.md-message');
-        const waiting = window.chuanhuInputBusy?.() && !window.chuanhuTurnTerminal?.() && text && !text.textContent.trim();
-        if (waiting && !botElement.querySelector('.generating-loader')) {
-            const loader = document.createElement('div');
-            loader.className = 'generating-loader';
-            loader.setAttribute('aria-label', '等待回答');
-            botElement.appendChild(loader);
-        }
-        if (!waiting) botElement.querySelector('.generating-loader')?.remove();
+        window.chuanhuRefreshAgentLoader?.(botElement);
         return;
     }
     if (botElement.innerText.trim() === '' && gradioApp().querySelector('#chuanhu-chatbot > div.wrap')?.classList.contains('generating')) {

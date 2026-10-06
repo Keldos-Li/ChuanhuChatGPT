@@ -609,6 +609,12 @@ def save_file(filename, model):
         "stream": model.stream,
         "metadata": model.metadata,
     }
+    agent_wire = None
+    if getattr(model, 'is_hosted_agent', False):
+        from modules.agent import transcript
+        from modules.agent.tool_logging import known_secrets
+        json_s = model.history_document(json_s)
+        agent_wire = transcript.serialize(json_s, secrets=known_secrets(model))
     if not filename == os.path.basename(filename):
         history_file_path = filename
     else:
@@ -625,13 +631,16 @@ def save_file(filename, model):
         previous_stat = os.stat(history_file_path)
         with open(history_file_path, "r", encoding="utf-8") as previous_file:
             previous_json = json.load(previous_file)
+        if getattr(model, 'is_hosted_agent', False):
+            transcript.migrate(model._legacy_document(previous_json), scope_id=model._conversation_id, secrets=known_secrets(model))
         user_turns = lambda rows: sum(isinstance(row, dict) and row.get('role') == 'user' for row in rows)
         if user_turns(previous_json['history']) == user_turns(history):
             stable_times = (previous_stat.st_atime_ns, previous_stat.st_mtime_ns)
     fd, temporary = tempfile.mkstemp(prefix=".chat-", dir=os.path.dirname(history_file_path))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(json_s, f, ensure_ascii=False, indent=4)
+            if agent_wire is not None: f.write(agent_wire)
+            else: json.dump(json_s, f, ensure_ascii=False, indent=4)
             f.flush()
             os.fsync(f.fileno())
         if stable_times is not None: os.utime(temporary, ns=stable_times)

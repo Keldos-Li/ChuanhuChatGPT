@@ -427,6 +427,111 @@
         "your_prefix": "Your "
     },
     "ui": {
+        "agent_activity": {
+            "list_separator": ", ",
+            "list_two": "{first} and {last}",
+            "list_many": "{items}, and {last}",
+            "neutral_template": "{actions}",
+            "progressive_template": "{actions}",
+            "past_template": "{actions}",
+            "actions": {
+                "function_call": {
+                    "neutral": "call functions",
+                    "progressive": "calling functions",
+                    "past": "called functions"
+                },
+                "function_call_output": {
+                    "neutral": "return function results",
+                    "progressive": "returning function results",
+                    "past": "returned function results"
+                },
+                "mcp_call": {
+                    "neutral": "call tools",
+                    "progressive": "calling tools",
+                    "past": "called tools"
+                },
+                "command_execution": {
+                    "neutral": "run commands",
+                    "progressive": "running commands",
+                    "past": "ran commands"
+                },
+                "web_search": {
+                    "neutral": "search the web",
+                    "progressive": "searching the web",
+                    "past": "searched the web"
+                },
+                "web_open": {
+                    "neutral": "open web pages",
+                    "progressive": "opening web pages",
+                    "past": "opened web pages"
+                },
+                "web_find": {
+                    "neutral": "find text on web pages",
+                    "progressive": "finding text on web pages",
+                    "past": "found text on web pages"
+                },
+                "web_search_call": {
+                    "neutral": "web activity",
+                    "progressive": "web activity",
+                    "past": "web activity"
+                },
+                "computer_use_call": {
+                    "neutral": "use the computer",
+                    "progressive": "using the computer",
+                    "past": "used the computer"
+                },
+                "computer_use_approval_request": {
+                    "neutral": "website authorization request",
+                    "progressive": "website authorization request",
+                    "past": "website authorization request"
+                },
+                "computer_use_approval_request_result": {
+                    "neutral": "website authorization result",
+                    "progressive": "website authorization result",
+                    "past": "website authorization result"
+                },
+                "create_subagent_call": {
+                    "neutral": "create subtasks",
+                    "progressive": "creating subtasks",
+                    "past": "create subtasks"
+                },
+                "send_subagent_input_call": {
+                    "neutral": "send subtask input",
+                    "progressive": "sending subtask input",
+                    "past": "send subtask input"
+                },
+                "resume_subagent_call": {
+                    "neutral": "resume subtasks",
+                    "progressive": "resuming subtasks",
+                    "past": "resume subtasks"
+                },
+                "wait_for_subagents_call": {
+                    "neutral": "wait for subtasks",
+                    "progressive": "waiting for subtasks",
+                    "past": "wait for subtasks"
+                },
+                "interrupt_subagent_call": {
+                    "neutral": "stop subtasks",
+                    "progressive": "stopping subtasks",
+                    "past": "stop subtasks"
+                },
+                "close_subagent_call": {
+                    "neutral": "close subtasks",
+                    "progressive": "closing subtasks",
+                    "past": "close subtasks"
+                },
+                "agent_message": {
+                    "neutral": "messages between tasks",
+                    "progressive": "messages between tasks",
+                    "past": "messages between tasks"
+                },
+                "other": {
+                    "neutral": "tool activity",
+                    "progressive": "tool activity",
+                    "past": "tool activity"
+                }
+            }
+        },
         "chat": {
             "delete_latest": "🗑️ Delete latest dialog",
             "delete_oldest": "🗑️ Delete oldest dialog",

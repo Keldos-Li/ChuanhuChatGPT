@@ -483,3 +483,14 @@ test('card and body downloads keep full Unicode filename and isolated native URL
 
 console.log(`Artifact cards: ${passed} passed, ${failed} failed`);
 if (failed) process.exitCode = 1;
+
+test('turn file section following text restores answer spacing without hiding text', () => {
+    const f = fixture(), answer = f.row('answer'), files = f.row('files', 'conversation', '');
+    const marker = f.document.createElement('small'); marker.className = 'agent-turn-files-after-answer'; files.append(marker);
+    f.chat.append(answer, files); f.cards.append(f.card('file', 'files')); f.start();
+    assert(!answer.classList.contains('agent-file-only-message'));
+    assert(files.classList.contains('agent-file-only-message'));
+    assert(files.nextElementSibling.classList.contains('agent-turn-files-after-answer'));
+    files.replaceChildren(files.querySelector('.agent-message-anchor')); f.dom.flush();
+    assert(!files.nextElementSibling.classList.contains('agent-turn-files-after-answer'));
+});

@@ -1074,7 +1074,7 @@ class BaseLLMModel:
                 logging.warning("Unexpected type for new_history_file_content. Using default history.")
         return *self.load_chat_history(), init_history_list(self.user_name, prepend=os.path.basename(self.history_file_path).removesuffix('.json'))
 
-    def load_chat_history(self, new_history_file_path=None):
+    def load_chat_history(self, new_history_file_path=None, *, _document=None):
         if getattr(self, '_pending_send', None) or self._chat_running:
             raise gr.Error('当前输入正在提交或生成，请等待完成或先停止')
         self._submission_token = None
@@ -1091,8 +1091,11 @@ class BaseLLMModel:
                 history_file_path = self.history_file_path
             if not self.history_file_path.endswith(".json"):
                 history_file_path += ".json"
-            with open(history_file_path, "r", encoding="utf-8") as f:
-                saved_json = json.load(f)
+            if _document is None:
+                with open(history_file_path, "r", encoding="utf-8") as f:
+                    saved_json = json.load(f)
+            else:
+                saved_json = deepcopy(_document)
             try:
                 if type(saved_json["history"][0]) == str:
                     logging.info("历史记录格式为旧版，正在转换……")
@@ -1103,7 +1106,7 @@ class BaseLLMModel:
                         else:
                             new_history.append(construct_assistant(item))
                     saved_json["history"] = new_history
-                    logging.info(new_history)
+                    logging.debug('旧格式历史转换完成，共%d条消息', len(new_history))
             except Exception:
                 pass
             if len(saved_json["chatbot"]) < len(saved_json["history"]) // 2:
@@ -1111,7 +1114,7 @@ class BaseLLMModel:
                 saved_json["history"] = saved_json["history"][
                     -len(saved_json["chatbot"]) :
                 ]
-                logging.info(f"Trimmed history: {saved_json['history']}")
+                logging.debug('历史长度修剪完成，共%d条消息', len(saved_json['history']))
 
             # Sanitize chatbot
             saved_json["chatbot"] = saved_json["chatbot"]
@@ -1165,6 +1168,7 @@ class BaseLLMModel:
                 gr.DownloadButton(value=tmp_md_for_download, interactive=True),
             )
         except Exception:
+            if _document is not None: raise
             # 没有对话历史或者对话历史解析失败
             logging.debug(f"没有找到对话历史记录 {self.history_file_path}")
             self.reset()

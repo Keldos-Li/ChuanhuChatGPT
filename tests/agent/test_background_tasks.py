@@ -247,12 +247,14 @@ def test_final_snapshot_is_frozen_before_new_generation_can_start(env, monkeypat
 
 
 def test_completed_projection_rename_preserves_trusted_session(env, monkeypatch):
+    from test_runtime import message
     ready, release = Event(), Event()
     def worker(command):
         if command['action'] == 'run':
             yield dict(type='progress', session_id='trusted', turn_id='original', outcome='in_progress', submission_started=True)
             ready.set(); assert release.wait(5)
-            yield dict(type='result', session_id='trusted', turn_id='original', outcome='completed', text='final', sync_complete=True)
+            yield dict(type='result', session_id='trusted', turn_id='original', outcome='completed', text='final', sync_complete=True,
+                       items=[message('u','question','original',role='user'),message('a','final','original')])
         elif command['action'] == 'download': yield dict(type='result', artifacts=[])
         else: raise AssertionError('rename must not call API')
     monkeypatch.setattr(env.agents, 'worker_messages', worker)

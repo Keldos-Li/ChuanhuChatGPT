@@ -1,6 +1,8 @@
 // 原生 File 保留上传状态；卡片只投影名称、大小和稳定附件 ID。
 (function () {
     let scheduled = false;
+    const observedBubbles = new Set();
+    const alignmentObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(schedule) : null;
     const root = () => typeof gradioApp === 'function' ? gradioApp() : document;
     function mount() {
         scheduled = false;
@@ -65,7 +67,7 @@
         }
         const chat = app.querySelector('#chuanhu-chatbot');
         if (!chat) return;
-        const used = new Set();
+        const used = new Set(), bubbles = new Set();
         for (const source of chat.querySelectorAll('.agent-user-file-source')) {
             const row = source.closest('.message-row.user-row');
             if (!row) continue;
@@ -76,9 +78,20 @@
                 row.before(cards);
             }
             if (cards._markup !== source.innerHTML) { cards.innerHTML = source.innerHTML; cards._markup = source.innerHTML; }
+            const bubble = row.querySelector('.message.user');
+            if (bubble) {
+                // Align to the actual user bubble, excluding its avatar/gap.
+                const inset = Math.max(0, row.getBoundingClientRect().right - bubble.getBoundingClientRect().right).toFixed(2) + 'px';
+                if (cards.style.getPropertyValue('--agent-user-bubble-inset') !== inset) cards.style.setProperty('--agent-user-bubble-inset', inset);
+                for (const target of [bubble, row]) {
+                    bubbles.add(target);
+                    if (alignmentObserver && !observedBubbles.has(target)) { alignmentObserver.observe(target); observedBubbles.add(target); }
+                }
+            }
             used.add(cards);
         }
         for (const cards of chat.querySelectorAll('.agent-user-files')) if (!used.has(cards)) cards.remove();
+        for (const bubble of observedBubbles) if (!bubbles.has(bubble)) { alignmentObserver?.unobserve(bubble); observedBubbles.delete(bubble); }
     }
     function schedule() { if (!scheduled) { scheduled = true; queueMicrotask(mount); } }
     window.chuanhuRefreshInputCards = schedule;

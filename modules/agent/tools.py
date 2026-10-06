@@ -363,7 +363,7 @@ def submit_browser_response(client, session_id, turn_id, request_id, response):
     return {'accepted': True, 'message': '已提交，等待网站与任务确认；这不代表已经登录成功'}
 
 
-def handle_function_actions(client, state, session, settings, handled):
+def handle_function_actions(client, state, session, settings, handled, *, on_activity=None):
     import jsonschema
     settings = validate_settings(settings)
     for action in session.get('required_actions') or []:
@@ -402,6 +402,7 @@ def handle_function_actions(client, state, session, settings, handled):
             # A recorded accepted submission must not be replayed from an older
             # required_action snapshot. The next session read decides progress.
             if cached.get('submission') == 'accepted':
+                if on_activity:on_activity(action,'failed' if result.get('success') is False else 'completed')
                 handled.add(call_id)
                 continue
         else:
@@ -430,6 +431,7 @@ def handle_function_actions(client, state, session, settings, handled):
                 monitor.start()
                 with _lock: _running[(state.session_id, state.turn_id, call_id)] = (stop, entry.cancel)
                 try:
+                    if on_activity:on_activity(action,'running')
                     output = entry.execute(arguments, stop)
                     if stop.is_set(): result = {'success': False, 'error': '当前任务已请求停止'}
                     else: result = {'success': True, 'output': json.dumps(output, ensure_ascii=False)}
@@ -442,6 +444,7 @@ def handle_function_actions(client, state, session, settings, handled):
             # Persist before the first result transmission. A lost acknowledgement
             # can reuse this result, never invoke the function a second time.
             _write_control(saved_result, {'digest': digest, 'result': result, 'submission': 'pending'})
+        if on_activity:on_activity(action,'failed' if result.get('success') is False else 'completed')
         handled.add(call_id)
         try:
             client.beta.agents.sessions.events.create(state.session_id, events=[{'type': 'agent.session.input.tool_result', 'turn_id': state.turn_id, 'call_id': call_id, **result}])

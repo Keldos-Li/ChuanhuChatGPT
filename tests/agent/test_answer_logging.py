@@ -32,7 +32,7 @@ def test_final_answer_logging_waits_for_reconciliation_and_deduplicates(env, mon
         list(model.reconnect() if path == 'reconnect' else model.observe_history())
     records = [r for r in caplog.records if r.msg == '回答为：%s']
     assert len(records) == 1 and records[0].getMessage() == '回答为：' + final
-    # Repeated final snapshots are quiet; a later reconciled extension is retained.
+    # Browsing final snapshots stays quiet, including a later historical extension.
     snapshot = dict(type='result', session_id='sess_test', turn_id='t1', outcome='completed',
                     sync_complete=True, items=[message('u1', 'question', role='user'), message('a1', final)])
     model._accept(snapshot, model._state['generation'], restoring=True)
@@ -40,7 +40,8 @@ def test_final_answer_logging_waits_for_reconciliation_and_deduplicates(env, mon
     snapshot['items'][-1] = message('a1', final + '\nlate completion')
     model._accept(snapshot, model._state['generation'], restoring=True)
     records = [r for r in caplog.records if r.msg == '回答为：%s']
-    assert len(records) == 2 and records[-1].getMessage() == '回答为：' + final + '\nlate completion'
+    assert len(records) == 1
+    assert model.history[-1]['content'] == final + '\nlate completion'
 
 
 @pytest.mark.parametrize('outcome', ['failed', 'cancelled'])
@@ -66,3 +67,61 @@ def test_empty_terminal_turn_never_logs_previous_answer(env, monkeypatch, caplog
         model._session_settings = model._current_settings()
         list(model.reconnect() if path == 'reconnect' else model.observe_history())
     assert not [r for r in caplog.records if r.msg == '回答为：%s']
+
+
+def test_completed_history_restoration_is_quiet_across_new_views(env, caplog):
+    from copy import deepcopy
+    model = select(env)
+    snapshot = dict(type='result', session_id='sess_test', turn_id='t1', outcome='completed',
+                    sync_complete=True, items=[message('u1', 'question', role='user'), message('a1', 'answer')])
+    model._state.update(generation='g',session_id='sess_test',turn_id='t1',outcome='in_progress')
+    caplog.set_level(logging.INFO)
+    model._accept(snapshot,'g')
+    assert len([r for r in caplog.records if r.msg=='回答为：%s'])==1
+    for view in [model.new_view(),model.new_view(),model.new_view()]:
+        view._state=deepcopy(model._state)
+        view._accept(snapshot,'g',restoring=True)
+    assert len([r for r in caplog.records if r.msg=='回答为：%s'])==1
+
+
+@pytest.mark.parametrize('path', ['observe', 'reconnect'])
+def test_completed_view_restoration_does_not_replay_tools_or_files(env, monkeypatch, caplog, path):
+    from copy import deepcopy
+    from test_tool_logging import items, records
+    model=select(env)
+    snapshot=dict(type='result',session_id='sess_test',turn_id='t1',outcome='completed',sync_complete=True,
+                  items=items()+[message('u1','question',role='user'),message('a1','answer')])
+    artifact=dict(id='f',session_id='sess_test',turn_id='t1',name='old.txt',status='failed',error='offline cache')
+    model._state.update(generation='g',session_id='sess_test',turn_id='t1',outcome='completed')
+    model._accept(snapshot,'g',restoring=True)
+    def worker(command):
+        yield deepcopy(dict(type='result',artifacts=[artifact]) if command['action']=='download' else snapshot)
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    caplog.set_level(logging.INFO)
+    for view in [model.new_view(), model.new_view(), model.new_view()]:
+        view._state=deepcopy(model._state)
+        view._needs_sync=True
+        view._session_settings=view._current_settings()
+        list(view.observe_history() if path=='observe' else view.reconnect())
+        assert view.history[-1]['content']=='answer'
+        assert view._artifacts[0]['name']=='old.txt'
+    assert not records(caplog)
+    assert not [r for r in caplog.records if r.msg=='回答为：%s']
+
+
+def test_nullable_final_then_normal_turn_logs_once_each_and_restore_stays_quiet(env,caplog):
+    from copy import deepcopy
+    model=select(env);caplog.set_level(logging.INFO)
+    first=dict(type='result',session_id='sess_test',turn_id='t1',outcome='completed',sync_complete=True,
+               items=[message('u1','question',role='user'),message(None,'nullable complete')],
+               item_occurrences={1:'answer-receipt'},capture={'items':'complete'})
+    model._state.update(generation='g1',session_id='sess_test',turn_id='t1',outcome='in_progress')
+    model._accept(first,'g1')
+    model._state.update(generation='g2',turn_id=None,outcome='in_progress')
+    second=dict(first,turn_id='t2',items=first['items']+[message('u2','next','t2',role='user'),message('a2','normal complete','t2')])
+    model._accept(second,'g2')
+    records=[r.getMessage() for r in caplog.records if r.msg=='回答为：%s']
+    assert records==['回答为：nullable complete','回答为：normal complete']
+    view=model.new_view();view.history_file_path=model.history_file_path;view._restore_binding()
+    view._accept(deepcopy(second),'g2',restoring=True)
+    assert [r.getMessage() for r in caplog.records if r.msg=='回答为：%s']==records

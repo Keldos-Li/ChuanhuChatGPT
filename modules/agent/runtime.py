@@ -12,6 +12,7 @@ import tempfile
 import time
 from threading import Thread
 from uuid import uuid4
+from modules.agent.activity import ActivityClock
 
 try:
     from .connection import create_client, resolve_connection
@@ -67,17 +68,41 @@ class TurnState:
     history_authoritative: bool = False
     snapshot_partial_ids: set = field(default_factory=set)
     last_partial_refresh: float = 0
+    turns: list = field(default_factory=list)
+    transcript_artifacts: list = field(default_factory=list)
+    capture: dict = field(default_factory=dict)
+    occurrence_ids: dict = field(default_factory=dict)
+    activity: ActivityClock = field(default_factory=ActivityClock)
+    summary_parts: dict = field(default_factory=dict)
+    output_order: dict = field(default_factory=dict)
 
     @property
     def text(self):
-        return '\n\n'.join(message_text(item) for item in self.items.values() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('turn_id') == self.turn_id)
+        return '\n\n'.join(message_text(item) for item in self.ordered_items() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('turn_id') == self.turn_id)
+
+    def ordered_items(self):
+        # Preview text and canonical snapshots must use the same item order.
+        ordered=list(self.items.values())
+        for turn in {item.get('turn_id') for item in ordered}:
+            slots=[i for i,item in enumerate(ordered) if item.get('turn_id')==turn and item.get('id') in self.output_order]
+            indices=[self.output_order[ordered[i]['id']] for i in slots]
+            if len(set(indices))!=len(indices):continue
+            values=sorted((ordered[i] for i in slots),key=lambda item:self.output_order[item['id']])
+            for i,item in zip(slots,values):ordered[i]=item
+        return ordered
 
     def snapshot(self):
+        ordered=self.ordered_items()
+        keys_by_object={id(value):key for key,value in self.items.items()}
         return {'session_id': self.session_id, 'turn_id': self.turn_id, 'outcome': self.outcome,
                 'text': self.text, 'progress': self.progress, 'baseline_turn_ids': sorted(self.ignored_turn_ids),
-                'submission_started': self.submission_started, 'items': list(self.items.values()),
+                'submission_started': self.submission_started, 'items': ordered,
                 'required_actions': deepcopy(self.required_actions), 'settings': deepcopy(self.settings),
-                'sync_complete': self.sync_complete, 'history_authoritative': self.history_authoritative}
+                'sync_complete': self.sync_complete, 'history_authoritative': self.history_authoritative,
+                'turns': deepcopy(self.turns), 'transcript_artifacts': deepcopy(self.transcript_artifacts),
+                'capture': dict(self.capture, items='complete' if self.sync_complete is True else 'partial'),
+                'activity': self.activity.snapshot(),
+                'item_occurrences': {index: self.occurrence_ids[key] for index, item in enumerate(ordered) for key in [keys_by_object[id(item)]] if key in self.occurrence_ids}}
 
     def accept(self, event):
         event = as_dict(event)
@@ -92,6 +117,11 @@ class TurnState:
             self.seen.add(event_id)
         turn = event.get('turn') or {}
         if turn.get('subagent_id') is not None: return
+        if isinstance(turn.get('id'), str):
+            prior = {record['id']: record for record in self.turns}
+            prior[turn['id']] = deepcopy(turn)
+            self.turns = list(prior.values())
+            self.capture['turns'] = 'partial'
         turn_id = (event.get('turn_id') or turn.get('id') or (event.get('item') or {}).get('turn_id')
                    or self.items.get(event.get('item_id'), {}).get('turn_id'))
         if turn_id in self.ignored_turn_ids: return
@@ -110,7 +140,16 @@ class TurnState:
                 if item['id'] not in self.final_items:
                     item = deepcopy(item)
                     if turn_id and not item.get('turn_id'): item['turn_id'] = turn_id
+                    if item.get('role')!='user' and type(event.get('output_index')) is int and event['output_index'] >= 0:
+                        self.output_order.setdefault(item['id'],event['output_index'])
+                        item['output_index']=self.output_order[item['id']]
+                    if item['id'] in self.output_order:item['output_index']=self.output_order[item['id']]
+                    if kind.endswith('.done') and item.get('status') is None:item['status']='completed'
                     self.items[item['id']] = item
+                    self.activity.observe(item,first=kind.endswith('.added'))
+                    if item.get('type')=='function_call_output' and item.get('call_id'):
+                        calls=[call for call in self.items.values() if call.get('type')=='function_call' and call.get('turn_id')==turn_id and call.get('call_id')==item['call_id']]
+                        if len(calls)==1:self.activity.observe(calls[0],phase='failed' if item.get('error') else 'completed')
                     if kind.endswith('.done'): self.final_items.add(item['id'])
         if not turn_id or turn_id != self.turn_id: return
         if kind in ('agent.session.turn.output_text.delta', 'agent.session.turn.output_text.done'):
@@ -127,8 +166,32 @@ class TurnState:
             item_record = self.items.setdefault(item, {'id': item, 'type': 'message', 'role': 'assistant', 'turn_id': turn_id, 'status': 'in_progress', 'content': []})
             while len(item_record['content']) <= content_index: item_record['content'].append({'type': 'output_text', 'text': ''})
             item_record['content'][content_index] = {'type': 'output_text', 'text': self.parts[part]}
+        if kind in ('agent.session.turn.reasoning_summary_part.added','agent.session.turn.reasoning_summary_part.done'):
+            identifier,index,part=event.get('item_id'),event.get('summary_index'),event.get('part')
+            record=self.items.get(identifier)
+            if record and record.get('type')=='reasoning' and record.get('turn_id')==turn_id and identifier not in self.final_items and type(index) is int and 0<=index<100 and isinstance(part,dict) and part.get('type')=='summary_text' and isinstance(part.get('text'),str):
+                parts=record.setdefault('summary',[])
+                while len(parts)<=index:parts.append({'type':'summary_text','text':''})
+                parts[index]={'type':'summary_text','text':part['text']}
+                self.summary_parts[(identifier,index)]=part['text']
+        if kind in ('agent.session.turn.reasoning_summary_text.delta','agent.session.turn.reasoning_summary_text.done'):
+            identifier,index = event.get('item_id'),event.get('summary_index')
+            if isinstance(identifier,str) and type(index) is int and 0 <= index < 100 and identifier not in self.final_items:
+                record=self.items.get(identifier)
+                if record and record.get('type')=='reasoning' and record.get('turn_id')==turn_id:
+                    parts=record.setdefault('summary',[])
+                    while len(parts)<=index:parts.append({'type':'summary_text','text':''})
+                    key=(identifier,index)
+                    prefix=parts[index].get('text','')
+                    self.summary_parts[key] = self.summary_parts.get(key,prefix)+event.get('delta','') if kind.endswith('.delta') else event.get('text','')
+                    parts[index]={'type':'summary_text','text':self.summary_parts[key]}
+        if kind == 'agent.output.command_execution_output.delta':
+            record=self.items.get(event.get('item_id'))
+            if record and record.get('type')=='command_execution' and record.get('turn_id')==turn_id and record['id'] not in self.final_items:
+                record['output']=str(record.get('output') or '')+event.get('delta','')
         if kind in ('agent.session.turn.completed', 'agent.session.turn.failed', 'agent.session.turn.cancelled'):
             self.outcome = kind.rsplit('.', 1)[-1]
+            self.activity.finish_turn(self.turn_id,self.outcome)
             self.required_actions = []
 
 ERROR_CODES = frozenset({'invalid_request_error', 'invalid_value', 'invalid_type',
@@ -230,7 +293,7 @@ def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, subm
             if len(active) == 1: turn, turn_id = active[0], active[0]['id']
         items = all_records(client.beta.agents.sessions.items.list(session_id, limit=100, order='asc'))
         # Item IDs are authoritative; later server copies replace stale duplicates.
-        unique = OrderedDict((item['id'], item) for item in items if isinstance(item.get('id'), str))
+        unique = _snapshot_items(items)
         artifact_error = None
         try:
             artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100)) if include_artifacts else []
@@ -245,7 +308,10 @@ def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, subm
         return {'session_id': session_id, 'session_status': session.get('status'), 'turn_id': turn_id,
                 'outcome': outcome, 'text': '\n'.join(message_text(item) for item in unique.values() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('turn_id') == turn_id),
                 'items': list(unique.values()), 'artifacts': artifacts, 'artifact_error': artifact_error, 'required_actions': cards,
-                'settings': _public_settings(session), 'sync_complete': True}
+                'settings': _public_settings(session), 'sync_complete': True,
+                'turns': [turn] if turn else [],
+                'capture': {'items': 'complete', 'turns': 'partial' if turn else 'not_collected',
+                            'artifacts': 'complete' if include_artifacts and not artifact_error else 'partial' if artifact_error else 'not_collected'}}
     except Exception as error: raise _error(error) from None
 
 
@@ -268,10 +334,22 @@ class BufferedEvents:
             yield event
 
 
+def _snapshot_items(items):
+    # Nullable API IDs are display records too; never fabricate a remote ID.
+    return OrderedDict((item.get('id') if isinstance(item.get('id'), str) else ('no-id', position), deepcopy(item))
+                       for position, item in enumerate(items) if isinstance(item, dict))
+
+
 def _seed(state, saved):
     state.parts = {}
     state.turn_id, state.outcome = saved['turn_id'], saved['outcome']
-    state.items = OrderedDict((item['id'], deepcopy(item)) for item in saved['items'])
+    state.items = _snapshot_items(saved['items'])
+    occurrences = saved.get('item_occurrences', {})
+    state.occurrence_ids = {key: occurrences.get(index, occurrences.get(str(index)))
+                            for index, key in enumerate(state.items) if index in occurrences or str(index) in occurrences}
+    state.turns = deepcopy(saved.get('turns', []))
+    state.transcript_artifacts = deepcopy(saved.get('artifacts', []))
+    state.capture = deepcopy(saved.get('capture', {}))
     state.final_items = {key for key, item in state.items.items() if item.get('status') in TERMINAL}
     state.required_actions, state.settings = saved['required_actions'], saved['settings']
     state.sync_complete = True
@@ -283,7 +361,7 @@ def _process_events(client, events, state, settings, on_progress, *, read_only=F
     for event in events:
         event = as_dict(event)
         kind, item_id = event.get('type'), event.get('item_id')
-        if kind == 'agent.session.turn.output_text.delta' and item_id in state.snapshot_partial_ids:
+        if kind in ('agent.session.turn.output_text.delta','agent.session.turn.reasoning_summary_text.delta','agent.output.command_execution_output.delta') and item_id in state.snapshot_partial_ids:
             # Deltas carry no text offset. A delta already included in the GET
             # snapshot cannot safely be appended again (or suffix-deduplicated).
             # Refresh these pre-existing incomplete items from saved state;
@@ -305,7 +383,11 @@ def _process_events(client, events, state, settings, on_progress, *, read_only=F
             state.required_actions = pending_action_cards(session, state.turn_id)
             if state.required_actions: state.outcome = 'requires_action'
             if not read_only:
-                handle_function_actions(_no_retry(client), state, session, settings or {}, handled)
+                def activity(action,phase):
+                    calls=[item for item in state.items.values() if item.get('type')=='function_call' and item.get('turn_id')==state.turn_id and item.get('call_id')==action.get('call_id')]
+                    if len(calls)==1:state.activity.observe(calls[0],phase=phase)
+                    if on_progress:on_progress(state)
+                handle_function_actions(_no_retry(client), state, session, settings or {}, handled,on_activity=activity)
         elif event.get('type') in ('agent.session.in_progress', 'agent.session.turn.in_progress'):
             if state.outcome not in TERMINAL:
                 state.outcome = 'in_progress'
@@ -323,9 +405,9 @@ def _reconcile_terminal(client, state):
         if saved['turn_id'] != state.turn_id or saved['outcome'] != state.outcome:
             state.sync_complete = False
             return
-        merged = OrderedDict((item['id'], item) for item in saved['items'])
+        merged = _snapshot_items(saved['items'])
         for identifier, item in state.items.items():
-            if identifier in state.final_items: merged[identifier] = item
+            if isinstance(identifier, str) and identifier in state.final_items: merged[identifier] = item
         saved['items'] = list(merged.values())
         if saved['items']: _seed(state, saved)
         else: state.sync_complete = False
@@ -428,7 +510,10 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
             events = BufferedEvents(stream)
             saved = inspect_saved(client, session_id, turn_id, baseline_turn_ids, submission_started, include_artifacts=False)
             _seed(state, saved)
-            state.snapshot_partial_ids = {identifier for identifier,item in state.items.items() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('status') not in TERMINAL}
+            state.snapshot_partial_ids = {identifier for identifier,item in state.items.items()
+                if isinstance(identifier,str) and item.get('turn_id')==state.turn_id and item.get('status') not in TERMINAL
+                and (item.get('type') in ('reasoning','command_execution')
+                     or item.get('type')=='message' and item.get('role')=='assistant')}
             if on_progress: on_progress(state)
             if state.outcome in TERMINAL or state.outcome == 'not_started': return state
             # Only current required_actions are actionable, not historical items.

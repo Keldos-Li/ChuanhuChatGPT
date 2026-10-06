@@ -76,7 +76,9 @@ def test_agent_export_of_adopted_image_history_does_not_drop_user_turn_on_reload
     agent = select(env, ordinary)
     agent.export_markdown('exported', agent.chatbot)
     exported = json.loads((env.history_dir / 'exported.json').read_text())
-    assert exported['history'] == ordinary.history
+    assert exported['history'] == [item for item in ordinary.history if item['role'] != 'image']
+    assert [file['name'] for file in exported['agent_transcript']['files']] == ['photo0.png', 'photo1.png', 'photo2.png']
+    assert all(message['content'] not in json.dumps(exported) for message in image_messages)
     restored = select(env, browser='restored')
     restored.load_chat_history('exported')
     assert restored.history == [

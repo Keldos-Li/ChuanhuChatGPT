@@ -113,11 +113,15 @@ class CapabilityUI:
             update={'visible': supported and self._visible[component._id]}
             if not supported and clear is not None: update['value']=clear
             results.append(gr.update(**update))
-        payload=dict(asdict(caps), busy=is_busy(model) or bool(getattr(model, '_needs_sync', False)), turn_terminal=caps.agent_tools and getattr(model, '_state', {}).get('outcome') in ('completed', 'cancelled', 'failed') and not is_busy(model))
+        read_only = bool(getattr(model, '_read_only_observation', False)) and getattr(model, '_state', {}).get('outcome') in ('completed','cancelled','failed')
+        payload=dict(asdict(caps), busy=is_busy(model) or bool(getattr(model, '_needs_sync', False)), turn_terminal=caps.agent_tools and getattr(model, '_state', {}).get('outcome') in ('completed', 'cancelled', 'failed') and (read_only or not is_busy(model)))
         payload['history_filename'] = Path(getattr(model, 'history_file_path', '')).name.removesuffix('.json')
         payload['history_visit'] = model.agent_choice_target if caps.agent_tools else getattr(model, '_history_visit', '')
         payload['task_generation'] = getattr(model, '_state', {}).get('generation') if caps.agent_tools else None
         payload['input_target'] = getattr(model, '_conversation_id', '') if caps.sandbox_attachments else ''
+        if caps.agent_tools:
+            state = getattr(model, '_state', {})
+            payload['agent_turn_id'] = state.get('turn_id') or ('local-' + str(state.get('generation')))
         if caps.sandbox_attachments and getattr(model, '_draft_acknowledged', False) and getattr(model, '_draft_token', None):
             payload['submitted_draft'] = {'token': model._draft_token, 'conversation': model._draft_conversation, 'text': model._draft_text}
         if caps.agent_tools and getattr(model, '_tool_ui_patch', None): payload['tool_patch'] = model._tool_ui_patch
@@ -126,8 +130,8 @@ class CapabilityUI:
             '<span data-model-capabilities="'+html.escape(json.dumps(payload),quote=True)+'"></span>'])
         if self.submit is not None and self.cancel is not None:
             remote_running = getattr(model, '_state', {}).get('outcome') in ('starting','in_progress','requires_action','cancel_requested','incomplete','uncertain')
-            running = is_busy(model) or remote_running
-            results.extend([gr.update(visible=not running, interactive=not getattr(model, '_needs_sync', False)), gr.update(visible=running)])
+            running = (is_busy(model) and not read_only) or remote_running
+            results.extend([gr.update(visible=not running, interactive=not is_busy(model) and not getattr(model, '_needs_sync', False)), gr.update(visible=running)])
         return results
 
     def wire(self, current_model, chatbot):

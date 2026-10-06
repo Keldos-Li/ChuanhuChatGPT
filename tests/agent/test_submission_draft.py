@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import gradio as gr
 import pytest
 from gradio.state_holder import SessionState
@@ -16,10 +17,28 @@ def test_actual_finish_callback_keeps_unsent_draft_and_feedback(env,tmp_path,mon
     transferred=panel.wrap_transfer(env.wrappers['transfer_input'])(text,model,agent_files=paths,request=request())
     assert 'value' not in transferred[1]  # Browser draft is retained until acknowledgement.
     envelope=transferred[0]
-    iterator=env.wrappers['predict'](model,envelope,[],files=paths,request=request())
+    ready,release=threading.Event(),threading.Event()
     if outcome=='cancelled':
-        next(iterator);next(iterator);next(iterator);model.interrupt()
-    list(iterator)
+        original=env.agents.worker_messages
+        def paused_upload(command):
+            for message in original(command):
+                yield message
+                preparation=message.get('preparation') or {}
+                if command['action']=='prepare_inputs' and preparation.get('session_id') and preparation.get('outcome')=='preparing':
+                    ready.set();assert release.wait(5)
+        monkeypatch.setattr(env.agents,'worker_messages',paused_upload)
+    iterator=env.wrappers['predict'](model,envelope,[],files=paths,request=request())
+    try:
+        if outcome=='cancelled':
+            next(iterator);assert ready.wait(3)
+            assert model._input_context and not model._draft_submitted
+            model.interrupt();release.set()
+        list(iterator)
+        if outcome=='cancelled': assert [call['action'] for call in calls]==['prepare_inputs']
+    finally:
+        release.set()
+        if outcome=='cancelled' and getattr(model,'_background_task',None): model._background_task.thread.join(5)
+        iterator.close()
     panel=AgentPanel()
     with gr.Blocks(analytics_enabled=False) as app:
         current=gr.State();question=gr.State();draft=gr.Textbox();status=gr.Markdown();finish=gr.Button()

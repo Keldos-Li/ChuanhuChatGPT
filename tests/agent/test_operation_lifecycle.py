@@ -590,3 +590,86 @@ def test_artifact_refresh_does_not_clear_click_transport_before_retry(env):
     # 失败卡到达与发送终态边界都可能紧跟用户点击；不覆盖用户写入的传输值。
     assert ArtifactPanel.values(model)[-1]==gr.update()
     assert ArtifactPanel.values(SimpleNamespace())[-1]==gr.update(value='')
+
+
+def sync_warning_model(env):
+    model=select(env);model._state.update(generation='sync-generation',session_id='sess_test',turn_id='t1',outcome='completed')
+    return model
+
+
+def sync_warning_snapshot(complete):
+    from test_runtime import message
+    return dict(type='result',session_id='sess_test',turn_id='t1',outcome='completed',sync_complete=complete,
+                items=[message('u1','question',role='user'),message('a1','preserved answer')])
+
+
+def test_complete_sync_resolves_only_own_pending_warning_and_notice(env):
+    model=sync_warning_model(env)
+    model._accept(sync_warning_snapshot(False),'sync-generation',restoring=True,error_operation='observe')
+    assert model._needs_sync and '历史尚未完整同步' in model._notice
+    model.record_ui_error('file retry failed',operation='observe')
+    model.record_ui_error('different callback failed',operation='retry')
+    model._accept(sync_warning_snapshot(True),'sync-generation',restoring=True,error_operation='observe')
+    assert not model._needs_sync and model._notice==''
+    model.complete_error_operation('observe')
+    assert model.take_completed_ui_errors()=='file retry failed'
+    assert model.has_ui_error('retry')
+    assert model.history[-1]['content']=='preserved answer'
+    # If another partial result arrives, it must warn again rather than remain deduped.
+    model._accept(sync_warning_snapshot(False),'sync-generation',restoring=True,error_operation='observe')
+    model.complete_error_operation('observe')
+    assert '历史尚未完整同步' in model.take_completed_ui_errors()
+
+
+@pytest.mark.parametrize('invalid',['stale-generation','no-items','no-items-with-artifacts','partial','unsafe-items'])
+def test_unconfirmed_sync_does_not_clear_pending_warning(env,invalid):
+    model=sync_warning_model(env)
+    model._accept(sync_warning_snapshot(False),'sync-generation',restoring=True,error_operation='observe')
+    snapshot=sync_warning_snapshot(True)
+    generation='sync-generation'
+    if invalid=='stale-generation':generation='old-generation'
+    elif invalid in ('no-items','no-items-with-artifacts'):
+        snapshot.pop('items')
+        if invalid=='no-items-with-artifacts':snapshot['artifacts']=[]
+    elif invalid=='partial':snapshot['sync_complete']=False
+    else:
+        from test_runtime import message
+        snapshot['items'].append(message(None,'unknown final identity'))
+    if invalid=='unsafe-items':
+        with pytest.raises(gr.Error):model._accept(snapshot,generation,restoring=True,error_operation='observe')
+    else:model._accept(snapshot,generation,restoring=True,error_operation='observe')
+    assert model._needs_sync
+    assert '历史尚未完整同步' in model._notice or (invalid=='unsafe-items' and '缺少稳定消息身份' in model._notice)
+    model.complete_error_operation('observe')
+    assert '历史尚未完整同步' in model.take_completed_ui_errors()
+
+
+def test_successful_sync_keeps_unrelated_notice_and_other_operation_warning(env):
+    model=sync_warning_model(env)
+    model._accept(sync_warning_snapshot(False),'sync-generation',restoring=True,error_operation='old-observer')
+    model._notice='文件获取失败，可重试'
+    model._accept(sync_warning_snapshot(True),'sync-generation',restoring=True,error_operation='new-observer')
+    assert not model._needs_sync and model._notice=='文件获取失败，可重试'
+    model.complete_error_operation('old-observer')
+    assert '历史尚未完整同步' in model.take_completed_ui_errors()
+
+
+@pytest.mark.parametrize('capture',[{'items':'partial'},{'items':'not_collected'},{}])
+def test_incomplete_capture_overrides_claimed_complete_sync(env,capture):
+    model=sync_warning_model(env)
+    model._accept(sync_warning_snapshot(False),'sync-generation',restoring=True,error_operation='observe')
+    snapshot=sync_warning_snapshot(True);snapshot['capture']=capture
+    model._accept(snapshot,'sync-generation',restoring=True,error_operation='observe')
+    assert model._needs_sync and model._notice
+    assert model.has_ui_error('observe')
+    assert 'log_reconciled' not in model._state
+
+
+def test_other_operation_complete_items_do_not_resolve_owned_sync_notice(env):
+    model=sync_warning_model(env)
+    model._accept(sync_warning_snapshot(False),'sync-generation',restoring=True,error_operation='new-observer')
+    before=model._notice
+    model._accept(sync_warning_snapshot(True),'sync-generation',restoring=True,error_operation='old-observer')
+    assert model._notice==before and model.has_ui_error('new-observer')
+    model._accept(sync_warning_snapshot(True),'sync-generation',restoring=True,error_operation='new-observer')
+    assert model._notice=='' and not model.has_ui_error('new-observer')

@@ -373,6 +373,7 @@ def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypat
 
 
 def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypatch):
+    from test_runtime import message
     from modules.model_capabilities import CapabilityUI
     from threading import Event
     release = Event()
@@ -380,7 +381,8 @@ def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypat
     def worker(command):
         if command['action']=='run':
             yield dict(type='progress',session_id='s',turn_id='t',outcome='in_progress')
-            yield dict(type='result',session_id='s',turn_id='t',outcome='completed',text='answer',sync_complete=True)
+            yield dict(type='result',session_id='s',turn_id='t',outcome='completed',text='answer',sync_complete=True,
+                       items=[message('u','hello','t',role='user'),message('a','answer','t')])
         elif command['action']=='download':
             downloads.append('started')
             yield dict(type='progress',artifacts=[])

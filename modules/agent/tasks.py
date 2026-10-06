@@ -13,8 +13,8 @@ import gradio as gr
 # Only conversation data crosses into a new UI view. Credentials, upload stager,
 # locks, pending submission tokens and UI epochs never cross this boundary.
 PROJECTION = (
-    '_background_busy', 'history', 'chatbot', '_display', '_state', '_artifacts', '_cloud_items',
-    '_pending_actions', '_session_settings', '_needs_sync', '_notice',
+    '_background_busy', '_read_only_observation', 'history', 'chatbot', '_display', '_state', '_artifacts', '_cloud_items', '_transcript', '_transcript_preview', '_item_receipts', '_activity_records',
+    '_pending_actions', '_session_settings', '_needs_sync', '_notice', '_sync_notice_receipt',
     '_unavailable', '_connection_mismatch', '_active_input_cards',
     '_draft_submitted', '_draft_acknowledged', '_first_prompt', '_auto_named',
     '_answer_index', '_answer_row', '_input_messages', '_installed_inputs',
@@ -79,6 +79,7 @@ class BackgroundTask:
             with self.condition:
                 self.done = True
                 self.model._background_busy = False
+                self.model._read_only_observation = False
                 self.model._task_phase = "settled"
                 try:
                     try:
@@ -189,7 +190,7 @@ class TaskRegistry:
             return next((task for (r, o, _), task in self.tasks.items()
                          if r == root and o == owner and task.path == target), None)
 
-    def start(self, model, execute):
+    def start(self, model, execute, *, read_only=False):
         with self.lock:
             key = self.key(model)
             session = model._state.get('session_id')
@@ -198,10 +199,11 @@ class TaskRegistry:
                 raise gr.Error('此对话已有后台任务，请等待完成或停止该任务')
             if len(self.tasks) >= self.limit or sum(k[:2] == key[:2] for k in self.tasks) >= self.owner_limit:
                 raise gr.Error('后台任务数量已达上限，本次消息尚未提交，请等待一个任务结束')
+            previous = {name: (hasattr(model, name), getattr(model, name, None)) for name in ('_task_root', '_background_task', '_task_backend', '_background_busy', '_task_phase', '_read_only_observation')}
+            model._read_only_observation = read_only
             task = BackgroundTask(self, model, execute)
             self.tasks[key] = task
             if session: self.sessions[session_key] = task
-            previous = {name: (hasattr(model, name), getattr(model, name, None)) for name in ('_task_root', '_background_task', '_task_backend', '_background_busy', '_task_phase')}
             model._task_root = key[0]
             model._background_task = task
             model._task_backend = True

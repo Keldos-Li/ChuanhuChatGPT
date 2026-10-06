@@ -74,12 +74,14 @@ def load_history_model(current_model, filename, request: gr.Request = None):
         current_selection = getattr(current_model, '_selection_name', current_model.model_name)
         model = current_model.new_view() if agent_current else current_model
         header = (gr.update(),) * 5
+        chat_metadata = {}
         if selection != current_selection:
             # 不转交另一个服务商的密钥，也不从 JSON 恢复密钥或连接地址。
             created = get_model(selection, user_name=username, request=request)
             model = created[0]
             if model is None:
                 raise gr.Error('历史记录使用的模型无法初始化')
+            chat_metadata = created[2]
             header = (created[3], created[4], created[5], created[6], created[1])
         values = list(model.load_chat_history(chosen.name))
         if getattr(model, "is_hosted_agent", False):
@@ -89,7 +91,8 @@ def load_history_model(current_model, filename, request: gr.Request = None):
                 task.project(model)
                 model._background_task = task
                 values[2] = gr.update(value=model.chatbot)
-        values[2] = dict(values[2], label=selection)
+        values[2] = dict(chat_metadata, **values[2])
+        values[2]['label'] = selection
         if model is not current_model:
             if getattr(current_model, 'is_hosted_agent', False):
                 current_model._remember()

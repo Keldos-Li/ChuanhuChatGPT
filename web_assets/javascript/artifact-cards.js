@@ -76,6 +76,7 @@
             let fileOnly = false;
             try { const raw = JSON.parse(atob(anchors[0].dataset.agentMessageRaw)).raw; fileOnly = raw === null || raw === ''; } catch (_) {}
             row.classList.toggle('agent-file-only-message', fileOnly);
+            holder.classList.toggle('agent-turn-files-after-answer', fileOnly && !!row.querySelector('.agent-turn-files-after-answer'));
             used.add(holder);
         }
         for (const holder of chat.querySelectorAll('.agent-message-files')) if (!used.has(holder)) holder.remove();

@@ -366,6 +366,37 @@ def render_projection(projection, format_user: Callable[[str], str], format_assi
                 rendered.append(deepcopy(value))
                 continue
             prefix = formatter(value)
+            segments=getattr(projection,'cell_segments',{}).get((index,cell))
+            if segments is not None:
+                # Keep one complete original copy payload; view activity is never raw text.
+                raw=re.search(r'<div class="raw-message hideM">.*?</div>',prefix,re.S)
+                rendered_parts=[]
+                visible_segments=[segment for segment in segments if 'text' not in segment or segment['text'].strip()]
+                for position, segment in enumerate(visible_segments):
+                    if 'text' in segment:
+                        formatted=formatter(segment['text'])
+                        formatted=re.sub(r'<div class="raw-message hideM">.*?</div>','',formatted,flags=re.S)
+                        rendered_parts.append(formatted)
+                    else:
+                        # Body adjacency comes from visible text segments, not
+                        # hidden copy payloads, anchors or Markdown tag shape.
+                        markup=segment['markup']
+                        root='<div class="agent-history-activity">'
+                        first,last=markup.find(root),markup.rfind(root)
+                        if first>=0:
+                            if position+1<len(visible_segments) and 'text' in visible_segments[position+1]:
+                                markup=markup[:last]+root[:-1]+' data-body-after="true">'+markup[last+len(root):]
+                            if position and 'text' in visible_segments[position-1]:
+                                markup=markup[:first]+markup[first:].replace(root[:-1],root[:-1]+' data-body-before="true"',1)
+                        rendered_parts.append(markup)
+                prefix=(raw.group(0) if raw else '')+''.join(rendered_parts)
+                if role == 'assistant' and '<div class="md-message">' not in prefix:
+                    # Keep the original formatter's structural idempotence
+                    # contract in this trusted generation path. The body is
+                    # empty and hidden: it creates no text, layout or spacing.
+                    # Never infer trusted HTML from a client-supplied hash.
+                    prefix += '<div class="agent-format-receipt hideM" hidden><div class="md-message"></div></div>'
+            prefix += getattr(projection, 'cell_details', {}).get((index, cell), '')
             if role == 'user' and projection.user_files.get(index):
                 cards = []
                 for file in projection.user_files[index]:
