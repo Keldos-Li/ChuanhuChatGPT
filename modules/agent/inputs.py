@@ -14,6 +14,7 @@ import time
 
 from modules.agent.input_files import InputFile, InputFileError, read_snapshot_file
 from .runtime import AgentError, as_dict, all_records, safe_request_error
+from .reasoning import compatible_reasoning, ReasoningConfigurationError
 from .tools import build_tool_config, ToolConfigurationError
 
 INLINE_LIMIT = 5 * 1024 * 1024
@@ -81,6 +82,7 @@ def _turns(client, session_id):
 
 
 def _verify_session(client, state, *, initial=False, empty=False):
+    state['last_request_phase'] = 'preparation.session_retrieve'
     session = as_dict(client.beta.agents.sessions.retrieve(state['session_id']))
     environment = session.get('environment') or {}
     if session.get('id') != state['session_id']:
@@ -95,6 +97,7 @@ def _verify_session(client, state, *, initial=False, empty=False):
     state['environment_id'] = environment_id
     if session.get('status') != 'idle':
         _fail('当前会话仍在运行、等待授权或已失败；未提交聊天轮次', state)
+    state['last_request_phase'] = 'preparation.turns_list'
     turns = _turns(client, state['session_id'])
     if empty and turns:
         _fail('附件准备会话已出现聊天轮次；未提交或重发任何聊天轮次', state, uncertain=True)
@@ -108,6 +111,7 @@ def _verify_session(client, state, *, initial=False, empty=False):
 
 def _write(client, state, operation, action, on_progress, should_cancel, item=None):
     _cancel(state, should_cancel)
+    state['last_request_phase'] = 'preparation.' + operation
     if operation == 'session_create':
         state['session_creation_started'] = True
     marker = {'operation': operation}
@@ -142,7 +146,8 @@ def _write(client, state, operation, action, on_progress, should_cancel, item=No
                 item['write_state'] = 'none'
                 if operation == 'files_upload':
                     item['upload_state'] = 'none'
-        safe = safe_request_error(error)
+        safe = safe_request_error(error, phase=state.get('last_request_phase'))
+        state['diagnostics'] = safe.diagnostics
         message = str(safe) + '；未提交聊天轮次'
         if rejected and operation == 'environment_copy' and getattr(error, 'status_code', None) in (400, 409):
             # A competing write can appear after the preflight listing. A 400
@@ -159,6 +164,7 @@ def _write(client, state, operation, action, on_progress, should_cancel, item=No
 
 
 def _remote_files(client, state, item):
+    state['last_request_phase'] = 'preparation.files_list'
     records = all_records(client.beta.agents.environments.files.list(
         state['environment_id'], path=str(PurePosixPath(item['remote_path']).parent), limit=100))
     return [entry for entry in records if entry.get('path') == item['remote_path']]
@@ -204,6 +210,7 @@ def _confirm_missing_source(client, state, item, on_progress, should_cancel):
     item.pop('error', None)
     _emit(state, on_progress)
     try:
+        state['last_request_phase'] = 'preparation.file_retrieve'
         client.files.retrieve(item['file_id'])
     except Exception as error:
         if getattr(error, 'status_code', None) != 404:
@@ -212,6 +219,7 @@ def _confirm_missing_source(client, state, item, on_progress, should_cancel):
         return False
     _cancel(state, should_cancel)
     _verify_session(client, state)
+    state['last_request_phase'] = 'preparation.environment_retrieve'
     environment = as_dict(client.beta.agents.environments.retrieve(state['environment_id']))
     if environment.get('id') != state['environment_id'] or environment.get('status') != 'connected':
         _fail('上传源文件已不可用，但执行环境尚未确认可用；未重新上传，请重新连接后恢复', state, item)
@@ -243,6 +251,8 @@ def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_
              'session_creation_started': False, 'baseline_verified': False}
     current = None
     try:
+        reasoning, notice = compatible_reasoning(model, reasoning)
+        if notice: state['reasoning_notice'] = notice
         if not callable(getattr(client, 'with_options', None)):
             _fail('SDK 客户端不支持关闭写入重试；未提交聊天轮次', state)
         if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]+', model):
@@ -299,6 +309,7 @@ def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_
         _emit(state, on_progress)
 
         if not state['session_id']:
+            state['last_request_phase'] = 'preparation.session_list'
             matches = [session for session in all_records(client.beta.agents.sessions.list(limit=100, order='desc'))
                        if (session.get('metadata') or {}).get('chuanhu_run_id') == run_id]
             if len(matches) > 1 or (not matches and state['session_creation_started']):
@@ -331,6 +342,7 @@ def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_
         _emit(state, on_progress)
         while True:
             _cancel(state, should_cancel)
+            state['last_request_phase'] = 'preparation.environment_retrieve'
             environment = as_dict(client.beta.agents.environments.retrieve(state['environment_id']))
             if environment.get('id') != state['environment_id']:
                 _fail('返回的执行环境标识不一致', state, uncertain=True)
@@ -431,8 +443,9 @@ def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_
         raise
     except Exception as error:
         uncertain = bool(state.get('uncertain_operation'))
-        safe = safe_request_error(error)
-        message = (str(error) if isinstance(error, ToolConfigurationError) else
+        safe = safe_request_error(error, phase=state.get('last_request_phase'))
+        state['diagnostics'] = safe.diagnostics
+        message = (str(error) if isinstance(error, (ToolConfigurationError, ReasoningConfigurationError)) else
                    '附件本地快照不可用或已变化；未提交聊天轮次' if isinstance(error, InputFileError)
                    else str(safe) + '；未提交聊天轮次')
         state['outcome'] = 'uncertain' if uncertain else 'failed'

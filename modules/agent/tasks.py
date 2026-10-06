@@ -35,11 +35,14 @@ class BackgroundTask:
         self.snapshot = None
         self.generation = None
         self.done = False
+        self.deleted = False
         self.error = None
         self.thread = Thread(target=self._run, name='agent-background', daemon=True)
 
     def publish(self):
+        if self.deleted: return
         with self.model._lock:
+            if self.deleted: return
             generation = self.model._state.get('generation')
             if self.generation is None: self.generation = generation
             if getattr(self.model, '_background_task', None) is not self:
@@ -50,6 +53,7 @@ class BackgroundTask:
             session = self.model._state.get('session_id')
         if not self.done: self.registry.bind_session(self, session)
         with self.condition:
+            if self.deleted: return
             self.snapshot = (values, status)
             self.revision += 1
             self.condition.notify_all()
@@ -57,6 +61,7 @@ class BackgroundTask:
     def _run(self):
         try:
             for _ in self.execute():
+                if self.deleted: break
                 self.publish()
         except Exception as error:
             self.error = error
@@ -92,15 +97,18 @@ class BackgroundTask:
                         logging.exception('后台任务最终保存失败，已有记录保留并向观察者报告')
                     self.publish()
                 finally:
+                    if self.deleted: self.model.release_deleted_task_reservations(self)
                     self.registry.finish(self)
                     self.condition.notify_all()
 
     def project(self, view):
+        if self.deleted: return
         with self.condition:
             snapshot = self.snapshot
         if snapshot is None: return
         values, _ = snapshot
         with view._lock:
+            if self.deleted: return
             if view._owner != self.owner: raise gr.Error("此任务不属于当前登录用户")
             existing = getattr(view, '_background_task', None)
             if existing is not None and existing is not self: return
@@ -113,16 +121,17 @@ class BackgroundTask:
         revision = -1
         visit = view.agent_choice_target
         while True:
-            if view._retired or view.agent_choice_target != visit: return
+            if self.deleted or view._retired or view.agent_choice_target != visit: return
             with self.condition:
-                ready = self.condition.wait_for(lambda: self.revision != revision or self.done, timeout=.25)
+                ready = self.condition.wait_for(lambda: self.deleted or self.revision != revision or self.done, timeout=.25)
                 if not ready: continue
+                if self.deleted: return
                 revision = self.revision
                 snapshot, done, error = self.snapshot, self.done, self.error
             if snapshot is not None:
                 values, status = snapshot
                 with view._lock:
-                    if (view._conversation_id != self.conversation or view._owner != self.owner
+                    if (self.deleted or view._conversation_id != self.conversation or view._owner != self.owner
                             or getattr(view, '_background_task', self) is not self):
                         return
                     if view is not self.model:
@@ -134,6 +143,7 @@ class BackgroundTask:
                 return
 
     def stop(self):
+        if self.deleted: return '本地历史已删除，云端任务停止未确认'
         # This exact model cannot be reset/load by UI callbacks. interrupt captures
         # generation/session/turn under its lock; it never reads a current page.
         return self.model.interrupt(expected_task=self, expected_generation=self.generation)
@@ -145,6 +155,7 @@ class TaskRegistry:
         self.lock = RLock()
         self.tasks = {}
         self.sessions = {}
+        self.retiring = set()
 
     @staticmethod
     def root(model):
@@ -191,13 +202,14 @@ class TaskRegistry:
                          if r == root and o == owner and task.path == target), None)
 
     def start(self, model, execute, *, read_only=False):
+        if getattr(model, '_local_history_deleted', lambda: False)(): raise gr.Error('此本地历史已删除，请新建聊天')
         with self.lock:
             key = self.key(model)
             session = model._state.get('session_id')
             session_key = (*key[:2], session)
             if key in self.tasks or (session and session_key in self.sessions):
                 raise gr.Error('此对话已有后台任务，请等待完成或停止该任务')
-            if len(self.tasks) >= self.limit or sum(k[:2] == key[:2] for k in self.tasks) >= self.owner_limit:
+            if len(self.tasks) + len(self.retiring) >= self.limit or (sum(k[:2] == key[:2] for k in self.tasks) + sum(task.key[:2] == key[:2] for task in self.retiring)) >= self.owner_limit:
                 raise gr.Error('后台任务数量已达上限，本次消息尚未提交，请等待一个任务结束')
             previous = {name: (hasattr(model, name), getattr(model, name, None)) for name in ('_task_root', '_background_task', '_task_backend', '_background_busy', '_task_phase', '_read_only_observation')}
             model._read_only_observation = read_only
@@ -223,6 +235,7 @@ class TaskRegistry:
     def bind_session(self, task, session):
         if not session: return
         with self.lock:
+            if task.deleted: return
             key = (*task.key[:2], session)
             existing = self.sessions.get(key)
             if existing is not None and existing is not task:
@@ -233,10 +246,35 @@ class TaskRegistry:
         # Uncertain outcomes are durable and blocked by _assert_idle after the
         # thread ends; no unbounded dormant entries are needed for that lock.
         with self.lock:
+            self.retiring.discard(task)
             key = task.key
             if self.tasks.get(key) is task: self.tasks.pop(key)
             for alias in [key for key, value in self.sessions.items() if value is task]:
                 self.sessions.pop(alias)
+
+    def detach_history(self, model, path):
+        # Called inside the file-write barrier: never acquire a model/condition
+        # lock here. Retiring transports remain counted until actually drained.
+        target = self.path_for_history(model.user_name, path)
+        root, owner = self.root(model), getattr(model, '_owner', None)
+        from modules.agent.store import owner_identity
+        owner = owner or owner_identity(model.user_name)
+        with self.lock:
+            tasks = [task for (r, o, _), task in self.tasks.items()
+                     if r == root and o == owner and task.path == target]
+            for task in tasks:
+                task.deleted = True
+                self.retiring.add(task)
+                if self.tasks.get(task.key) is task: self.tasks.pop(task.key)
+                for alias in [key for key, value in self.sessions.items() if value is task]: self.sessions.pop(alias)
+            return tasks
+
+    @staticmethod
+    def path_for_history(username, path):
+        from modules.models.base_model import HISTORY_DIR
+        name = Path(path)
+        if not name.is_absolute(): name = Path(HISTORY_DIR) / username / name
+        return str(name.resolve()).removesuffix('.json')
 
 
 TASKS = TaskRegistry()

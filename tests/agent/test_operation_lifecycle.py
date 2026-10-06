@@ -32,18 +32,18 @@ def test_single_line_basename_and_extension_size_metadata_preserve_download_iden
     assert ArtifactPanel.values(model)[2]['value']==['/tmp/synthetic']
 
 
-def test_legacy_none_restored_and_send_snapshot_never_sends_string_none(env,monkeypatch):
+def test_supported_none_restored_and_send_snapshot_preserves_explicit_effort(env,monkeypatch):
     calls,_=complete(env,monkeypatch);model=select(env)
     model.set_agent_model('gpt-6-sol','none',1)
-    assert model.agent_model_choice==('gpt-6-sol',None) and 'none' not in REASONING_CHOICES
+    assert model.agent_model_choice==('gpt-6-sol','none')
     envelope=env.wrappers['transfer_input']('first',model,'gpt-6-sol','none',2,request=request())[0]
     list(env.wrappers['predict'](model,envelope,[],request=request()))
-    assert next(c for c in calls if c['action']=='run')['reasoning'] is None
+    assert next(c for c in calls if c['action']=='run')['reasoning'] == 'none'
     model._session_settings['reasoning']='none'
     model._pending_model_settings=('gpt-6-sol','none');model._remember()
     model._restore_binding()
-    assert model._reasoning is None and model._session_settings['reasoning'] is None
-    assert model.agent_model_choice==('gpt-6-sol',None)
+    assert model._reasoning == 'none' and model._session_settings['reasoning'] == 'none'
+    assert model.agent_model_choice==('gpt-6-sol','none')
 
 
 def test_history_observer_only_reads_and_old_stream_cannot_overwrite_new_history(env,monkeypatch):

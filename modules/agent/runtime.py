@@ -13,6 +13,7 @@ import time
 from threading import Thread
 from uuid import uuid4
 from modules.agent.activity import ActivityClock
+from modules.agent.reasoning import compatible_reasoning, ReasoningConfigurationError
 
 try:
     from .connection import create_client, resolve_connection
@@ -197,13 +198,23 @@ class TurnState:
 ERROR_CODES = frozenset({'invalid_request_error', 'invalid_value', 'invalid_type',
     'missing_required_parameter', 'unknown_parameter', 'unsupported_parameter',
     'unsupported_value', 'invalid_api_key', 'model_not_found', 'insufficient_quota',
-    'rate_limit_exceeded', 'permission_denied', 'server_error', 'context_length_exceeded'})
+    'rate_limit_exceeded', 'permission_denied', 'server_error', 'context_length_exceeded',
+    'invalid_beta', 'agent_not_persisted', 'invalid_otlp_endpoint', 'invalid_otlp_header'})
+ERROR_PHASES = frozenset({'preparation.session_list', 'preparation.session_create',
+    'preparation.session_retrieve', 'preparation.turns_list', 'preparation.environment_retrieve',
+    'preparation.files_upload', 'preparation.environment_copy', 'preparation.files_list',
+    'preparation.file_retrieve', 'run.session_retrieve', 'run.turns_list', 'run.stream',
+    'run.session_create', 'run.input', 'run.events', 'run.reconcile',
+    'update.session_retrieve', 'update.session_update', 'update.confirm'})
 ERROR_PARAMS = frozenset({'agent', 'agent_id', 'agent.model', 'agent.instructions',
     'agent.reasoning', 'agent.reasoning.effort', 'agent.reasoning.summary',
     'agent.multi_agent', 'agent.multi_agent.enabled', 'agent.multi_agent.max_concurrent_subagents',
     'agent.tools', 'agent.text', 'agent.service_tier', 'environment', 'environment.type',
     'environment.network', 'environment.network.access', 'environment.network.mode', 'environment.network.allowed_domains',
     'environment.environment_template_id', 'input', 'stream', 'metadata', 'metadata.chuanhu_run_id', 'vault_ids'})
+ERROR_TOOL_FIELDS = frozenset({'type', 'name', 'enabled', 'network_mode', 'allowed_domains',
+    'include_screenshots', 'description', 'parameters', 'server_label', 'server_url',
+    'allowed_tools', 'require_approval', 'connection_origin'})
 
 
 def _safe_diagnostics(values):
@@ -217,27 +228,40 @@ def _safe_diagnostics(values):
         value = values.get(key)
         if type(value) is str and len(value) <= 80 and value in allowed:
             result[key] = value
+    param = values.get('param')
+    if type(param) is str:
+        indexed = re.fullmatch(r'agent\.tools\[[0-9]{1,3}\](?:\.([a-z_]+))?', param)
+        if indexed and (indexed.group(1) is None or indexed.group(1) in ERROR_TOOL_FIELDS):
+            result['param'] = param
+    error_type = values.get('type')
+    if type(error_type) is str and error_type in ERROR_CODES:
+        result['type'] = error_type
+    phase = values.get('phase')
+    if type(phase) is str and phase in ERROR_PHASES:
+        result['phase'] = phase
     request_id = values.get('request_id')
     if type(request_id) is str and len(request_id) == 36 and re.fullmatch(r'req_[a-f0-9]{32}', request_id):
         result['request_id'] = request_id
     return result
 
 
-def safe_request_error(error, state=None):
+def safe_request_error(error, state=None, *, phase=None):
     def attribute(name):
         try:
             return getattr(error, name, None)
         except Exception:
             return None
-    diagnostics = _safe_diagnostics({key: attribute(key)
-                                    for key in ('status_code', 'code', 'param', 'request_id')})
+    diagnostics = _safe_diagnostics(dict({key: attribute(key)
+                                    for key in ('status_code', 'code', 'param', 'type', 'request_id')}, phase=phase))
     status = diagnostics.get('status_code')
     if status == 401:
         message = '当前连接拒绝 API key（401），请检查密钥和所属项目'
     elif status == 403:
         message = '当前连接拒绝访问（403），请检查 Agent、模型及项目权限'
+    elif status == 400:
+        message = f'Agent 请求被服务端拒绝（HTTP {status}）；请检查模型和请求参数，任务未自动重发'
     elif status is not None:
-        message = f'当前 API 地址的 Agent 请求失败（HTTP {status}）；请确认该地址支持 Agents API 和请求参数，任务未自动重发'
+        message = f'Agent 请求失败（HTTP {status}），任务未自动重发；请根据错误字段检查请求或服务状态'
     else:
         message = '当前 API 地址连接中断或超时，任务状态尚待确认；请重新连接查看结果'
     details = '; '.join(f'{key}={value}' for key, value in diagnostics.items() if key != 'status_code')
@@ -246,12 +270,14 @@ def safe_request_error(error, state=None):
     return AgentError(message, state, diagnostics=diagnostics)
 
 
-def _error(error, state=None):
+def _error(error, state=None, *, phase=None):
     if isinstance(error, AgentError):
         if error.state is None and state is not None: error.state = state
+        if phase and not error.diagnostics.get('phase'):
+            error.diagnostics = _safe_diagnostics(dict(error.diagnostics, phase=phase))
         return error
-    if isinstance(error, ToolConfigurationError): return AgentError(str(error), state)
-    return safe_request_error(error, state)
+    if isinstance(error, (ToolConfigurationError, ReasoningConfigurationError)): return AgentError(str(error), state)
+    return safe_request_error(error, state, phase=phase)
 
 
 def _no_retry(client):
@@ -463,42 +489,57 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
     state = TurnState(session_id=session_id)
     settings = tool_settings or {}
     if allow_text_tool and not tool_settings: settings = {'functions': ['text_statistics']}
+    phase = None
     try:
+        reasoning, _ = compatible_reasoning(model, reasoning)
         text = format_input_text(prompt, history_reference, input_files)
         # Revalidate external permissions before every new turn. A revoked
         # permission is never revived solely by an old session snapshot.
         config = build_tool_config(settings, owner=owner)
         if session_id:
+            phase = 'run.session_retrieve'
             session = as_dict(client.beta.agents.sessions.retrieve(session_id))
             if session.get('status') != 'idle': raise AgentError('当前会话仍在运行或等待授权，请先重新连接或停止', state)
+            agent = session.get('agent') or {}
+            actual_model = agent.get('model', model)
+            actual_effort = (agent.get('reasoning') or {}).get('effort')
+            _, migration = compatible_reasoning(actual_model, actual_effort)
+            if migration:
+                update_settings(client, session_id, actual_model, actual_effort)
+            phase = 'run.turns_list'
             prior = all_records(client.beta.agents.sessions.turns.list(session_id, limit=100))
             state.ignored_turn_ids = {turn['id'] for turn in prior}
             if on_progress: on_progress(state)
+            phase = 'run.stream'
             stream = client.beta.agents.sessions.events.stream(session_id)
         else:
             agent = {'model': model, 'instructions': instructions or '', 'tools': config['tools']}
             if reasoning is not None: agent['reasoning'] = {'effort': reasoning}
             state.submission_started = True
             if on_progress: on_progress(state)
+            phase = 'run.session_create'
             stream = _no_retry(client).beta.agents.sessions.create(agent=agent, environment=config['environment'], input=text, stream=True,
                        metadata={'chuanhu_run_id': run_id} if run_id else {})
         with stream as events:
             if session_id:
                 state.submission_started = True
                 if on_progress: on_progress(state)
+                phase = 'run.input'
                 _no_retry(client).beta.agents.sessions.events.create(session_id,
                     events=[{'type': 'agent.session.input.message', 'input': [{'role': 'user', 'content': [{'type': 'input_text', 'text': text}]}]}],
                     **({'idempotency_key': run_id} if run_id else {}))
+            phase = 'run.events'
             _process_events(client, events, state, settings, on_progress)
         # Retrieve full item identities after terminal output. A snapshot failure
         # preserves the completed result but marks history as not yet reconciled.
+        phase = 'run.reconcile'
         _reconcile_terminal(client, state)
         return state
     except Exception as error:
         if not state.submission_started: state.outcome = 'not_started'
         elif not state.session_id:
             state.outcome = 'not_started' if getattr(error, 'status_code', None) in (400, 401, 403, 404, 422, 429) else 'uncertain'
-        raise _error(error, state) from None
+        raise _error(error, state, phase=phase) from None
 
 
 def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, submission_started=False, tool_settings=None, on_progress=None, read_only=False):
@@ -529,19 +570,24 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
 
 
 def update_settings(client, session_id, model, reasoning):
+    phase = None
     try:
+        reasoning, _ = compatible_reasoning(model, reasoning)
+        phase = 'update.session_retrieve'
         session = as_dict(client.beta.agents.sessions.retrieve(session_id))
         if session.get('status') != 'idle': raise AgentError('当前轮仍在执行，不能改变发送参数')
+        phase = 'update.session_update'
         updated = as_dict(_no_retry(client).beta.agents.sessions.update(session_id, agent={'model': model, 'reasoning': {'effort': reasoning}}))
         agent = updated.get('agent') or {}
         if agent.get('model') != model or (agent.get('reasoning') or {}).get('effort') != reasoning:
             # Some compatible endpoints acknowledge without returning settings.
+            phase = 'update.confirm'
             updated = as_dict(client.beta.agents.sessions.retrieve(session_id))
             agent = updated.get('agent') or {}
         if agent.get('model') != model or (reasoning is not None and (agent.get('reasoning') or {}).get('effort') != reasoning):
             raise AgentError('参数更新结果尚未确认，保留原生效值；请重新连接后再发送')
         return {'model': agent['model'], 'reasoning': (agent.get('reasoning') or {}).get('effort')}
-    except Exception as error: raise _error(error) from None
+    except Exception as error: raise _error(error, phase=phase) from None
 
 
 def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), on_progress=None, cache_root=None, should_cancel=None, live=False, on_metadata=None):

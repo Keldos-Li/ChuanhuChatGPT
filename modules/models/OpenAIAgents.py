@@ -18,6 +18,7 @@ from modules.agent.settings import load_settings
 from modules.agent.operations import OperationScope, TaskScope
 from modules.agent.input_state import AgentInputState, InputPreparationStopped
 from modules.agent.tools import validate_settings, tool_availability
+from modules.agent.reasoning import normalize_reasoning, compatible_reasoning
 from modules.presets import i18n
 from .base_model import BaseLLMModel, HISTORY_DIR
 
@@ -34,10 +35,6 @@ _bindings = {}  # Backward-compatible test hook; authority lives in BindingStore
 _bindings_lock = RLock()
 _session_locks = {}
 _cancel_sessions = {}
-
-
-def normalize_reasoning(value):
-    return None if value in (None, 'default', 'none') else value
 
 
 class ModelUpdateError(Exception):
@@ -86,6 +83,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._owner = owner
         self._lock = RLock()
         self._running = self._retired = False
+        self._history_deleted = False
         self._cancel_requested = self._cancel_sent = False
         self._conversation_id = uuid4().hex
         self._state = {'outcome': 'not_started'}
@@ -99,6 +97,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._importing = self._needs_sync = False
         self._allow_text_tool = False
         self._reasoning = None
+        self._reasoning_notice = ''
+        self._last_request_error = {}
         self._pending_actions = []
         self._notice = ''
         self._sync_notice_receipt = None
@@ -250,9 +250,11 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         model._connection_key = self._connection_key
         model._default_instructions = self._default_instructions
         model.system_prompt = self.system_prompt
-        model.model_name = self.model_name
-        model._reasoning = self._reasoning
+        # New chat carries the latest saved user choice, including default=None,
+        # rather than the previous cloud session's effective configuration.
+        model.model_name, model._reasoning = self.agent_model_choice
         model._tool_settings = deepcopy(self._tool_settings)
+        model._repair_reasoning_choice()
         return model
 
     def _worker(self, command):
@@ -272,7 +274,16 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             wire['skip_artifact_ids'] = [record['id'] for record in self._artifacts
                                          if record.get('status') == 'ready' and Path(record.get('path', '')).is_file()]
         try:
-            yield from worker_messages(wire)
+            from modules.agent.runtime import _safe_diagnostics
+            for message in worker_messages(wire):
+                if message.get('type') == 'error':
+                    diagnostics = _safe_diagnostics(message.get('diagnostics') or {})
+                    if diagnostics:
+                        with self._lock:
+                            if diagnostics != self._last_request_error:
+                                logging.warning('Agent 请求诊断：%s', json.dumps(diagnostics, ensure_ascii=False, sort_keys=True))
+                            self._last_request_error = diagnostics
+                yield message
         finally:
             wire.pop('response', None)
             wire.pop('connection', None)
@@ -280,7 +291,12 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def _key(self): return self._owner, str(self.history_file_path).removesuffix('.json')
     def _store(self): return BindingStore(getattr(self, "_task_root", shared.chuanhu_path))
 
+    def _local_history_deleted(self):
+        return bool(self._history_deleted or (self._owner and
+                    self._store().is_history_deleted(self._owner, self.history_file_path, self._conversation_id)))
+
     def _persistence_owner(self):
+        if self._local_history_deleted(): return False
         from modules.agent.tasks import TASKS
         active = TASKS.find(self)
         attached = getattr(self, '_background_task', None)
@@ -302,6 +318,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                   'local_phase': (getattr(self, '_task_phase', 'receiving') if getattr(self, '_background_busy', False)
                                   else 'uncertain' if self._state.get('outcome') not in TERMINAL else 'settled')}
         record.update(self._input_binding())
+        record['last_request_error'] = deepcopy(self._last_request_error)
         self._store().put(self._owner, self.history_file_path, record)
 
     def _private_transcript(self):
@@ -339,6 +356,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         binding = None if self._importing or not self._owner else self._store().get(self._owner, self.history_file_path)
         self._pending_actions = []
         if binding:
+            from modules.agent.runtime import _safe_diagnostics
+            self._last_request_error = _safe_diagnostics(binding.get('last_request_error') or {})
             self._restore_input_binding(binding)
             self._pending_model_settings = binding.get('next_model_settings')
             if self._pending_model_settings:
@@ -373,6 +392,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self._session_settings['reasoning'] = self._reasoning
                 self.system_prompt = self._session_settings.get('instructions', self.system_prompt)
                 self._tool_settings = deepcopy(self._session_settings.get('tools', self._tool_settings))
+            self._repair_reasoning_choice()
             self._notice = self._notice or '已找到原会话，发送前将按云端记录恢复历史'
         else:
             self._fresh()
@@ -398,8 +418,11 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._active_input_cards = []
         self._answer_index = self._answer_row = self._session_settings = None
         self._needs_sync = self._connection_mismatch = self._unavailable = False
+        self._last_request_error = {}
+        self._repair_reasoning_choice()
 
     def _assert_idle(self):
+        if self._local_history_deleted(): raise gr.Error('此本地历史已删除，请新建聊天')
         from threading import current_thread
         from modules.agent.tasks import TASKS
         active = TASKS.find(self)
@@ -432,9 +455,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def set_streaming(self, streaming):
         require_capability(self, 'output_mode')
     def _status(self, detail=''):
-        return ' · '.join(part for part in (STATUS.get(self._state.get('outcome'), '暂时无法确认状态'), detail or self._notice) if part)
+        return ' · '.join(part for part in (STATUS.get(self._state.get('outcome'), '暂时无法确认状态'), detail or self._notice, self._reasoning_notice) if part)
 
     def _current_settings(self):
+        self._repair_reasoning_choice()
         snapshot = self._session_settings if self._state.get('session_id') else None
         return {'model': self.model_name, 'reasoning': self._reasoning,
                 'instructions': (snapshot or {}).get('instructions', self.system_prompt),
@@ -456,6 +480,20 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def agent_choice_target(self):
         return self._conversation_id + ':' + self._choice_epoch
 
+    def _repair_reasoning_choice(self):
+        model, reasoning = self.agent_model_choice
+        corrected, notice = compatible_reasoning(model, reasoning)
+        if not notice: return
+        self._reasoning_notice = notice
+        if self._state.get('session_id'):
+            # Keep the effective cloud settings until the update is confirmed.
+            self._pending_model_settings = (model, corrected)
+        else:
+            self.model_name, self._reasoning = model, corrected
+            self._pending_model_settings = None
+            if self._session_settings:
+                self._session_settings.update(model=model, reasoning=corrected)
+
     def set_agent_model(self, model, reasoning, revision=None, target=None):
         with self._lock:
             if target is not None and target != self.agent_choice_target: return None
@@ -464,20 +502,23 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     raise gr.Error('无效的设置版本')
                 if revision <= self._choice_revision: return None
             if self._retired: raise gr.Error('聊天已切换，请在当前聊天中选择')
-            reasoning = normalize_reasoning(reasoning)
+            if not isinstance(model, str) or not model.strip(): raise gr.Error('请选择 Agent 子模型')
+            model = model.strip()
+            reasoning, notice = compatible_reasoning(model, reasoning)
+            self._reasoning_notice = notice
             if (model, reasoning) == self.agent_model_choice:
                 if revision is not None: self._choice_revision = int(revision)
                 return None
             self._assert_idle()
-            if not isinstance(model, str) or not model.strip(): raise gr.Error('请选择 Agent 子模型')
-            choice = (model.strip(), reasoning)
+            choice = (model, reasoning)
             self._pending_model_settings = choice if choice != (self.model_name, self._reasoning) else None
             if revision is not None: self._choice_revision = int(revision)
             self._remember()
-        return '已保存，下一轮自动使用'
+        return notice or '已保存，下一轮自动使用'
 
     def _apply_next_model(self, generation):
         with self._lock:
+            self._repair_reasoning_choice()
             if not self._pending_model_settings: return
             model, reasoning = self._pending_model_settings
             reasoning = normalize_reasoning(reasoning)
@@ -833,6 +874,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         self._tool_log.observe(self, message, artifacts)
 
     def _accept(self, message, generation, *, restoring=False, error_operation=None, scope=None, log_updates=None):
+        if self._local_history_deleted(): return False
         if scope is not None and not scope.current(self): return False
         if (self._retired and not getattr(self, "_task_backend", False)) or self._state.get('generation') != generation: return False
         session = message.get('session_id')
@@ -901,6 +943,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self.model_name = agent.get('model', self.model_name)
             self._reasoning = normalize_reasoning((agent.get('reasoning') or {}).get('effort'))
             self._session_settings.update(model=self.model_name, reasoning=self._reasoning)
+            self._repair_reasoning_choice()
         if isinstance(message.get('artifacts'), list):
             self._merge_artifacts(message['artifacts'])
         self._record_message_error(message, operation=error_operation)
@@ -1368,8 +1411,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         return self._status()
 
     def auto_save(self, chatbot=None):
-        if not self._persistence_owner(): return
-        with self._lock:
+        with self._lock, self._store().history_guard(self._owner, self.history_file_path):
+            if not self._persistence_owner(): return
             super().auto_save(chatbot)
             self._remember()
 
@@ -1463,7 +1506,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         from .base_model import init_history_list
         import os
         if TASKS.find(self) is not None: raise gr.Error('此对话仍在后台处理，请等待完成后重命名')
-        with self._lock:
+        with self._lock, self._store().history_guard(self._owner, self.history_file_path):
             self._assert_idle()  # promote a completed view from its final snapshot
             if not filename or not self.history: return gr.update()
             if not isinstance(filename, str) or Path(filename).name != filename:
@@ -1485,31 +1528,51 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             new = target.name
             # Migrate trusted identity directly; the parent's rename invokes
             # delete_chat_history and would erase authority before store.rename.
-            store.copy_binding(self._owner, old, new)
-            try:
-                os.replace(source, target)
-            except Exception:
-                store.forget(self._owner, new)
-                raise
-            self.history_file_path = new
-            self._auto_named = True
-            self._submission_history_path = new
-            self._remember()
-            store.forget(self._owner, old)
-            old_md, new_md = source.with_suffix('.md'), target.with_suffix('.md')
-            if old_md.is_file():
-                try: os.replace(old_md, new_md)
-                except OSError:
-                    self._notice = '历史已重命名，Markdown 导出文件将在下次保存时重新生成'
-                    logging.warning('历史重命名成功，派生 Markdown 文件暂未迁移')
-            return init_history_list(self.user_name, prepend=target.stem)
+            with store.history_guard(self._owner, new):
+                if store.is_history_deleted(self._owner, new, self._conversation_id):
+                    raise gr.Error('此本地历史已删除，请新建聊天')
+                store.copy_binding(self._owner, old, new)
+                try:
+                    os.replace(source, target)
+                except Exception:
+                    store.forget(self._owner, new)
+                    raise
+                self.history_file_path = new
+                self._auto_named = True
+                self._submission_history_path = new
+                self._remember()
+                store.forget(self._owner, old)
+                old_md, new_md = source.with_suffix('.md'), target.with_suffix('.md')
+                if old_md.is_file():
+                    try: os.replace(old_md, new_md)
+                    except OSError:
+                        self._notice = '历史已重命名，Markdown 导出文件将在下次保存时重新生成'
+                        logging.warning('历史重命名成功，派生 Markdown 文件暂未迁移')
+                return init_history_list(self.user_name, prepend=target.stem)
 
     def delete_chat_history(self, filename):
+        from modules.agent.history_deletion import delete_agent_history
+        return delete_agent_history(self, filename)
+
+    def retire_deleted_history(self, conversation, path):
+        from modules.agent.store import local_history_key
         with self._lock:
-            self._assert_idle()
-            result = super().delete_chat_history(filename)
-            if self._owner: self._store().forget(self._owner, filename)
-            return result
+            if self._conversation_id != conversation or local_history_key(self.history_file_path) != local_history_key(path): return
+            self._history_deleted = self._retired = True
+            self._choice_epoch = uuid4().hex
+            self._history_epoch = self._history_observing = None
+            self._history_ui_complete_scope = None
+            self._pending_send = None
+            self._release_input_stager()
+
+    def release_deleted_task_reservations(self, task):
+        with self._lock:
+            if (not self._history_deleted or getattr(self, '_background_task', None) is not task
+                    or (task.generation is not None and self._state.get('generation') != task.generation)): return
+            with _bindings_lock:
+                for key in [key for key, model in _session_locks.items() if model is self]:
+                    _session_locks.pop(key)
+            self._input_session_reservation = None
 
     def delete_first_conversation(self): raise gr.Error('Agent 云端历史不支持本地回退')
     def delete_last_conversation(self, chatbot): raise gr.Error('Agent 云端历史不支持本地回退')

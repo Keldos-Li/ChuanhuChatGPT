@@ -83,10 +83,14 @@ def load_chat_history(current_model, new_history_file_path=None, request: gr.Req
 
 def delete_chat_history(current_model, filename, request: gr.Request = None):
     from modules.agent.tasks import TASKS
-    if TASKS.find_history(current_model.user_name, filename) is not None:
-        raise gr.Error('此历史仍有后台任务，完成或确认停止后再删除')
-    if getattr(current_model, "is_hosted_agent", False) and request is not None:
-        current_model.bind_owner(request)
+    if request is not None and current_model.user_name != (request.username or ''):
+        raise gr.Error('只能删除当前登录用户的聊天历史')
+    if getattr(current_model, "is_hosted_agent", False):
+        if request is not None: current_model.bind_owner(request)
+        return current_model.delete_chat_history(filename)
+    from modules.agent.history_deletion import has_agent_history, delete_agent_history
+    if filename not in (None, '', 'CANCELED') and (TASKS.find_history(current_model.user_name, filename) is not None or has_agent_history(current_model, filename)):
+        return delete_agent_history(current_model, filename)
     with model_lock(current_model):
         if getattr(current_model, '_running', False) or getattr(current_model, '_chat_running', False) or getattr(current_model, '_pending_send', None):
             raise gr.Error('当前输入正在提交或生成，请先停止再改变聊天历史')
@@ -550,7 +554,16 @@ def construct_assistant(text):
     return construct_text("assistant", text)
 
 
-def save_file(filename, model):
+def save_file(filename, model, *, _history_guarded=False):
+    if getattr(model, 'is_hosted_agent', False) and not _history_guarded:
+        # Cover direct exports as well as auto_save: a late callback must not
+        # rebuild a deleted history, even when it bypasses the model wrapper.
+        target = filename or model.history_file_path
+        if target.endswith('.md'): target = target[:-3]
+        if not target.endswith('.json'): target += '.json'
+        with model._lock, model._store().history_guard(model._owner, target):
+            if model._local_history_deleted(): return
+            return save_file(filename, model, _history_guarded=True)
     system = model.system_prompt
     history = model.history
     chatbot = []

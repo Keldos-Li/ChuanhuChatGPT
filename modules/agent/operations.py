@@ -30,4 +30,6 @@ class TaskScope:
         return cls(model._owner, model._conversation_id, model.history_file_path, model._state.get('generation'))
 
     def current(self, model):
-        return self == self.capture(model)
+        return (not getattr(model, '_history_deleted', False)
+                and not getattr(getattr(model, '_background_task', None), 'deleted', False)
+                and self == self.capture(model))

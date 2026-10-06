@@ -379,7 +379,7 @@ def test_real_worker_emits_filtered_diagnostics_not_exception_body(monkeypatch,c
     output=capsys.readouterr().out
     message=json.loads(output.splitlines()[-1])
     assert message['outcome']=='not_started'
-    assert message['diagnostics']=={'status_code':400,'code':'invalid_value','param':'environment.network.access','request_id':'req_'+'b'*32}
+    assert message['diagnostics']=={'status_code':400,'code':'invalid_value','param':'environment.network.access','request_id':'req_'+'b'*32,'phase':'run.session_create'}
     assert 'sk-proj' not in output and 'private task' not in output
 
 

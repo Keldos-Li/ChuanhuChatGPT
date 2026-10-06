@@ -133,7 +133,6 @@ def test_terminal_download_keeps_task_reserved_after_ui_detach(env, monkeypatch,
     try:
         fresh = new_chat(env, model)
         with pytest.raises(gr.Error): send(env, model, 'too early')
-        with pytest.raises(gr.Error): env.wrappers['delete_chat_history'](fresh, model.history_file_path, request=request())
         with pytest.raises(gr.Error): model.rename_chat_history('renamed')
         stream.close(); release.set(); finish(model._background_task)
         binding = model._store().get(model._owner, model.history_file_path)

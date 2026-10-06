@@ -140,7 +140,7 @@ def test_older_completed_choice_response_cannot_overwrite_widgets_or_same_revisi
     early=asyncio.run(app.process_api(index,[None,'gpt-6-sol','default',1,model.agent_choice_target],state=state,request=req))
     later=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',2,model.agent_choice_target],state=state,request=req))
     assert panel.model not in app.fns[index].outputs and panel.reasoning not in app.fns[index].outputs
-    assert len(early['data'])==len(later['data'])==1
+    assert len(early['data'])==len(later['data'])==2  # status + guarded selector receipt
     # Even a stale visible value submitted with an already-confirmed revision
     # cannot silently replace the latest pair stored by that revision.
     envelope=env.wrappers['transfer_input']('send',model,'gpt-6-sol','default',2,request=req)[0]
@@ -234,7 +234,7 @@ def test_gradio_callback_updates_same_session_and_restores_on_failure(env,monkey
     app,panel,state=panel_app(model)
     index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='choose_settings')
     result=asyncio.run(app.process_api(index,[None,'gpt-6-sol','high',1,model.agent_choice_target],state=state,request=gr.Request(session_hash='ui-test')))
-    assert app.fns[index].outputs == [panel.activity]
+    assert app.fns[index].outputs == [panel.activity,panel.choice_result]
     assert not result['data'][0]['visible'] and result['data'][0]['value']=='' and model.agent_model_choice==('gpt-6-sol','high') and model._state['session_id']=='sess_test'
     assert model.model_name!='gpt-6-sol'
     send(env,model,'apply on send')
@@ -513,7 +513,7 @@ def test_retry_first_frame_stale_is_noop(env,monkeypatch):
         model.retire()
         yield model.chatbot,'obsolete'
     monkeypatch.setattr(model,'retry_artifact',retry)
-    callback=next(fn.fn for fn in app.fns if fn.fn.__name__=='retry_file')
+    callback=next(fn.fn for fn in app.fns if fn.fn and fn.fn.__name__=='retry_file')
     stream=callback(model,'artifact',request=request())
     assert all(value==gr.update() for value in next(stream))
     with pytest.raises(StopIteration):next(stream)

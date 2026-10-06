@@ -5,6 +5,15 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from threading import RLock
+from contextlib import contextmanager
+from weakref import WeakValueDictionary
+
+_history_locks = WeakValueDictionary()
+_history_locks_lock = RLock()
+
+def local_history_key(path):
+    return Path(history_key(path)).name
 
 
 def owner_identity(username):
@@ -26,6 +35,7 @@ class BindingStore:
             raise ValueError('会话绑定文件不能是符号链接')
         with self._connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS bindings (owner TEXT NOT NULL, history TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner, history))')
+            db.execute('CREATE TABLE IF NOT EXISTS deleted_histories (owner TEXT NOT NULL, history TEXT NOT NULL, conversation TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner, history, conversation))')
         os.chmod(self.path, 0o600)
 
     def _connect(self):
@@ -49,7 +59,8 @@ class BindingStore:
                 for item in value: check(item)
         check(record)
         with self._connect() as db:
-            db.execute('INSERT OR REPLACE INTO bindings VALUES (?, ?, ?)', (owner, history_key(path), json.dumps(record, ensure_ascii=False)))
+            db.execute('INSERT OR REPLACE INTO bindings SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM deleted_histories WHERE owner=? AND history=? AND conversation=?)',
+                       (owner, history_key(path), json.dumps(record, ensure_ascii=False), owner, local_history_key(path), record.get('conversation_id', '')))
 
     def copy_binding(self, owner, before, after):
         """Retain source authority until the history file migration completes."""
@@ -64,3 +75,40 @@ class BindingStore:
     def forget(self, owner, path):
         with self._connect() as db:
             db.execute('DELETE FROM bindings WHERE owner=? AND history=?', (owner, history_key(path)))
+
+    @contextmanager
+    def history_guard(self, owner, path):
+        # Serialize local file writes with deletion in this server process.
+        key = (str(self.path.resolve()), owner, local_history_key(path))
+        with _history_locks_lock:
+            lock = _history_locks.setdefault(key, RLock())
+        with lock:
+            yield
+
+    def is_history_deleted(self, owner, path, conversation):
+        with self._connect() as db:
+            return db.execute('SELECT 1 FROM deleted_histories WHERE owner=? AND history=? AND conversation=?',
+                              (owner, local_history_key(path), conversation)).fetchone() is not None
+
+    def history_bindings(self, owner, path):
+        with self._connect() as db:
+            rows = db.execute('SELECT history, record FROM bindings WHERE owner=?', (owner,)).fetchall()
+        return [(key, json.loads(record)) for key, record in rows if local_history_key(key) == local_history_key(path)]
+
+    def delete_local_history(self, owner, path, conversations):
+        # The receipt is a write barrier, not authority to resume/cancel a run.
+        # Different new conversations may legitimately reuse the filename.
+        with self._connect() as db:
+            for conversation, record in conversations.items():
+                db.execute('INSERT OR IGNORE INTO deleted_histories VALUES (?, ?, ?, ?)',
+                           (owner, local_history_key(path), conversation, json.dumps(record, ensure_ascii=False)))
+            rows = db.execute('SELECT history FROM bindings WHERE owner=?', (owner,)).fetchall()
+            for (key,) in rows:
+                if local_history_key(key) == local_history_key(path):
+                    db.execute('DELETE FROM bindings WHERE owner=? AND history=?', (owner, key))
+
+    def deletion_receipt(self, owner, path, conversation):
+        with self._connect() as db:
+            row = db.execute('SELECT record FROM deleted_histories WHERE owner=? AND history=? AND conversation=?',
+                             (owner, local_history_key(path), conversation)).fetchone()
+        return json.loads(row[0]) if row else None

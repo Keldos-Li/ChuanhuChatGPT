@@ -12,16 +12,16 @@ from modules.agent.operations import OperationScope
 from modules.agent.file_icons import file_icon, file_size_label, file_type_label, split_filename
 from modules.model_capabilities import capabilities, model_lock
 from modules.presets import i18n
+from modules.agent.reasoning import MODEL_EFFORTS, reasoning_options
 
-MODEL_EFFORTS = {
-    'gpt-6-astra': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
-    'gpt-6-sol': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
-    'gpt-6.1-sol': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
-}
-REASONING_CHOICES = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+REASONING_CHOICES = reasoning_options('gpt-6.1-sol')
 
-def reasoning_choices():
-    return [(i18n('ui.toolbox.agent.' + ('reasoning_default' if value == 'default' else value)), value) for value in REASONING_CHOICES]
+def reasoning_choices(model='gpt-6.1-sol', current=None):
+    return [('none' if value == 'none' else i18n('ui.toolbox.agent.' + ('reasoning_default' if value == 'default' else value)), value) for value in reasoning_options(model, current)]
+
+
+def reasoning_info(model):
+    return None if model in MODEL_EFFORTS else '该模型尚无已核实的推理选项；保留当前值或使用模型默认，其他值请按服务商说明填写'
 
 
 
@@ -254,6 +254,7 @@ class AgentPanel:
             self.reasoning = gr.Dropdown(label=i18n('ui.toolbox.agent.reasoning'), choices=reasoning_choices(), value='default', min_width=120)
             self.choice_revision = gr.Number(value=0, precision=0, visible=False)
             self.choice_target = gr.Textbox(visible=False)
+            self.choice_result = gr.Textbox(visible=False)
 
     def output_components(self):
         self.artifacts = ArtifactPanel()
@@ -434,7 +435,7 @@ class AgentPanel:
                   settings['computer_use'], settings['include_screenshots'], settings['tool_search'], settings['programmatic_tool_calling'], settings['functions'],
                   json.dumps(settings['mcp_servers'], ensure_ascii=False, indent=2)]
         return ([(gr.update(visible=True, open=True) if include_config else gr.update())] if hasattr(self, 'accordion') else []) + ([gr.update(visible=True)] if hasattr(self, 'separator') else []) + ([gr.update(visible=True)] if hasattr(self, 'tools_separator') else []) + [gr.update(visible=True), gr.update(visible=True), '',
-                gr.update(**({'value': next_model} if include_config else {}), interactive=not busy), gr.update(**({'value': next_reasoning or 'default', 'choices': reasoning_choices()} if include_config else {}), interactive=not busy),
+                gr.update(**({'value': next_model} if include_config else {}), interactive=not busy), gr.update(**({'value': next_reasoning or 'default', 'choices': reasoning_choices(next_model, next_reasoning), 'allow_custom_value': next_model not in MODEL_EFFORTS, 'info': reasoning_info(next_model)} if include_config else {}), interactive=not busy),
                 gr.update(visible=bool(cards)), gr.update(choices=[((card['request'].get('origin') or card['request'].get('credential_origin') or '网站请求') + ' · ' + card['request_id'], card['request_id']) for card in cards], value=chosen),
                 *browser, *ArtifactPanel.values(model), *[gr.update(**({'value':value} if include_config or session_locked else {}), interactive=not busy and not session_locked and component not in (self.discovery, self.programmatic)) for component, value in zip(self.config_inputs, config)], gr.update(value=tool_availability(settings))] + ([gr.update(visible=True), self.input_value(model, not busy), gr.update(interactive=not busy), model._conversation_id] if hasattr(self, 'input_files') else []) + self.sidebar_values(model) + [model._conversation_id, model.agent_choice_target]
 
@@ -581,15 +582,29 @@ class AgentPanel:
             model.bind_owner(request)
             try: message = model.set_agent_model(name, effort, revision, target=target)
             except Exception as error: raise gr.Error(str(error)) from None
-            # A response generated before a newer selection may arrive last.
-            # Never write selector values back from this asynchronous event.
-            return message if message is not None else gr.update()
+            if revision != model._choice_revision or target != model.agent_choice_target:
+                return gr.update(), gr.update()
+            name, effort = model.agent_model_choice
+            receipt = json.dumps({'target': model.agent_choice_target,
+                'revision': model._choice_revision, 'value': effort or 'default',
+                'choices': reasoning_choices(name, effort), 'allow_custom_value': name not in MODEL_EFFORTS, 'info': reasoning_info(name)})
+            return (message if message is not None else gr.update()), receipt
         choice_js = '''(state, name, effort, unused, target) => {
             window.chuanhuAgentChoiceRevision = (window.chuanhuAgentChoiceRevision || 0) + 1;
             return [state, name, effort, window.chuanhuAgentChoiceRevision, target];
         }'''
         for selector in (self.model, self.reasoning):
-            selector.input(self.status_callback(choose_settings), [current_model, self.model, self.reasoning, self.choice_revision, self.choice_target], [status_display], queue=False, js=choice_js)
+            event = selector.input(self.status_callback(choose_settings), [current_model, self.model, self.reasoning, self.choice_revision, self.choice_target], [status_display, self.choice_result], queue=False, js=choice_js)
+            # Native dropdown updates are committed only for the current visit
+            # and latest input revision; delayed replies cannot restore minimal.
+            event.then(None, [self.choice_result, self.choice_target], [self.reasoning], queue=False,
+                js='''(wire, target) => {
+                    let result; try { result = JSON.parse(wire); } catch { return [{__type__: "update"}]; }
+                    if (result.target !== target || result.revision !== window.chuanhuAgentChoiceRevision)
+                        return [{__type__: "update"}];
+                    return [{__type__: "update", value: result.value, choices: result.choices,
+                        allow_custom_value: result.allow_custom_value, info: result.info}];
+                }''')
         def choose_tools(model, network, code, search, mode, domains, browser, screenshots, discovery, programmatic, functions, mcp, revision, target, request: gr.Request):
             model.bind_owner(request)
             try:
