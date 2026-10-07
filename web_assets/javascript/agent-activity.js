@@ -1,8 +1,8 @@
 /* Display elapsed observation time without polling or mutating task state. */
 (() => {
-    if (globalThis.__chuanhuActivityVersion === 7) return;
+    if (globalThis.__chuanhuActivityVersion === 8) return;
     globalThis.__chuanhuActivityCleanup?.();
-    globalThis.__chuanhuActivityVersion = 7;
+    globalThis.__chuanhuActivityVersion = 8;
     const clocks = new WeakMap();
     const expanded = new Map();
     function owned(detail, conversation) {
@@ -101,7 +101,7 @@
         for (const [key, detail] of nextNodes) currentNodes.set(key, detail);
         for (const node of app.querySelectorAll('#chuanhu-chatbot .agent-activity-elapsed')) {
             const detail = node.closest('.agent-history-detail');
-            if (!owned(detail, conversation)) continue;
+            if (!owned(detail, conversation) || detail.dataset.layer !== 'group') continue;
             if (node.dataset.running !== 'true') continue;
             const base = Number(node.dataset.elapsedMs);
             if (!Number.isFinite(base) || base < 0 || base > 31536000000) continue;
@@ -109,7 +109,9 @@
             if (!clock || clock.base !== base) {
                 clock = {base, started: performance.now()}; clocks.set(node, clock);
             }
-            const text = Math.floor((base + Math.max(0, performance.now() - clock.started)) / 1000) + 's';
+            const seconds = Math.floor((base + Math.max(0, performance.now() - clock.started)) / 1000);
+            const format = seconds < 60 ? (node.dataset.secondsFormat || '{seconds}s') : (node.dataset.minutesFormat || '{minutes}m {seconds}s');
+            const text = format.replaceAll('{minutes}', String(Math.floor(seconds / 60))).replaceAll('{seconds}', String(seconds < 60 ? seconds : seconds % 60));
             if (node.textContent !== text) node.textContent = text;
             running = true;
         }

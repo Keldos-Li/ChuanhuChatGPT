@@ -507,6 +507,14 @@ class AgentPanel:
                                           or getattr(model, '_predict_error_operation', None) != operation):
                             yield tuple(gr.update() for _ in [None, None, *(self.stream_outputs if compact else self.outputs), *(capability_ui.stream_outputs if compact else capability_ui.outputs)])
                             return
+                        if (operation and isinstance(inputs, dict)
+                                and inputs.get('token') == getattr(model, '_draft_token', None)
+                                and getattr(model, '_draft_conversation', None) == target
+                                and len(model._display) > len(chatbot or [])):
+                            # This response first displays the user's bubble. Its
+                            # draft receipt must travel in this same UI frame,
+                            # independently of remote submission acknowledgement.
+                            model._draft_presented = True
                         yield chat, status, *updates.changes(controls())
                 except gr.Error as error:
                     if operation is None: raise

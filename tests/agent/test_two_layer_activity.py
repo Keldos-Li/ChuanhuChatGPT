@@ -73,7 +73,7 @@ def test_two_layers_real_command_default_closed_no_group_duration_or_badges():
     assert '正在运行命令</span>' in output and 'python -c' in output
     outer=re.search('<summary[^>]*>(.*?)</summary>',output).group(1)
     assert 'elapsed' not in outer and 'badge' not in output
-    assert output.count('agent-activity-elapsed')==1
+    assert 'agent-activity-elapsed' not in output  # Legacy elapsed-only data cannot prove a group interval.
     assert output.count('aria-hidden="true"')==2 and 'fill="none"' in output
     assert '&quot;type&quot;: &quot;command_execution&quot;' in output
     mixed=groups([command('a'),dict(id='w',turn_id='t1',type='web_search_call',action={'type':'search'},status='completed')])[0]

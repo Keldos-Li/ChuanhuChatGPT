@@ -419,6 +419,10 @@
         "your_prefix": "あなたの"
     },
     "ui": {
+        "agent_activity": {
+            "elapsed_seconds": "{seconds}s",
+            "elapsed_minutes_seconds": "{minutes}分{seconds}秒"
+        },
         "chat": {
             "delete_latest": "🗑️ 最新の会話削除",
             "delete_oldest": "🗑️ 最古の会話削除",

@@ -419,6 +419,10 @@
         "your_prefix": "당신의"
     },
     "ui": {
+        "agent_activity": {
+            "elapsed_seconds": "{seconds}s",
+            "elapsed_minutes_seconds": "{minutes}분 {seconds}초"
+        },
         "chat": {
             "delete_latest": "🗑️ 최신 대화 삭제",
             "delete_oldest": "🗑️ 가장 오래된 대화 삭제",

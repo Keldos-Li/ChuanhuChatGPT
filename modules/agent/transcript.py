@@ -9,6 +9,7 @@ import json
 import math
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from modules.agent.activity import safe_interval, persist_group_durations
 
 VERSION = 1
 FORMAT_VERSION = 2
@@ -298,6 +299,8 @@ def _activity_metadata(record, source):
     phase=source.get('activity_phase')
     if phase in ('running','waiting','completed','failed','incomplete','cancelled','turn_cancelled','turn_failed'):
         record['activity_phase']=phase
+    interval = safe_interval(source.get('activity_interval'))
+    if interval: record['activity_interval'] = interval
 
 
 def _ordered_timeline(records):
@@ -402,7 +405,7 @@ def normalize(items, *, scope_id, turns=(), artifacts=(), input_mappings=(),
                 'status': _identifier(item.get('status')), 'file_refs': []}
         _activity_metadata(base,item)
         clock=observed.get((item.get('turn_id'),source)) if source else None
-        if clock:_activity_metadata(base,dict(elapsed_ms=clock.get('elapsed_ms'),activity_phase=clock.get('phase')))
+        if clock:_activity_metadata(base,dict(elapsed_ms=clock.get('elapsed_ms'),activity_phase=clock.get('phase'),activity_interval=clock.get('interval')))
         if kind == 'message' and item.get('role') in ('user', 'assistant'):
             base.update(kind='message', role=item['role'], phase=item.get('phase') if item.get('phase') in ('commentary', 'final_answer') else None,
                         content=[], capture={'origin': 'persisted_item', 'omitted': False})
@@ -488,6 +491,7 @@ def normalize(items, *, scope_id, turns=(), artifacts=(), input_mappings=(),
         if target is not None and (target.get('role') != 'assistant' or target['turn_ref'] != turn_ref(artifact.get('turn_id'))):
             target = None
         add_file(artifact, 'generated', target)
+    persist_group_durations(result['timeline'])
     return result
 
 
@@ -619,6 +623,7 @@ def _validate(transcript, *, secrets=()):
             file = next((f for f in out['files'] if f['id'] == ref), None)
             if file is None or file['attachment']['message_ref'] != entry['id']:
                 raise TranscriptError('Dangling or inconsistent message file reference')
+    persist_group_durations(out['timeline'])
     return out
 
 
@@ -635,6 +640,7 @@ def merge(previous, incoming, *, authoritative=False):
         raise TranscriptError('Cannot merge identity-unknown items; provide stable application occurrence IDs')
     if authoritative and after['capture']['items'] != 'complete':
         raise TranscriptError('Authoritative replacement needs a complete item snapshot')
+    observed_before = {entry['id']: entry for entry in before['timeline']}
     for key in ('turns', 'timeline', 'files'):
         records = {x['id']: x for x in before[key]}
         if key == 'timeline' and authoritative:
@@ -650,6 +656,10 @@ def merge(previous, incoming, *, authoritative=False):
             if key == 'turns' and record.get('capture') == 'reference_only' and record['id'] in records:
                 continue
             previous = records.get(record['id'])
+            if key == 'timeline':
+                observed = observed_before.get(record['id'])
+                if observed and observed.get('turn_ref') == record.get('turn_ref') and 'activity_interval' not in record and 'activity_interval' in observed:
+                    record['activity_interval'] = deepcopy(observed['activity_interval'])
             if (not authoritative and key == 'timeline' and previous
                     and previous.get('status') in ('completed', 'failed', 'incomplete')
                     and record.get('status') == 'in_progress'):

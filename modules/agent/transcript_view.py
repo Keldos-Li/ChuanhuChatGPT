@@ -3,8 +3,8 @@ from copy import deepcopy
 import html
 import json
 import math
-import time
 from modules.agent import transcript
+from modules.agent.activity import contiguous_tool_runs, group_span
 from modules.agent.file_icons import file_icon, file_size_label, file_type_label
 from modules.agent.message_files import project_message_files, _cloud_rows, _align_rows, _anchor
 from modules.presets import i18n
@@ -48,26 +48,10 @@ _CHEVRON = '<svg class="agent-activity-chevron" aria-hidden="true" focusable="fa
 
 def _tool_runs(timeline, scope):
     """Contiguous display runs, anchored to canonical non-tool occurrences."""
-    result=[];boundaries={};current=None;groups={}
-    for entry in timeline:
-        turn=entry.get('turn_ref')
-        if entry['kind']!='tool':
-            current=None
-            boundaries[turn]=(entry['id'],entry.get('identity') in ('api_id','application_occurrence'))
-            result.append(entry)
-            continue
-        if current is None or current['turn_ref']!=turn:
-            boundary,stable=boundaries.get(turn,('turn-start',True))
-            key=_anchor(['scope',scope,'turn',turn,'layer','group'],'activity-group',boundary) if stable else ''
-            current=dict(kind='tool_group',turn_ref=turn,entries=[],id=key,persist_open=stable)
-            result.append(current);groups.setdefault(key,[]).append(current)
-        current['entries'].append(entry)
-        current['persist_open'] &= entry.get('identity') in ('api_id','application_occurrence')
-    # Interleaved turns can create two runs with the same boundary. Neither
-    # may inherit the other's choice; this is display-only, not a new receipt.
-    for same_anchor in groups.values():
-        if len(same_anchor)>1:
-            for group in same_anchor:group['persist_open']=False
+    result = contiguous_tool_runs(timeline)
+    for group in result:
+        if group['kind'] == 'tool_group':
+            group['id'] = _anchor(['scope',scope,'turn',group['turn_ref'],'layer','group'],'activity-group',group['boundary']) if group['boundary_stable'] else ''
     return result
 
 
@@ -146,9 +130,20 @@ def _tool_group(group, *, scope, conversation, **kwargs):
     entries=group['entries'];title=_group_title(entries,kwargs.get('clock'),kwargs.get('outputs'))
     identity=_detail_identity(group['id'],group['turn_ref'],scope,'group',conversation,group['persist_open'])
     children=_activity(entries,scope=scope,conversation=conversation,wrap=False,**kwargs)
+    span = group_span(group, clock=kwargs.get('clock'), active=kwargs.get('active', False))
+    timer = ''
+    if span:
+        seconds = math.floor(span['elapsed_ms'] / 1000)
+        seconds_format = i18n('ui.agent_activity.elapsed_seconds')
+        minutes_format = i18n('ui.agent_activity.elapsed_minutes_seconds')
+        text = seconds_format.format(seconds=seconds) if seconds < 60 else minutes_format.format(minutes=seconds//60, seconds=seconds%60)
+        timer = ('<span class="agent-activity-elapsed" data-elapsed-ms="'+str(span['elapsed_ms'])
+                 +'" data-running="'+('true' if span['running'] else 'false')
+                 +'" data-seconds-format="'+html.escape(seconds_format,quote=True)
+                 +'" data-minutes-format="'+html.escape(minutes_format,quote=True)+'">'+html.escape(text)+'</span>')
     return ('<div class="agent-history-activity"><details class="agent-history-detail agent-history-group"'+identity
             +'><summary aria-label="'+html.escape(title,quote=True)+'"><span class="agent-tool-title">'+html.escape(title)
-            +'</span>'+_CHEVRON+'</summary><div class="agent-tool-list">'+children+'</div></details></div>')
+            +'</span>'+timer+_CHEVRON+'</summary><div class="agent-tool-list">'+children+'</div></details></div>')
 
 
 def _activity(entries, *, clock=None, conversation='', active=False, calls=None, outputs=None, mcp_ambiguous=None, scope='', wrap=True):
@@ -182,15 +177,7 @@ def _activity(entries, *, clock=None, conversation='', active=False, calls=None,
             phase='failed' if details.get('error') else 'completed'
         phase={'in_progress':'running','requires_action':'waiting'}.get(phase,phase)
         if phase not in labels:phase='unknown'
-        elapsed=observed.get('elapsed_ms',entry.get('elapsed_ms'))
-        if kind=='command_execution' and type(details.get('duration_ms')) in (int,float) and math.isfinite(details['duration_ms']) and details['duration_ms']>=0:
-            elapsed=details['duration_ms']
         running=bool(active and observed.get('running') and phase in ('running','waiting'))
-        sampled=observed.get('sampled_at')
-        if running and type(elapsed) in (int,float) and type(sampled) in (int,float) and math.isfinite(sampled):
-            elapsed=max(0,elapsed+max(0,time.monotonic()-sampled)*1000)
-        valid=type(elapsed) in (int,float) and math.isfinite(elapsed) and 0<=elapsed<=31536000000
-        timer=('<span class="agent-activity-elapsed" data-elapsed-ms="'+str(elapsed)+'" data-running="'+('true' if running else 'false')+'">'+html.escape(f'{math.floor(elapsed/1000)}s')+'</span>') if valid else ''
         status=labels[phase]
         flags=entry.get('capture',{})
         notice=('部分内容未保存' if flags.get('omitted') else '')+(' · 内容已截断' if flags.get('truncated') else '')
@@ -202,19 +189,10 @@ def _activity(entries, *, clock=None, conversation='', active=False, calls=None,
         identity=_detail_identity(entry['id'] if persistent else '',entry.get('turn_ref'),scope,'summary' if entry['kind']=='summary' else 'tool',conversation,persistent)
         title_class='agent-tool-title'+(' agent-command-preview' if kind=='command_execution' and details.get('command') else '')
         out.append('<details class="agent-history-detail"'+(' open' if running and entry['kind']=='summary' else '')+identity+' data-phase="'+phase+'"><summary aria-label="'+html.escape(title+' · '+status,quote=True)+'">'
-                   +'<span class="'+title_class+'">'+html.escape(title)+'</span> '+timer+_CHEVRON+'</summary>'+body
+                   +'<span class="'+title_class+'">'+html.escape(title)+'</span> '+_CHEVRON+'</summary>'+body
                    +('<small class="agent-activity-notice">'+html.escape(notice)+'</small>' if notice else '')+'</details>')
     body=''.join(out)
     return '<div class="agent-history-activity">'+body+'</div>' if wrap and body else body
-
-
-def _turn_elapsed(turn):
-    start,end=turn.get('started_at'),turn.get('completed_at')
-    if (turn.get('status') in ('completed','failed','cancelled') and type(start) in (int,float)
-            and type(end) in (int,float) and math.isfinite(start) and math.isfinite(end)
-            and 0<=start<=end and end-start<=31536000):
-        return '<div class="agent-turn-elapsed"><small>本轮处理 · '+html.escape(f'{end-start:.1f}s')+'</small></div>'
-    return ''
 
 
 def _file_card(file):
@@ -301,7 +279,6 @@ def project_transcript(model, rows):
         else:mapping[key]=entry['details'].get('name','') if entry['source_type']=='function_call' else entry
     for key in ambiguous_calls:calls.pop(key,None);outputs.pop(key,None)
     for key in ambiguous_outputs:outputs.pop(key,None)
-    durations={turn['id']:_turn_elapsed(turn) for turn in view['turns']}
     projection.cell_details = {}
     projection.cell_segments = {}
     def append(row, column, markup):
@@ -339,9 +316,6 @@ def project_transcript(model, rows):
                     projection.user_files[row] = [{'id':file['id'], 'name':file['name'], 'size':file['size_bytes']} for file in entry['files']]
                 if any(part['type'] != 'text' for part in entry['content']):
                     append(row,column,'<small>图像或其他媒体未包含在此历史记录中。</small>')
-    for turn,row in turn_rows.items():
-        if durations.get(turn) and row in ordered_segments:
-            ordered_segments[row].insert(0,{'markup':durations[turn]})
     for row,segments in ordered_segments.items():
         if projection.rows[row][1] is None: projection.rows[row][1] = ''
         text='\n\n'.join(segment['text'] for segment in segments if segment.get('text'))
@@ -355,7 +329,7 @@ def project_transcript(model, rows):
         if row is None:
             row = extra_row(_anchor(['conversation', model._conversation_id], 'activity', turn or 'unassigned'), turn_last_rows.get(turn))
             if turn: turn_last_rows[turn] = row
-        append(row,1,durations.get(turn,'')+''.join(markup))
+        append(row,1,''.join(markup))
     files_by_turn = {}
     for file in view['turn_files']: files_by_turn.setdefault(file.get('turn_ref'), []).append(file)
     for turn, files in files_by_turn.items():

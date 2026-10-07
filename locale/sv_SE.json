@@ -419,6 +419,10 @@
         "your_prefix": "Din"
     },
     "ui": {
+        "agent_activity": {
+            "elapsed_seconds": "{seconds}s",
+            "elapsed_minutes_seconds": "{minutes} min {seconds} s"
+        },
         "chat": {
             "delete_latest": "🗑️ Ta bort senaste dialogen",
             "delete_oldest": "🗑️ Ta bort äldsta dialogen",

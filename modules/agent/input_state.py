@@ -219,6 +219,32 @@ class AgentInputState:
         finally:
             with self._lock: self._input_preparing = False
 
+    @staticmethod
+    def _confirmed_preparation_failure(preparation):
+        phase = preparation.get('last_request_phase')
+        failed = ((phase == 'preparation.session_retrieve' and preparation.get('session_status') == 'failed')
+                  or (phase == 'preparation.environment_retrieve' and preparation.get('environment_status') == 'failed'))
+        return bool(failed and preparation.get('outcome') == 'failed'
+                    and preparation.get('submission_started') is False
+                    and not preparation.get('uncertain_operation'))
+
+    def _failed_preparation_environment(self):
+        preparation = (self._input_context or {}).get('resume_state') or {}
+        return bool(self._confirmed_preparation_failure(preparation)
+                    and preparation.get('session_id') == self._state.get('session_id')
+                    and preparation.get('session_id'))
+
+    def _failed_environment_notice(self):
+        preparation = (self._input_context or {}).get('resume_state') or {}
+        phase = preparation.get('last_request_phase')
+        if phase == 'preparation.session_retrieve':
+            return '会话准备失败（code=unknown；phase=preparation.session_retrieve）；该会话无法继续，请主动新建聊天；未提交聊天轮次'
+        code = (preparation.get('environment_error') or {}).get('code')
+        known = {'environment_connection_failed', 'environment_connection_timeout',
+                 'sandbox_error', 'executor_version_incompatible', 'internal_error', 'idle_timeout'}
+        code = code if code in known else 'unknown'
+        return '执行环境准备失败（code=' + code + '；phase=preparation.environment_retrieve）；该会话无法继续，请主动新建聊天；未提交聊天轮次'
+
     def _input_rollback_state(self, previous, generation):
         context = self._input_context
         if not context: return previous
@@ -227,6 +253,8 @@ class AgentInputState:
         if session and (preparation.get('outcome')=='uncertain' or preparation.get('uncertain_operation')):
             self._needs_sync = True
             return dict(previous, session_id=session, turn_id=None, outcome='incomplete', submission_started=False)
+        if session and self._confirmed_preparation_failure(preparation):
+            return dict(previous, session_id=session, turn_id=None, outcome='failed', submission_started=False)
         if session and not previous.get('session_id'):
             return dict(previous, session_id=session, turn_id=None, outcome='not_started', submission_started=False)
         if not session and preparation.get('session_creation_started'):

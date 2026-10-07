@@ -155,12 +155,13 @@ def test_browser_elapsed_counter_contract():
     assert result.returncode==0,result.stderr
 
 
-def test_turn_duration_uses_started_and_completed_not_creation_or_guesses():
-    from modules.agent.transcript_view import _turn_elapsed
-    assert '2.0s' in _turn_elapsed(dict(status='completed',created_at=90,started_at=100,completed_at=102))
-    assert _turn_elapsed(dict(status='completed',created_at=90,completed_at=102))==''
-    assert _turn_elapsed(dict(status='in_progress',started_at=100,completed_at=102))==''
-    assert _turn_elapsed(dict(status='completed',started_at=102,completed_at=100))==''
+def test_turn_time_data_remains_without_whole_turn_display():
+    data=transcript.normalize([],scope_id='scope',turns=[dict(id='t1',status='completed',created_at=90,started_at=100,completed_at=102)])
+    saved=transcript.loads(transcript.serialize({'agent_transcript':data}),scope_id='scope')['agent_transcript']
+    assert saved['turns'][0]['started_at']==100 and saved['turns'][0]['completed_at']==102
+    from pathlib import Path
+    source=(Path(__file__).resolve().parents[2]/'modules/agent/transcript_view.py').read_text()
+    assert '_turn_elapsed' not in source and 'agent-turn-elapsed' not in source
 
 
 def test_summary_bounded_and_raw_reasoning_only_remains_excluded():
@@ -274,7 +275,7 @@ def test_cancelled_activity_hides_stop_label_keeps_timer_frozen_and_failure_visi
     cancelled=_activity([entry],clock={'cmd':dict(phase='turn_cancelled',elapsed_ms=1200,running=False)},active=True)
     assert 'pwd' in cancelled and '代码与文件执行' not in cancelled
     assert 'agent-activity-status' not in cancelled and 'aria-label="pwd · 本轮已停止"' in cancelled
-    assert '1s' in cancelled and 'data-running="false"' in cancelled
+    assert 'agent-activity-elapsed' not in cancelled
     failed=_activity([entry],clock={'cmd':dict(phase='turn_failed',elapsed_ms=1200,running=False)},active=True)
     assert '本轮失败' in failed
     waiting=_activity([entry],clock={'cmd':dict(phase='waiting',elapsed_ms=1200,running=False)},active=True)
@@ -326,7 +327,7 @@ def test_no_visible_phase_labels_native_summary_has_accessible_state_and_error_e
     for phase in ('running','waiting','completed','failed','turn_failed','incomplete','unknown','cancelled','turn_cancelled'):
         output=_activity([entry],clock={'m':dict(phase=phase,elapsed_ms=1000,running=False)})
         summary=re.search(r'<summary[^>]*>(.*?)</summary>',output).group(1)
-        assert re.sub('<[^>]+>','',summary).strip()=='actual_tool 1s'
+        assert re.sub('<[^>]+>','',summary).strip()=='actual_tool'
         assert 'agent-activity-status' not in output and 'aria-live' not in output
         assert 'aria-label="actual_tool · ' in output and 'data-phase="'+phase+'"' in output
         assert 'actual API error' in output and '部分内容未保存' in output

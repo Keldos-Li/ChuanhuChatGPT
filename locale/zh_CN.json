@@ -428,6 +428,8 @@
     },
     "ui": {
         "agent_activity": {
+            "elapsed_seconds": "{seconds}s",
+            "elapsed_minutes_seconds": "{minutes}分{seconds}秒",
             "list_separator": "、",
             "list_two": "{first}和{last}",
             "list_many": "{items}和{last}",

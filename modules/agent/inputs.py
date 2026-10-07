@@ -87,6 +87,10 @@ def _verify_session(client, state, *, initial=False, empty=False):
     environment = session.get('environment') or {}
     if session.get('id') != state['session_id']:
         _fail('返回的会话标识不一致；未提交聊天轮次', state, uncertain=True)
+    status = session.get('status')
+    state['session_status'] = status if status in ('idle', 'in_progress', 'requires_action', 'failed') else 'unknown'
+    if status == 'failed':
+        _fail('会话准备失败（code=unknown；phase=preparation.session_retrieve）；该会话无法继续，请主动新建聊天；未提交聊天轮次', state)
     if environment.get('type') not in ('openai_hosted', 'self_hosted'):
         _fail('当前会话没有文件执行环境，请使用已启用代码与文件执行的会话', state)
     environment_id = environment.get('id')
@@ -347,11 +351,20 @@ def prepare_inputs(client, inputs, model, *, staging_root, session_id=None, run_
             if environment.get('id') != state['environment_id']:
                 _fail('返回的执行环境标识不一致', state, uncertain=True)
             status = environment.get('status')
-            state['environment_status'] = status if status in ('pending', 'connected', 'disconnected', 'expired', 'failed') else 'unknown'
+            state['environment_status'] = status if status in ('pending', 'provisioning', 'connected', 'disconnected', 'expired', 'failed') else 'unknown'
             _emit(state, on_progress)
             if status == 'connected':
                 break
-            if status != 'pending':
+            if status == 'failed':
+                details = environment.get('error') or {}
+                known_codes = {'environment_connection_failed', 'environment_connection_timeout',
+                               'sandbox_error', 'executor_version_incompatible', 'internal_error', 'idle_timeout'}
+                code = details.get('code') if isinstance(details, dict) else None
+                state['environment_error'] = {'code': code if code in known_codes else 'unknown',
+                    'type': 'environment_error' if isinstance(details, dict) and details.get('type') == 'environment_error' else 'unknown'}
+                _fail('执行环境准备失败（code=' + state['environment_error']['code']
+                      + '；phase=preparation.environment_retrieve）；该会话无法继续，请主动新建聊天；未提交聊天轮次', state)
+            if status not in ('pending', 'provisioning'):
                 _fail('执行环境未连接、已过期或失败；未提交聊天轮次', state)
             # No task deadline: provisioning remains cancellable between polls.
             time.sleep(poll_interval)

@@ -393,6 +393,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self.system_prompt = self._session_settings.get('instructions', self.system_prompt)
                 self._tool_settings = deepcopy(self._session_settings.get('tools', self._tool_settings))
             self._repair_reasoning_choice()
+            if self._failed_preparation_environment():
+                self._state = dict(self._state, outcome='failed')
+                self._needs_sync = False
+                self._notice = self._failed_environment_notice()
             self._notice = self._notice or '已找到原会话，发送前将按云端记录恢复历史'
         else:
             self._fresh()
@@ -423,6 +427,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
 
     def _assert_idle(self):
         if self._local_history_deleted(): raise gr.Error('此本地历史已删除，请新建聊天')
+        if self._failed_preparation_environment(): raise gr.Error(self._failed_environment_notice())
         from threading import current_thread
         from modules.agent.tasks import TASKS
         active = TASKS.find(self)
@@ -1099,6 +1104,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         from modules.agent.message_files import decode_rows
         chatbot = decode_rows(chatbot, self._conversation_id)
         if not self._owner: raise gr.Error('需要在当前登录会话中发送')
+        if self._failed_preparation_environment(): raise gr.Error(self._failed_environment_notice())
         input_records = self._take_input_files(files)
         if not isinstance(inputs, str) or (not inputs.strip() and not input_records): raise gr.Error('请输入文字任务或添加附件')
         inputs = inputs.strip() or '请查看上传的附件。'
@@ -1221,6 +1227,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         self._active_input_cards = previous_input_cards
                         rollback = self._input_rollback_state(previous[0], generation)
                         self._state, self.history, self._display, self._answer_index, self._answer_row = (rollback, *previous[1:])
+                        # The first frame already displayed this user message and
+                        # cleared its draft. Keep it copyable locally, while the
+                        # submitted history/state roll back truthfully.
+                        self._display.append([display_input, ''])
                         # This owned rollback changes generation, not the visit.
                         scope = self._execution_scope(history_target=True)
                         for error_record in getattr(self, '_ui_errors', []):

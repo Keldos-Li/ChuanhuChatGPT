@@ -74,6 +74,7 @@ def reserve_submission(model, text, files=None):
         if getattr(model, 'is_hosted_agent', False):
             model._draft_token, model._draft_submitted = token, False
             model._draft_acknowledged = False
+            model._draft_presented = False
             model._draft_text, model._draft_conversation = text, model._conversation_id
         return {'text': text, 'target': id(model), 'token': token}
 
@@ -122,7 +123,7 @@ class CapabilityUI:
         if caps.agent_tools:
             state = getattr(model, '_state', {})
             payload['agent_turn_id'] = state.get('turn_id') or ('local-' + str(state.get('generation')))
-        if caps.sandbox_attachments and getattr(model, '_draft_acknowledged', False) and getattr(model, '_draft_token', None):
+        if caps.sandbox_attachments and (getattr(model, '_draft_presented', False) or getattr(model, '_draft_acknowledged', False)) and getattr(model, '_draft_token', None):
             payload['submitted_draft'] = {'token': model._draft_token, 'conversation': model._draft_conversation, 'text': model._draft_text}
         if caps.agent_tools and getattr(model, '_tool_ui_patch', None): payload['tool_patch'] = model._tool_ui_patch
         provider_locked = caps.agent_tools and bool(getattr(model, '_state', {}).get('session_id'))

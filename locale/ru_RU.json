@@ -419,6 +419,10 @@
         "your_prefix": "Your"
     },
     "ui": {
+        "agent_activity": {
+            "elapsed_seconds": "{seconds}s",
+            "elapsed_minutes_seconds": "{minutes} мин {seconds} с"
+        },
         "chat": {
             "delete_latest": "🗑️ Удалить последний диалог",
             "delete_oldest": "🗑️ Удалить старейший диалог",

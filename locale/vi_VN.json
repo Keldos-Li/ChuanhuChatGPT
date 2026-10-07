@@ -419,6 +419,10 @@
         "your_prefix": "Tôi không hiểu."
     },
     "ui": {
+        "agent_activity": {
+            "elapsed_seconds": "{seconds}s",
+            "elapsed_minutes_seconds": "{minutes} phút {seconds} giây"
+        },
         "chat": {
             "delete_latest": "🗑️ Xóa cuộc trò chuyện mới nhất",
             "delete_oldest": "🗑️ Xóa cuộc trò chuyện cũ nhất",

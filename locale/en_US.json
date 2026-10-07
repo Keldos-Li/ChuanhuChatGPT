@@ -428,6 +428,8 @@
     },
     "ui": {
         "agent_activity": {
+            "elapsed_seconds": "{seconds}s",
+            "elapsed_minutes_seconds": "{minutes}m {seconds}s",
             "list_separator": ", ",
             "list_two": "{first} and {last}",
             "list_many": "{items}, and {last}",

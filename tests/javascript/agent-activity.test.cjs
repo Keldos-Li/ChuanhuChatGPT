@@ -13,7 +13,7 @@ function fixture({ready='complete',conversation='chat',nodes=[],details=[]}={}) 
     return {context,start,notify,intervals,listeners,observers,setTime:value=>{now=value;},setConversation:value=>{active=value;},tick:()=>Array.from(intervals.values()).forEach(fn=>fn())};
 }
 function node(base=1000,running=true,conversation='chat',clone=false){
-    const detail={dataset:{conversationId:conversation},closest:selector=>selector==='.history-message'&&clone?{}:null};
+    const detail={dataset:{conversationId:conversation,layer:'group'},closest:selector=>selector==='.history-message'&&clone?{}:null};
     let text=Math.floor(base/1000)+'s',writes=0;
     return {dataset:{elapsedMs:String(base),running:String(running)},get textContent(){return text;},set textContent(value){text=value;writes++;},get writes(){return writes;},closest:()=>detail};
 }
@@ -146,3 +146,22 @@ for(const base of [0,999,999.75,1000,3456.9]){
 const missing=node();delete missing.dataset.elapsedMs;missing.textContent='unknown';const unknown=fixture({nodes:[missing]});unknown.start();unknown.setTime(2000);unknown.notify();unknown.tick();
 assert.equal(missing.textContent,'unknown');assert.equal(unknown.intervals.size,0,'missing baseline is not fabricated as zero');
 console.log('Integer seconds: 999.75ms boundary, same-second write suppression, precise delta baseline, terminal/recovered freeze and missing baseline passed');
+
+// Only the outer group owns the readout, including localized minute rollover.
+const minute=node(59999.75),minutes=fixture({nodes:[minute]});
+minute.dataset.secondsFormat='{seconds}s';minute.dataset.minutesFormat='{minutes}分{seconds}秒';
+minutes.start();assert.equal(minute.textContent,'59s');
+minutes.setTime(.25);minutes.tick();assert.equal(minute.textContent,'1分0秒');assert.equal(minute.writes,1);
+for(const time of [1,100,900]){minutes.setTime(time);minutes.notify();minutes.tick();}
+assert.equal(minute.writes,1,'same displayed second does not rewrite localized time');
+minutes.setTime(7000.25);minutes.tick();assert.equal(minute.textContent,'1分7秒');
+minute.dataset.running='false';minute.textContent='1分7秒';minutes.notify();
+minutes.setTime(100000);minutes.tick();assert.equal(minute.textContent,'1分7秒');assert.equal(minutes.intervals.size,0);
+const childTimer=node(),childDetail=childTimer.closest();childDetail.dataset.layer='tool';
+const childFixture=fixture({nodes:[childTimer]});childFixture.start();childFixture.setTime(9000);childFixture.notify();
+assert.equal(childTimer.textContent,'1s');assert.equal(childFixture.intervals.size,0,'a child tool cannot run a header timer');
+for(const [format,expected] of [['{minutes}m {seconds}s','1m 7s'],['{minutes}분 {seconds}초','1분 7초'],['{minutes} мин {seconds} с','1 мин 7 с']]){
+ const localized=node(67999.75),test=fixture({nodes:[localized]});localized.dataset.minutesFormat=format;test.start();
+ assert.equal(localized.textContent,expected);
+}
+console.log('Outer group only, localized 60s rollover, same-second suppression and terminal minute freeze passed');

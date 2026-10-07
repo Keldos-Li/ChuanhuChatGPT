@@ -303,7 +303,8 @@ def test_model_update_rejection_rolls_back_draft_and_reports_once(env,monkeypatc
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     model.set_agent_model('gpt-6-sol','high')
     panel=wrapped_send(env,model,'preserve this draft')
-    assert calls==['update'] and (model._state,model.history,model.chatbot)==previous
+    assert calls==['update'] and (model._state,model.history)==previous[:2]
+    assert model.chatbot==previous[2]+[['preserve this draft','']]  # Keep the displayed local message copyable.
     assert not model._draft_submitted and not model._running
     with pytest.raises(gr.Error,match='update rejected'):panel.emit_ui_error(model,request())
     panel.emit_ui_error(model,request())
