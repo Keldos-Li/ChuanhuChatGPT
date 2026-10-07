@@ -627,6 +627,39 @@ def _validate(transcript, *, secrets=()):
     return out
 
 
+def _coalesce_input_receipts(document):
+    """Reconcile an orphan occurrence with its unique mapped upload receipt.
+
+    Message identity may change from an application occurrence to an API ID.
+    The immutable upload ID, name and size prove the duplicate independently
+    of row position, text or turn ID. Ambiguous bindings remain visible.
+    """
+    users = {entry['id'] for entry in document['timeline']
+             if entry.get('kind') == 'message' and entry.get('role') == 'user'}
+    groups = {}
+    for file in document['files']:
+        if file['kind'] == 'input' and file.get('source_id'):
+            key = (file['source_id'], file['name'], file['size_bytes'])
+            groups.setdefault(key, []).append(file)
+    aliases = {}
+    for files in groups.values():
+        bound = [file for file in files if file['attachment']['message_ref'] in users]
+        messages = {file['attachment']['message_ref'] for file in bound}
+        turns = {file['turn_ref'] for file in bound if file['turn_ref'] is not None}
+        if len(messages) != 1 or len(turns) > 1: continue
+        target = next((file for file in reversed(bound) if file['turn_ref'] is not None), bound[-1])
+        for file in files:
+            if file is target or file['attachment']['message_ref'] not in (None, target['attachment']['message_ref']): continue
+            if file['turn_ref'] is not None and target['turn_ref'] is not None and file['turn_ref'] != target['turn_ref']: continue
+            aliases[file['id']] = target['id']
+            if target.get('created_at') is None: target['created_at'] = file.get('created_at')
+    if aliases:
+        document['files'] = [file for file in document['files'] if file['id'] not in aliases]
+        for entry in document['timeline']:
+            entry['file_refs'] = list(dict.fromkeys(aliases.get(ref, ref) for ref in entry['file_refs']))
+    return document
+
+
 def merge(previous, incoming, *, authoritative=False):
     """Merge normalized snapshots by local identity, never concatenate deltas.
 
@@ -680,7 +713,7 @@ def merge(previous, incoming, *, authoritative=False):
             by_message[target]['file_refs'].append(file['id'])
         elif target is not None:
             file['attachment'] = {'message_ref': None, 'basis': 'turn_only' if file['turn_ref'] else 'unresolved'}
-    return _validate(before)
+    return _validate(_coalesce_input_receipts(before))
 
 
 def migrate(document, *, scope_id, secrets=()):
@@ -718,6 +751,7 @@ def migrate(document, *, scope_id, secrets=()):
                     transcript['files'].append({'id': _id(scope_id, 'file', ['legacy', index, column]), 'source_id': None,
                                                 'kind': 'legacy', 'turn_ref': None, 'name': _text(_filename(cell[0]), secrets=secrets), 'size_bytes': None, 'created_at': None,
                                                 'availability': 'metadata_only', 'attachment': {'message_ref': None, 'basis': 'unresolved'}})
+    transcript = _coalesce_input_receipts(transcript)
     out = {'history_format': {'name': 'chuanhu', 'version': FORMAT_VERSION}, 'agent_transcript': transcript}
     for key in _LEGACY_FIELDS:
         if key in document:

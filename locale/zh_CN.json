@@ -428,6 +428,9 @@
     },
     "ui": {
         "agent_activity": {
+            "thinking_active": "正在思考",
+            "thinking_completed": "已思考",
+            "thinking_neutral": "思考",
             "elapsed_seconds": "{seconds}s",
             "elapsed_minutes_seconds": "{minutes}分{seconds}秒",
             "list_separator": "、",

@@ -266,6 +266,9 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             return
         wire = dict(command, connection=connection, owner=self.user_name)
         self._tool_log_key = connection.get('api_key')
+        if command.get('action') in ('run', 'recover', 'recover_unknown', 'observe', 'observe_unknown'):
+            self._file_connection = deepcopy(connection)
+            self._file_connection_generation = self._state.get('generation')
         if command.get('action') in ('run', 'recover', 'recover_unknown', 'download'):
             scope = self._execution_scope()
             caller_cancelled = command.get('_observe_cancel')
@@ -304,6 +307,23 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 and (attached is None or attached.model is self))
 
     def _remember(self):
+        with self._store().history_guard(self._owner, self.history_file_path):
+            if self._owner:
+                from modules.agent.file_jobs import overlay_model
+                overlay_model(self)
+            try:
+                self._remember_binding()
+            except Exception:
+                self._state['persistence_failed'] = True
+                raise
+
+    def _remember_task_end(self):
+        if (self._state.get('outcome') in TERMINAL and not self._needs_sync
+                and not self._state.get('persistence_failed') and self._persistence_owner()):
+            if self._store().settle_task(self._owner, self.history_file_path, self._conversation_id, self._state): return
+        self._remember()
+
+    def _remember_binding(self):
         if not self._persistence_owner(): return
         if not self._owner or self._importing: return
         if (not self._state.get('session_id') and self._state.get('outcome') != 'uncertain' and not self._input_context
@@ -437,7 +457,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._background_task = None
             task = None
         background_busy = bool(getattr(self, '_background_busy', False) and (task is None or current_thread() is not task.thread))
-        if (active is not None and active.model is not self) or background_busy or self._running or getattr(self, '_pending_send', None) or self._state.get('outcome') not in TERMINAL or self._needs_sync:
+        if (active is not None and active.model is not self) or background_busy or self._running or getattr(self, '_pending_send', None) or self._state.get('outcome') not in TERMINAL or self._needs_sync or self._state.get('persistence_failed'):
             raise gr.Error('当前任务仍在运行或状态尚待确认，请先停止或重新连接')
 
     def prepare_model_switch(self):
@@ -733,6 +753,20 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             session_id=self._state.get('session_id'), secrets=known_secrets(self),activity=observed)
         authoritative = (message.get('sync_complete') is True and isinstance(message.get('items'), list)
                          and incoming['capture']['items'] == 'complete')
+        if self._transcript_preview and (message.get('turn_complete') is True or message.get('history_authoritative')):
+            current_turn = self._state.get('turn_id')
+            refs = {turn['id'] for turn in incoming['turns'] if turn.get('source_id') == current_turn}
+            if not any(entry.get('role') == 'user' and entry.get('turn_ref') in refs for entry in incoming['timeline']):
+                # The durable submitted intent has application identity even
+                # when this output stream carries no API user-message item.
+                user = deepcopy(self._transcript_preview[0])
+                receipt = user.pop('id')
+                user.update(id=None, turn_id=current_turn, status='completed')
+                local = transcript.normalize([user], scope_id=self._conversation_id,
+                    session_id=self._state.get('session_id'), occurrence_ids={0: receipt},
+                    input_mappings=[{'wire_sha256': hashlib.sha256(user['content'][0]['text'].encode()).hexdigest(), 'files': deepcopy(self._active_input_cards)}],
+                    capture={'items': 'partial'}, secrets=known_secrets(self))
+                incoming = transcript.merge(local, incoming)
         previous = self._transcript
         if previous is None and 'items' not in message and self.history:
             previous = self.history_document({'history': self.history, 'chatbot': self._display})['agent_transcript']
@@ -754,16 +788,28 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 if old and old.get('turn_ref')==entry.get('turn_ref'):
                     for key in ('elapsed_ms','output_index'):
                         if key not in entry and key in old:entry[key]=old[key]
+        if message.get('turn_complete') is True or message.get('history_authoritative'):
+            current_refs = {turn['id'] for turn in snapshot['turns'] if turn.get('source_id') == self._state.get('turn_id')}
+            current_users = [entry for entry in snapshot['timeline'] if entry.get('role') == 'user' and entry.get('turn_ref') in current_refs]
+            if len(current_users) == 1:
+                user = current_users[0]
+                timeline = [entry for entry in snapshot['timeline'] if entry is not user]
+                position = next((index for index, entry in enumerate(timeline) if entry.get('turn_ref') in current_refs), len(timeline))
+                # Repair a late submitted/GET user before its own outputs;
+                # preserve an already correct user and unrelated turn order.
+                if position < snapshot['timeline'].index(user):
+                    timeline.insert(position, user)
+                    snapshot['timeline'] = timeline
         self._transcript = snapshot
         if isinstance(message.get('activity'),list):
             self._activity_records=observed
         self._item_receipts = list(receipts.values())
         current_turn = self._state.get('turn_id')
         turn_refs = {turn['id']: turn.get('source_id') for turn in self._transcript['turns']}
-        if authoritative or any(entry['kind'] == 'message' and entry.get('role') == 'user'
+        if authoritative or message.get('turn_complete') is True or any(entry['kind'] == 'message' and entry.get('role') == 'user'
                 and current_turn and turn_refs.get(entry.get('turn_ref')) == current_turn for entry in incoming['timeline']):
             self._transcript_preview = []
-        return authoritative
+        return authoritative or message.get('turn_complete') is True
 
     def history_document(self, document):
         """Display data only; private run/cache bindings never enter JSON."""
@@ -890,7 +936,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             # An earlier stop belongs to the old exact turn, not a newer turn
             # discovered during cross-browser recovery.
             self._cancel_requested = self._cancel_sent = False
-        for key in ('session_id', 'turn_id', 'baseline_turn_ids', 'submission_started'):
+        for key in ('session_id', 'turn_id', 'baseline_turn_ids', 'submission_started', 'observation'):
             if key in message and message[key] is not None: self._state[key] = message[key]
         if message.get('submission_started') is True:
             self._draft_submitted = True
@@ -900,7 +946,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self._input_stager.mark_submitted(self._installed_inputs)
         if getattr(self, '_draft_submitted', False) and not getattr(self, '_draft_acknowledged', False) and message.get('turn_id'):
             self._draft_acknowledged = True
-            self._clear_input_selection()
+            self._remove_input_selection(getattr(self, '_draft_input_ids', ()))
             self._input_context = None
             self._release_input_stager()
         if (message.get('submission_started') is True
@@ -957,6 +1003,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         if should_log:
             if not sync_unconfirmed: self._log_final_answer(message)
             self._log_tool_results(message, self._artifacts if 'artifacts' in message else ())
+        if message.get('turn_complete') is True and message.get('type') == 'result' and items_complete:
+            self._state['turn_committed'] = {'session_id': self._state.get('session_id'), 'turn_id': self._state.get('turn_id')}
         if (message.get('type') == 'result' and self._state.get('outcome') in TERMINAL
                 and message.get('sync_complete') is not False and not sync_unconfirmed
                 and (message.get('sync_complete') is True or message.get('history_authoritative') is True or 'text' in message)
@@ -1002,82 +1050,94 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             previous[record['id']] = record
         self._artifacts = list(previous.values())
 
+    def _file_runner(self):
+        # Capture the authorized connection and interpreter transport once.
+        # A later view/generation cannot retarget this file operation.
+        connection = deepcopy(self._file_connection if getattr(self, '_file_connection_generation', None) == self._state.get('generation') and getattr(self, '_file_connection', None) else self._connection())
+        transport, owner = worker_messages, self.user_name
+        def run(command):
+            yield from transport(dict(command, connection=connection, owner=owner))
+        from modules.agent.tool_logging import ToolLog
+        from types import SimpleNamespace
+        if not hasattr(self, '_tool_log'): self._tool_log = ToolLog()
+        logger, tools, key = self._tool_log, deepcopy(self._tool_settings), self._connection_key
+        def log_files(job, records):
+            target = SimpleNamespace(_state={'session_id':job['session_id'], 'turn_id':job['turn_id']},
+                _tool_settings=tools, _connection_key=key, _tool_log_key=connection.get('api_key'))
+            logger.observe(target, {'session_id':job['session_id']}, records)
+        run.log_artifacts = log_files
+        run.connection_ref = {key: connection.get(key) for key in ('base_url', 'organization', 'project')}
+        return run
+
+    def _queue_files(self, artifact_ids=None, *, turn_id=None, log_updates=True):
+        from modules.agent.file_jobs import FILE_JOBS, create_job, jobs_for
+        store = self._store()
+        with store.history_guard(self._owner, self.history_file_path):
+            if self._local_history_deleted() or not self._owner or (artifact_ids is None and self._state.get('outcome') not in TERMINAL): return
+            if self._connection_mismatch: raise gr.Error('当前连接配置与原会话不同，请恢复原配置后重试文件')
+            runner = self._file_runner()
+            target_turn = turn_id or self._state.get('turn_id')
+            source = next((job for job in jobs_for(store, self._owner, self._conversation_id)
+                if job['session_id'] == self._state.get('session_id') and job['turn_id'] == target_turn), None)
+            if source and source['connection_ref'] != runner.connection_ref:
+                raise gr.Error('当前连接配置与原会话不同，请恢复原配置后重试文件')
+            job = create_job(store, owner=self._owner, conversation=self._conversation_id,
+                history=self.history_file_path, session=self._state.get('session_id'),
+                turn=target_turn, generation=source['generation'] if source else self._state.get('generation'),
+                connection_ref=runner.connection_ref, artifact_ids=artifact_ids, cache_owner=hashlib.sha256(self.user_name.encode()).hexdigest(), log_updates=log_updates)
+        if job:
+            FILE_JOBS.submit(store, job, runner, Path(HISTORY_DIR) / self.user_name)
+        return job
+
+    def refresh_files(self, *, resume=True):
+        from modules.agent.file_jobs import FILE_JOBS, jobs_for, overlay_model
+        with self._lock:
+            if self._local_history_deleted() or not self._owner: return
+            overlay_model(self)
+            if not resume or self._connection_mismatch: return
+            jobs = [job for job in jobs_for(self._store(), self._owner, self._conversation_id)
+                if job['status'] in ('pending', 'running') and job['session_id'] == self._state.get('session_id')
+                and job['connection_ref'] == self._connection_reference()]
+            if jobs:
+                runner = self._file_runner()
+                for job in jobs:
+                    FILE_JOBS.submit(self._store(), job, runner, Path(HISTORY_DIR) / self.user_name)
+
     def _download(self, generation, artifact_ids=None, *, error_operation=None, scope=None, log_updates=True):
         with self._lock:
-            if getattr(self, "_background_busy", False): self._task_phase = "downloading"
             scope = scope or self._execution_scope()
             if not scope.current(self) or self._state.get('generation') != generation: return
-            session_id = self._state['session_id']
-            ready_ids = [record['id'] for record in self._artifacts if record.get('status') == 'ready' and record.get('path') and Path(record['path']).is_file()]
-        for message in self._worker({'action': 'download', 'session_id': session_id, 'artifact_ids': artifact_ids, 'skip_artifact_ids': ready_ids if artifact_ids is None else [],
-                                     '_observe_cancel': lambda: not scope.current(self) or self._state.get('generation') != generation}):
-            if message.get('type') == 'error':
-                with self._lock:
-                    if not scope.current(self): return
-                    self._record_message_error(message, operation=error_operation)
-                    self._notice = '回答已保留，文件获取失败，可重试：' + message.get('message', '')
-                yield deepcopy(self._display), self._status()
-                return
-            if isinstance(message.get('artifact_metadata'), list):
-                with self._lock:
-                    if not scope.current(self): return
-                    for metadata in message['artifact_metadata']:
-                        for record in self._artifacts:
-                            if (metadata.get('id') == record.get('id') and metadata.get('session_id') == self._state.get('session_id')
-                                    and metadata.get('turn_id') == record.get('turn_id')):
-                                record['remote_path'] = metadata.get('remote_path')
-                    self._remember()
-                yield deepcopy(self._display), self._status()
-            if 'artifacts' not in message: continue
-            records = message['artifacts']
-            root = Path(tempfile.gettempdir()).resolve()
-            for record in records:
-                if record.get('status') != 'ready': continue
-                path = Path(record.get('path', ''))
-                if path.is_symlink() or not path.is_file() or not ((root in path.resolve().parents and any(parent.name.startswith('chuanhu-agent-artifacts-') for parent in path.parents)) or (Path(shared.chuanhu_path).resolve() / 'agent_data' / 'artifacts' / hashlib.sha256(self.user_name.encode()).hexdigest()) in path.resolve().parents):
-                    record.update(status='failed', error='文件缓存校验失败，请重新获取')
-                    record.pop('path', None)
-            with self._lock:
-                if not scope.current(self): return
-                self._merge_artifacts(records)
-                self._capture_transcript({'artifacts': self._artifacts, 'capture': {'items': 'not_collected', 'artifacts': 'partial'}})
-                self._record_message_error(dict(message, artifacts=records), operation=error_operation)
-                if log_updates: self._log_tool_results(message, records)
-                self._remember()
-            yield deepcopy(self._display), self._status()
+            self._queue_files(artifact_ids, log_updates=log_updates)
+            self.refresh_files(resume=False)
+            frame = deepcopy(self._display), self._status()
+        if scope.current(self): yield frame
 
     def retry_artifact(self, artifact_id, *, error_operation=None):
+        from modules.agent.file_jobs import jobs_for, records_for
         with self._lock:
             if self._retired: return
             scope = OperationScope.capture(self)
-            if artifact_id not in {record['id'] for record in self._artifacts}: raise gr.Error('文件不属于当前会话')
-            generation = self._state.get('generation')
-            retry_key = (self._state.get('session_id'), artifact_id)
-            attempt = error_operation or uuid4().hex
-            if retry_key in self._active_file_retries: raise gr.Error('文件正在重新获取')
-            self._active_file_retries.add(retry_key)
-            for record in self._artifacts:
-                if record['id']==artifact_id:
-                    record.update(status='preparing');record.pop('error', None)
-        try:
-            yield deepcopy(self._display), self._status()
-            yield from self._download(generation, [artifact_id], error_operation=attempt, scope=scope)
-        except Exception:
-            with self._lock:
-                if not scope.current(self): return
-                self._notice = '文件获取失败，可重试'
-                self.record_ui_error(self._notice, operation=attempt)
-        finally:
-            with self._lock:
-                self._active_file_retries.discard(retry_key)
-                if scope.current(self) and self._state.get('session_id') == retry_key[0]:
-                    for record in self._artifacts:
-                        if record['id']==artifact_id and record.get('status')=='preparing':
-                            record.update(status='failed', error='文件获取未完成，请重试')
-                            self.record_ui_error(record['error'], ('artifact', record['id'], record['error']), operation=attempt)
-                    self._remember()
-        if not scope.current(self): return
-        yield deepcopy(self._display), self._status()
+            self.refresh_files(resume=False)
+            record = next((record for record in self._artifacts if record['id'] == artifact_id), None)
+            if record is None: raise gr.Error('文件不属于当前会话')
+            if (self._state.get('session_id'), artifact_id) in self._active_file_retries:
+                raise gr.Error('文件正在重新获取')
+            if any(job['status'] in ('pending', 'running') and job['artifact_ids'] == [artifact_id]
+                    for job in jobs_for(self._store(), self._owner, self._conversation_id)):
+                raise gr.Error('文件正在重新获取')
+            turn = record.get('turn_id')
+            if not turn:
+                # Unassociated metadata retains the source job's exact target;
+                # this is a retry filter, not an assignment to a message.
+                with self._store()._connect() as db:
+                    row = db.execute('SELECT sequence FROM artifact_receipts WHERE owner=? AND conversation=? AND session=? AND artifact=?',
+                        (self._owner, self._conversation_id, self._state.get('session_id'), artifact_id)).fetchone()
+                if row:
+                    turn = next((job['turn_id'] for job in jobs_for(self._store(), self._owner, self._conversation_id) if job['sequence'] == row[0]), None)
+            if not turn: raise gr.Error('文件归属尚未确认，请重新连接后重试')
+            self._queue_files([artifact_id], turn_id=turn)
+            frame = deepcopy(self._display), self._status()
+        if scope.current(self): yield frame
 
     def _network_request(self, inputs):
         commands = {'开网': True, '开启联网': True, '允许联网': True, '打开联网': True,
@@ -1135,6 +1195,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             if input_records and not settings['tools']['code_execution']:
                 with _bindings_lock: _session_locks.pop(reservation, None)
                 raise gr.Error('当前会话没有文件执行环境，请启用后按新配置新建' if self._state.get('session_id') else '请先在工具设置中开启代码与文件执行')
+            self._draft_input_ids = tuple(record.input_id for record in input_records)
             previous_input_cards = deepcopy(self._active_input_cards)
             previous = (deepcopy(self._state), deepcopy(self.history), deepcopy(self._display), self._answer_index, self._answer_row)
             reference = deepcopy(self._input_seed_reference) if self._input_seed_reference is not None else _text_history(self.history) if not self._state.get('session_id') else None
@@ -1154,7 +1215,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._notice = ''
             command = {'action': 'run', 'prompt': inputs, 'model': self.model_name, 'reasoning': self._reasoning,
                        'instructions': settings['instructions'], 'tool_settings': deepcopy(settings['tools']),
-                       'session_id': self._state.get('session_id'), 'run_id': generation, 'history_reference': reference}
+                       'session_id': self._state.get('session_id'), 'run_id': generation, 'history_reference': reference,
+                       'observation': deepcopy(self._state.get('observation'))}
             scope = self._execution_scope(history_target=True)
         started = terminal = False
         update_error = False
@@ -1199,7 +1261,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                         terminal = True
                         # 先持久化完整回答，再允许新一轮或切换历史，避免旧生成器丢失最后一帧。
                         self.chatbot = deepcopy(self._display)
-                        self.auto_save(self.chatbot)
+                        if not getattr(self, '_task_backend', False): self.auto_save(self.chatbot)
                         self._running = False
                         with _bindings_lock:
                             if _session_locks.get(reservation) is self: _session_locks.pop(reservation, None)
@@ -1209,9 +1271,6 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 if self._cancel_requested: self._cancel(generation, error_operation=getattr(self, '_predict_error_operation', None) or generation, error_source=None)
                 yield deepcopy(self._display), self._status(detail)
             if not scope.current(self): return
-            if self._state.get('outcome') in ('completed', 'cancelled', 'failed') and self._state.get('session_id'):
-                yield from self._download(generation, scope=scope)
-                if scope.current(self): yield deepcopy(self._display), self._status()
         except (ModelUpdateError, InputPreparationStopped) as error:
             with self._lock:
                 update_error = True
@@ -1248,13 +1307,15 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                             _session_locks.pop(input_reservation, None)
                         self._input_session_reservation = None
                     self.chatbot = deepcopy(self._display)
-                    self._remember()
+                    if not (terminal and getattr(self, '_task_backend', False) and not self._needs_sync and not self._state.get('persistence_failed')):
+                        self._remember()
                     if not started and self._input_context:
                         preparation = self._input_context.get('resume_state') or {}
                         if preparation.get('outcome') == 'preparing': self._refresh_input_journal()
                         self.auto_save(self.chatbot)
                     if started:
-                        self.auto_save(self.chatbot)
+                        if not (terminal and getattr(self, '_task_backend', False) and not self._state.get('persistence_failed')):
+                            self.auto_save(self.chatbot)
                         if self._fork_previous and self._state.get('outcome') == 'not_started' and not self._state.get('session_id'):
                             # Keep the failed attempt as a separate local record,
                             # and return control to the original preserved session.
@@ -1267,6 +1328,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                             self._notice = '新会话未创建，已回到原会话；本次未发送内容另存于本地历史，新配置仍已保存'
                         elif self._state.get('session_id'):
                             self._fork_previous = None
+        if scope.current(self) and terminal and self._state.get('session_id') and not self._state.get('persistence_failed'):
+            with self._lock: self._queue_files()
         if scope.current(self) and (update_error or self._notice.startswith('新会话未创建')):
             yield deepcopy(self._display), self._status()
 
@@ -1298,6 +1361,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                        'turn_id': self._state.get('turn_id'), 'run_id': original_generation,
                        'baseline_turn_ids': self._state.get('baseline_turn_ids'),
                        'submission_started': self._state.get('submission_started') is True,
+                       'observation': self._recovery_observation(),
                        '_observe_cancel': cancelled}
         try:
             for message in self._worker(command):
@@ -1330,6 +1394,39 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                     self.auto_save(self.chatbot)
                     self._history_observing = None
 
+    def _recovery_observation(self):
+        receipt = self._state.get('observation')
+        if receipt is not None: return deepcopy(receipt)
+        session, current = self._state.get('session_id'), self._state.get('turn_id')
+        if not session or not current: return None
+        transcript = self._transcript or {}
+        turns = {turn['id']: turn for turn in transcript.get('turns', [])}
+        root = next((turn for turn in turns.values() if turn.get('source_id') == current), {})
+        records, parts = [], []
+        for entry in transcript.get('timeline', []):
+            source = entry.get('source_id')
+            if not source or turns.get(entry.get('turn_ref'), {}).get('source_id') != current: continue
+            item = {'id': source, 'turn_id': current, 'status': entry.get('status')}
+            group = None
+            if entry.get('kind') == 'message':
+                item.update(type='message', role=entry['role'], content=deepcopy(entry['content']))
+                group = 'content'
+            elif entry.get('kind') == 'summary':
+                item.update(type='reasoning', summary=deepcopy(entry['content']))
+                group = 'summary'
+            elif entry.get('source_type'): item['type'] = entry['source_type']
+            else: continue
+            records.append(item)
+            if group:
+                shapes = [[group, index, 'summary_text' if group == 'summary' else None, True]
+                          for index, part in enumerate(entry['content']) if isinstance(part.get('text'), str)]
+                parts.append({'item_id': source, 'shapes': shapes})
+        identity = [session, current, root['agent_source_id']] if root.get('agent_source_id') else None
+        # Even an old receipt with no public body anchors the known turn. Never
+        # claim facts not present in the private binding/transcript.
+        return {'version': 1, 'session_id': session, 'turns': [{'turn_id': current,
+            'root_identity': identity, 'items': records, 'parts': parts, 'unverifiable': False}]}
+
     def reconnect(self):
         empty_result = None
         with self._lock:
@@ -1350,7 +1447,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 command = {'action': 'recover' if session else 'recover_unknown', 'session_id': session,
                            'turn_id': self._state.get('turn_id'), 'run_id': generation,
                            'baseline_turn_ids': self._state.get('baseline_turn_ids'), 'submission_started': self._state.get('submission_started') is True,
-                           'tool_settings': (self._session_settings or {}).get('tools', self._tool_settings)}
+                           'tool_settings': (self._session_settings or {}).get('tools', self._tool_settings),
+                           'observation': self._recovery_observation()}
             resume_logs = self._state.get('log_reconciled') != {'session_id': self._state.get('session_id'), 'turn_id': self._state.get('turn_id')}
             restored_turn = self._state.get('turn_id')
             scope = self._execution_scope(history_target=True)
@@ -1423,8 +1521,15 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
     def auto_save(self, chatbot=None):
         with self._lock, self._store().history_guard(self._owner, self.history_file_path):
             if not self._persistence_owner(): return
-            super().auto_save(chatbot)
-            self._remember()
+            try:
+                from modules.agent.file_jobs import overlay_model
+                if self._owner: overlay_model(self)
+                super().auto_save(chatbot)
+                self._state.pop('persistence_failed', None)
+                self._remember()
+            except Exception:
+                self._state['persistence_failed'] = True
+                raise
 
     def load_chat_history(self, new_history_file_path=None):
         with self._lock:
@@ -1545,6 +1650,13 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 try:
                     os.replace(source, target)
                 except Exception:
+                    store.forget(self._owner, new)
+                    raise
+                from modules.agent.file_jobs import move_jobs
+                try:
+                    move_jobs(store, self._owner, self._conversation_id, old, new)
+                except Exception:
+                    os.replace(target, source)
                     store.forget(self._owner, new)
                     raise
                 self.history_file_path = new

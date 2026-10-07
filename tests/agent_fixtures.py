@@ -16,7 +16,9 @@ def env(tmp_path, monkeypatch):
     env = install(ROOT, tmp_path/'history')
     env.agents.shared.chuanhu_path = str(tmp_path)
     monkeypatch.setattr(env.agents, 'worker_messages', lambda command: (_ for _ in ()).throw(AssertionError('Unmocked worker')))
-    return env
+    yield env
+    # Async file work must finish before monkeypatch restores worker/stdio hooks.
+    settle_files(timeout=8)
 
 def request(name='browser-one', username=None):
     return SimpleNamespace(username=username, session_hash=name)
@@ -43,5 +45,19 @@ def complete(env, monkeypatch, artifacts=False):
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     return calls,file
 
+def settle_files(model=None, timeout=8):
+    import time
+    from modules.agent.file_jobs import FILE_JOBS
+    until=time.monotonic()+timeout
+    while FILE_JOBS.queue.unfinished_tasks and time.monotonic()<until:
+        time.sleep(.01)
+    assert not FILE_JOBS.queue.unfinished_tasks, 'Offline file job did not settle'
+    if model is not None and getattr(model, 'is_hosted_agent', False): model.refresh_files(resume=False)
+
+
 def send(env, model, text='hello', chatbot=None, browser='browser-one', username=None):
-    return list(env.wrappers['predict'](model,text,model.chatbot if chatbot is None else chatbot,request=request(browser,username)))
+    frames = list(env.wrappers['predict'](model,text,model.chatbot if chatbot is None else chatbot,request=request(browser,username)))
+    # Existing completed-file assertions inspect file readiness, independent of
+    # the already completed main queue. Latency tests use the iterator directly.
+    settle_files(model)
+    return frames

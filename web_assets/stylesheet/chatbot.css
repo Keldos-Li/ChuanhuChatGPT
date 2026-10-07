@@ -260,9 +260,9 @@ hr.append-display {
     color: var(--body-text-color); background: #fff;
 }
 #chuanhu-chatbot .model-file-card { cursor: pointer; }
-#chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #f5f5f5; }
+#chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #FAFAFA; }
 .dark #chuanhu-chatbot .agent-file-card { background: var(--message-bot-background-color-dark); }
-.dark #chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #353535; }
+.dark #chuanhu-chatbot .agent-message-files > .model-file-card:hover:not(:disabled) { background: #3A3A3A; }
 #chuanhu-chatbot .agent-message-files > .model-file-card:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 2px; }
 #chuanhu-chatbot .agent-message-files > .model-file-card:disabled { cursor: wait; }
 #chuanhu-chatbot .agent-file-card .agent-file-icon { flex: 0 0 24px; width: 24px; height: 28px; }
@@ -291,7 +291,7 @@ hr.append-display {
     display: flex; flex-direction: column; gap: 0; min-width: 0; flex: 1;
 }
 #chuanhu-chatbot .agent-file-card [data-file-part="name"] {
-    font-size: inherit; font-weight: 600; line-height: 1.4;
+    font-size: inherit; font-weight: 400; line-height: 1.4;
     display: flex;
     white-space: nowrap;
     min-width: 0;
@@ -663,14 +663,15 @@ img.avatar-image {
     display: flex; align-items: center; gap: 10px; position: relative;
     flex: 0 0 220px; min-width: 0; max-width: 100%; padding: 10px 12px;
     box-sizing: border-box; border-radius: 12px;
-    background: var(--background-fill-secondary); color: var(--body-text-color);
+    background: #ECEDEE; color: var(--body-text-color);
     border: 0;
 }
+.dark .agent-file-card--mini { background: var(--background-fill-secondary); }
 .agent-file-card--mini .agent-input-icon {
     display: inline-flex; flex: 0 0 28px; width: 28px; height: 34px;
 }
 .agent-file-card--mini .agent-input-card-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.agent-file-card--mini .agent-input-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.agent-file-card--mini .agent-input-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 400; }
 .agent-file-card--mini .agent-input-meta { color: var(--body-text-color-subdued); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #chatbot-input-tb-row .agent-input-remove-card {
     position: absolute; right: -5px; top: -5px; width: 22px; height: 22px;
@@ -802,3 +803,9 @@ img.avatar-image {
     #chuanhu-chatbot .agent-history-detail[data-layer="group"]::details-content,
     #chuanhu-chatbot .agent-history-detail[data-layer="tool"]::details-content { transition: none; }
 }
+
+/* Native metadata trigger stays mounted for independent file refresh. */
+#agent-file-refresh { display: none !important; }
+
+#chuanhu-chatbot .agent-unassociated-files,
+#chuanhu-chatbot .agent-file-notice { margin-block: 12px; align-self: center; max-width: 300px; }

@@ -50,7 +50,7 @@ def wired_model(env, tmp_path, monkeypatch):
         elif command['action'] == 'run':
             index = len(client.turns) + 1
             turn_id = 't' + str(index)
-            turn_client = TurnClient([turn('created', turn_id), text('done', 'answer', turn_id), turn('completed', turn_id)])
+            turn_client = TurnClient([turn('created', turn_id), text('done', 'answer', turn_id, item='a'+str(index)), turn('completed', turn_id)])
             turn_client.roots = deepcopy(client.turns)
             wire = runtime.format_input_text(command['prompt'], command.get('history_reference'), command.get('input_files'))
             saved_items.extend([message('u'+str(index), wire, turn_id, role='user'),

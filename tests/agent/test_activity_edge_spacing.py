@@ -50,7 +50,7 @@ def test_only_nonempty_body_segments_mark_activity_boundaries(segments,before,af
 
 def test_blank_wrappers_do_not_break_contiguous_activity_and_raw_copy_stays_complete():
     output=render([tool('a'),{'text':'\n '},tool('b')])
-    assert '<div class="md-message">' not in output.replace('<div class="agent-format-receipt hideM" hidden><div class="md-message"></div></div>', '')
+    assert '<div class="md-message">' not in re.sub(r'<div class="agent-format-receipt hideM" hidden>.*?<div class="md-message"></div></div>', '', output, flags=re.S)
     assert re.search(r'</details></div><div class="agent-history-activity">',output)
     assert 'data-body-before' not in output and 'data-body-after' not in output
 

@@ -34,6 +34,16 @@ class AgentInputState:
         self._reserved_inputs = self._consumed_inputs = None
         self._input_statuses = []
 
+    def _remove_input_selection(self, identifiers):
+        """Detach presented IDs, retaining immutable preparation/run snapshots."""
+        with self._lock:
+            if self._input_stager is None or not identifiers: return
+            records = self._input_stager.snapshot()
+            selected = set(identifiers)
+            self._pending_upload_paths = tuple(path for path, record in zip(self._pending_upload_paths, records)
+                                               if record.input_id not in selected)
+            for identifier in selected: self._input_stager.remove(identifier)
+
     def _reset_inputs(self):
         self._clear_input_selection()
         self._release_input_stager()
@@ -45,7 +55,7 @@ class AgentInputState:
     def _release_input_stager(self):
         """仅清理已无人使用的私有副本，后台准备尚未确定结束时保留。"""
         preparation = (self._input_context or {}).get('resume_state') or {}
-        if self._input_preparing or preparation.get('outcome') in ('preparing', 'uncertain'):
+        if self._pending_upload_paths or self._input_preparing or preparation.get('outcome') in ('preparing', 'uncertain'):
             # 仍在当前会话使用的副本不转移所有权；恢复记录确认结束后再清理。
             return
         if self._input_stager is not None:

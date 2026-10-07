@@ -381,7 +381,10 @@ test('ordinary models retain copy, Markdown, regeneration and deletion after Age
     assert.equal(payload.normalCaps.message_copy, true);
     assert.equal(payload.normalCaps.message_markdown, true);
     const f = fixture(); f.refresh(); f.replace(payload.initial, true); f.refresh();
-    const row = f.rows()[0]; await copy(f, row, payload.ordinaryRaw);
+    const row = f.rows()[0];
+    const literal=f.document.createElement('div'); literal.classList.add('raw-message'); literal.textContent='LITERAL_BODY_MUST_NOT_DUPLICATE';
+    f.bubble(row).querySelector('.md-message').append(literal);
+    await copy(f, row, payload.ordinaryRaw);
     button(f, row, 'toggle-md-btn').click(); f.dom.flush();
     assert(f.bubble(row).querySelector('.md-message').classList.contains('hideM'));
     for (const className of ['regenerate-btn', 'delete-latest-btn']) {
@@ -421,12 +424,12 @@ test('copy rejects malformed or mismatched Agent markers and uses the ordinary r
         const anchor = row.querySelector('.agent-message-anchor');
         const data = JSON.parse(Buffer.from(anchor.dataset.agentMessageRaw, 'base64').toString('utf8'));
         corrupt(data); anchor.dataset.agentMessageRaw = Buffer.from(JSON.stringify(data)).toString('base64');
-        await copy(f, row, payload.legacyRaw);
+        await copy(f, row, payload.raw);
     }
     for (const [attribute, value] of [['agentMessageCell', 'user'], ['agentMessageRaw', 'invalid-base64']]) {
         const f = fixture(); f.refresh(); const row = f.rows()[0];
         row.querySelector('.agent-message-anchor').dataset[attribute] = value;
-        await copy(f, row, payload.legacyRaw);
+        await copy(f, row, payload.raw);
     }
 });
 

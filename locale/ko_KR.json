@@ -420,6 +420,9 @@
     },
     "ui": {
         "agent_activity": {
+            "thinking_active": "생각 중",
+            "thinking_completed": "생각 완료",
+            "thinking_neutral": "생각",
             "elapsed_seconds": "{seconds}s",
             "elapsed_minutes_seconds": "{minutes}분 {seconds}초"
         },

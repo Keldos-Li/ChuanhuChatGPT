@@ -65,7 +65,7 @@ class FakeClient:
         self.environment = {'type': 'openai_hosted', 'network': {'access': 'enabled'}}
         sessions = SimpleNamespace(create=self.create, retrieve=self.retrieve, update=self.update,
             events=SimpleNamespace(create=self.send, stream=self.stream),
-            turns=SimpleNamespace(retrieve=lambda identifier, **kw: {'id': identifier, 'status': self.saved_turn},
+            turns=SimpleNamespace(retrieve=lambda identifier, **kw: {'id': identifier, 'session_id': kw.get('session_id', 'sess_test'), 'agent_id': 'agent_one', 'status': self.saved_turn},
                                   list=lambda *a, **kw: self.roots),
             items=SimpleNamespace(list=lambda *a, **kw: self.saved_items),
             artifacts=SimpleNamespace(list=lambda *a, **kw: self.saved_artifacts))
@@ -539,7 +539,7 @@ def test_repeated_uncertain_recovery_preserves_baseline_and_submission_receipt()
 def test_terminal_reconciliation_does_not_request_artifact_listing():
     client = FakeClient(saved_turn='completed')
     client.saved_items = [{'id': 'a', 'type': 'message', 'role': 'assistant', 'turn_id': 't1',
-                           'content': [{'type': 'output_text', 'text': 'final'}]}]
+                           'status': 'completed', 'content': [{'type': 'output_text', 'text': 'final'}]}]
     def forbidden(*args, **kwargs):
         raise AssertionError('File listing must not block terminal text reconciliation')
     client.beta.agents.sessions.artifacts.list = forbidden

@@ -129,23 +129,28 @@ background.context.__chuanhuActivityCleanup();assert.equal(pendingFrames.size,0)
 assert.equal(backgroundList[0].dataset.restoringOpen,undefined,'cleanup clears the current marker and cancels paint');
 console.log('100 background replacements share one frame; detached markers and cleanup references are released');
 
-// Display is floored while fractional millisecond baselines remain precise.
+// Reliable fractions are visible below one second; intervals stay precise.
 const boundary=node(999.75),precise=fixture({nodes:[boundary]});precise.start();
-assert.equal(boundary.textContent,'0s');assert.equal(boundary.writes,0);
+assert.equal(boundary.textContent,'0.9s');assert.equal(boundary.writes,1);
 for(const value of [0,0.1,0.2]){precise.setTime(value);precise.notify();precise.tick();}
-assert.equal(boundary.writes,0,'subsecond DOM mutations never rewrite the same second');
-precise.setTime(0.25);precise.tick();assert.equal(boundary.textContent,'1s');assert.equal(boundary.writes,1);
+assert.equal(boundary.writes,1,'unchanged tenth does not rewrite text');
+precise.setTime(0.25);precise.tick();assert.equal(boundary.textContent,'1s');assert.equal(boundary.writes,2);
 for(const value of [100,500,999]){precise.setTime(value);precise.notify();precise.tick();}
-assert.equal(boundary.writes,1,'elapsed ticks and delta notifications write only when seconds change');
-boundary.dataset.elapsedMs='1999.9';precise.notify();assert.equal(boundary.textContent,'1s');assert.equal(boundary.writes,1,'fresh observation within same second does not rewrite text');
-precise.setTime(999.1);precise.tick();assert.equal(boundary.textContent,'2s');assert.equal(boundary.writes,2);
+assert.equal(boundary.writes,2,'unchanged integer second does not rewrite text');
+boundary.dataset.elapsedMs='1999.9';precise.notify();assert.equal(boundary.textContent,'1s');assert.equal(boundary.writes,2);
+precise.setTime(999.1);precise.tick();assert.equal(boundary.textContent,'2s');assert.equal(boundary.writes,3);
+for(const [base,expected] of [[0,'0.0s'],[10,'<0.1s'],[100,'0.1s'],[999,'0.9s'],[1000,'1s'],[60000,'1m 0s']]){
+ const live=node(base),test=fixture({nodes:[live]});test.start();assert.equal(live.textContent,expected);
+ live.dataset.running='false';test.notify();test.setTime(100000);test.tick();
+ assert.equal(live.textContent,expected);assert.equal(test.intervals.size,0,'terminal value stays frozen');
+}
 for(const base of [0,999,999.75,1000,3456.9]){
  const frozen=node(base,false),stop=fixture({nodes:[frozen]});stop.start();stop.setTime(100000);stop.notify();stop.tick();
- assert.equal(frozen.textContent,Math.floor(base/1000)+'s');assert.equal(frozen.writes,0);assert.equal(stop.intervals.size,0,'terminal/recovered clock never restarts');
+ assert.equal(frozen.textContent,Math.floor(base/1000)+'s');assert.equal(frozen.writes,0);assert.equal(stop.intervals.size,0);
 }
 const missing=node();delete missing.dataset.elapsedMs;missing.textContent='unknown';const unknown=fixture({nodes:[missing]});unknown.start();unknown.setTime(2000);unknown.notify();unknown.tick();
-assert.equal(missing.textContent,'unknown');assert.equal(unknown.intervals.size,0,'missing baseline is not fabricated as zero');
-console.log('Integer seconds: 999.75ms boundary, same-second write suppression, precise delta baseline, terminal/recovered freeze and missing baseline passed');
+assert.equal(missing.textContent,'unknown');assert.equal(unknown.intervals.size,0);
+console.log('Subsecond floors, true zero, reliable interval precision, terminal freeze and unknown baseline passed');
 
 // Only the outer group owns the readout, including localized minute rollover.
 const minute=node(59999.75),minutes=fixture({nodes:[minute]});

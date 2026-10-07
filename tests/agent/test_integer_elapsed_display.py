@@ -19,7 +19,7 @@ def observation(elapsed, running=False):
         ended_ms=None if running else elapsed, sampled_ms=elapsed))}
 
 
-@pytest.mark.parametrize('elapsed,expected',[(0,'0s'),(.1,'0s'),(999,'0s'),(999.75,'0s'),(1000,'1s'),(1000.1,'1s'),(1999.9,'1s'),(2000,'2s'),(59999.9,'59s'),(60000,'1分0秒'),(67999.9,'1分7秒')])
+@pytest.mark.parametrize('elapsed,expected',[(0,'0.0s'),(.1,'&lt;0.1s'),(10,'&lt;0.1s'),(100,'0.1s'),(999,'0.9s'),(999.75,'0.9s'),(1000,'1s'),(1000.1,'1s'),(1999.9,'1s'),(2000,'2s'),(59999.9,'59s'),(60000,'1分0秒'),(67999.9,'1分7秒')])
 def test_group_floors_seconds_keeps_precision_and_child_has_no_timer(elapsed,expected):
     previous=i18n.language
     i18n.change_language('zh_CN')
@@ -42,7 +42,7 @@ def test_group_omits_unreliable_values_instead_of_inventing_zero(elapsed):
 def test_terminal_group_freezes_while_child_remains_without_timer(phase):
     clock=observation(999.75);clock['cmd']['phase']=phase
     markup=_tool_group(group(),scope='scope',conversation='chat',clock=clock,active=True)
-    assert '>0s</span>' in markup and 'data-running="false"' in markup and 'data-elapsed-ms="999.75"' in markup
+    assert '>0.9s</span>' in markup and 'data-running="false"' in markup and 'data-elapsed-ms="999.75"' in markup
 
 
 def test_native_duration_is_preserved_but_cannot_substitute_for_group_interval():
@@ -56,5 +56,5 @@ def test_live_group_uses_sender_interval_without_cross_process_monotonic_arithme
     clock=observation(999.75,running=True)
     clock['cmd']['sampled_at']=10**18
     markup=_tool_group(group(),scope='scope',conversation='chat',clock=clock,active=True)
-    assert 'data-running="true"' in markup and '>0s</span>' in markup
+    assert 'data-running="true"' in markup and '>0.9s</span>' in markup
     assert 'agent-activity-elapsed' not in _tool_group(group(),scope='scope',conversation='chat',clock=clock,active=False)

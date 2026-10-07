@@ -24,6 +24,90 @@ except ImportError:
 
 TERMINAL = {'completed', 'failed', 'cancelled'}
 
+# SDK 3.22 uses distinct item-status contracts; root turn statuses are not item statuses.
+TOOL_ITEMS = frozenset({'function_call', 'function_call_output', 'mcp_call', 'computer_use_call',
+    'command_execution', 'create_subagent_call', 'send_subagent_input_call', 'resume_subagent_call',
+    'wait_for_subagents_call', 'interrupt_subagent_call', 'close_subagent_call'})
+STATELESS_ITEMS = frozenset({'agent_message', 'computer_use_approval_request', 'computer_use_approval_request_result'})
+INPUT_ITEMS = frozenset({'function_call_output', 'agent_message', 'computer_use_approval_request_result'})
+PART_LIMITS = {'content': 10000, 'summary': 100}
+MAX_OBSERVED_PARTS = 10000
+TURN_EVENTS = frozenset('agent.session.turn.' + kind for kind in (
+    'created', 'in_progress', 'completed', 'failed', 'cancelled', 'item.added', 'item.done', 'item.updated',
+    'content_part.added', 'content_part.done', 'output_text.delta', 'output_text.done',
+    'reasoning_summary_part.added', 'reasoning_summary_part.done', 'reasoning_summary_text.delta', 'reasoning_summary_text.done'))
+
+SEGMENT_EVENTS = frozenset(kind for kind in TURN_EVENTS if any(part in kind for part in ('content_part.', 'output_text.', 'reasoning_summary_')))
+
+def _output_item(item):
+    return item.get('role') != 'user' and item.get('type') not in INPUT_ITEMS
+
+
+def _item_payload_complete(item):
+    group = 'content' if item.get('type') == 'message' else 'summary' if item.get('type') == 'reasoning' else None
+    if group is None: return True
+    parts = item.get(group)
+    if not isinstance(parts, list): return False
+    kinds = {'summary_text'} if group == 'summary' else {'input_text', 'text', 'input_image'} if item.get('role') == 'user' else {'output_text', 'text'}
+    return all(isinstance(part, dict) and part.get('type') in kinds
+               and (part.get('type') == 'input_image' or isinstance(part.get('text'), str)) for part in parts)
+
+
+def _item_settled(item, outcome):
+    kind, status = item.get('type'), item.get('status')
+    if not _item_payload_complete(item): return False
+    if kind == 'message' and item.get('role') not in {'user', 'assistant'}: return False
+    if item.get('role') == 'user': return kind == 'message' and status == 'completed'
+    if kind in STATELESS_ITEMS: return status is None
+    if kind == 'reasoning' and status is None: return True  # Explicitly optional in AgentReasoningItem.
+    if kind not in TOOL_ITEMS and kind not in {'message', 'reasoning', 'web_search_call'}: return False
+    return (status == 'completed' or kind in TOOL_ITEMS and status == 'failed'
+            or outcome in {'failed', 'cancelled'} and status == 'incomplete')
+
+
+def _terminal_snapshot_ready(items, turn_id, outcome):
+    if outcome not in TERMINAL: return True
+    if not turn_id: return outcome in {'failed', 'cancelled'} and not items
+    if any(not isinstance(item.get('turn_id'), str) or not item['turn_id'] for item in items): return False
+    current = [item for item in items if item.get('turn_id') == turn_id]
+    return (bool([item for item in current if _output_item(item)]) or outcome in {'failed', 'cancelled'}) and all(
+        _item_settled(item, outcome) and (item.get('role') == 'user' and item.get('id') is None or isinstance(item.get('id'), str) and bool(item['id'])) for item in current)
+
+
+
+def _preview_item(previous, incoming):
+    """Retain known public parts; this union is display data, never a seal."""
+    if not previous: return deepcopy(incoming)
+    if any(previous.get(key) is not None and previous[key] != incoming.get(key)
+           for key in ('id', 'type', 'role', 'turn_id')):
+        return deepcopy(previous)
+    result = deepcopy(incoming)
+    groups = ('summary',) if previous.get('type') == 'reasoning' else ('content',) if previous.get('type') in {'message', 'agent_message'} else ()
+    for group in groups:
+        before, after = previous.get(group), result.get(group)
+        if not isinstance(before, list): continue
+        if not isinstance(after, list):
+            result[group] = deepcopy(before)
+            continue
+        for index, part in enumerate(before):
+            if index >= len(after): after.append(deepcopy(part))
+            elif isinstance(part, dict) and isinstance(part.get('type'), str) and (not isinstance(after[index], dict)
+                    or part.get('type') != after[index].get('type')
+                    or isinstance(part.get('text'), str) and not isinstance(after[index].get('text'), str)):
+                after[index] = deepcopy(part)
+    return result
+
+
+def _observation_item(item):
+    # Only provider identity/status and public message/summary data travel in
+    # the private receipt. Opaque reasoning and tool arguments are not copied.
+    keys = ('id', 'type', 'role', 'turn_id', 'status')
+    result = {key: deepcopy(item[key]) for key in keys if key in item}
+    group = 'summary' if item.get('type') == 'reasoning' else 'content' if item.get('type') in {'message', 'agent_message'} else None
+    if group and isinstance(item.get(group), list):
+        result[group] = [{key: deepcopy(part[key]) for key in ('type', 'text') if key in part} if isinstance(part, dict) else deepcopy(part) for part in item[group]]
+    return result
+
 
 class AgentError(RuntimeError):
     def __init__(self, message, state=None, diagnostics=None):
@@ -76,6 +160,214 @@ class TurnState:
     activity: ActivityClock = field(default_factory=ActivityClock)
     summary_parts: dict = field(default_factory=dict)
     output_order: dict = field(default_factory=dict)
+    root_started: bool = False
+    terminal_verified: bool = False
+    stream_gap: bool = False
+    root_identity: tuple | None = None
+    root_identity_conflict: bool = False
+    observed_parts: dict = field(default_factory=dict)
+    invalid_final_items: set = field(default_factory=set)
+    position_conflicts: set = field(default_factory=set)
+    limited_items: set = field(default_factory=set)
+    unverifiable_stream: bool = False
+    observed_part_count: int = 0
+    prior_observations: dict = field(default_factory=dict)
+
+    def observation_snapshot(self):
+        """Private, versioned receipts survive worker replacement and history load."""
+        records = deepcopy(self.prior_observations)
+        if self.turn_id:
+            records[self.turn_id] = {
+                'turn_id': self.turn_id, 'root_identity': list(self.root_identity) if self.root_identity else None,
+                'items': [_observation_item(item) for item in self.items.values()
+                          if item.get('turn_id') == self.turn_id and isinstance(item.get('id'), str) and item['id']],
+                'parts': [{'item_id': key, 'shapes': [[group, index, kind, text] for (group, index), (kind, text) in shapes.items()]}
+                          for key, shapes in self.observed_parts.items() if isinstance(key, str)],
+                'unverifiable': self.unverifiable_stream, 'outcome': self.outcome,
+                'resolved': self.turn_complete or self.sync_complete is True, 'terminal_required': True,
+            }
+        return {'version': 1, 'session_id': self.session_id, 'turns': list(records.values())}
+
+    def restore_observation(self, receipt):
+        if receipt is None: return
+        if (not isinstance(receipt, dict) or receipt.get('version') != 1
+                or receipt.get('session_id') != self.session_id or not isinstance(receipt.get('turns'), list)):
+            raise AgentError('原任务观察记录无法核验，已有历史已保留；请重新连接', self)
+        records = {}
+        for record in receipt['turns']:
+            if (not isinstance(record, dict) or not isinstance(record.get('turn_id'), str) or not record['turn_id']
+                    or not isinstance(record.get('items'), list) or not isinstance(record.get('parts'), list)):
+                raise AgentError('原任务观察记录不完整，已有历史已保留', self)
+            identifier = record['turn_id']
+            identity = record.get('root_identity')
+            if identity is not None and (not isinstance(identity, list) or len(identity) != 3
+                    or identity[:2] != [self.session_id, identifier] or not all(isinstance(value, str) and value for value in identity)):
+                raise AgentError('原任务根身份记录冲突，已有历史已保留', self)
+            for item in record['items']:
+                if (not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']
+                        or item.get('turn_id') != identifier):
+                    raise AgentError('原任务消息归属记录冲突，已有历史已保留', self)
+            for part in record['parts']:
+                if not isinstance(part, dict) or not isinstance(part.get('item_id'), str) or not isinstance(part.get('shapes'), list):
+                    raise AgentError('原任务分段记录不完整，已有历史已保留', self)
+                for shape in part['shapes']:
+                    if (not isinstance(shape, list) or len(shape) != 4 or shape[0] not in PART_LIMITS
+                            or type(shape[1]) is not int or shape[1] < 0 or shape[2] is not None and not isinstance(shape[2], str) or type(shape[3]) is not bool):
+                        raise AgentError('原任务分段记录无法核验，已有历史已保留', self)
+            if (identifier in records or type(record.get('unverifiable', False)) is not bool
+                    or type(record.get('terminal_required', True)) is not bool):
+                raise AgentError('原任务观察记录存在冲突，已有历史已保留', self)
+            records[identifier] = deepcopy(record)
+        self.prior_observations = records
+        current = records.get(self.turn_id)
+        if current:
+            self.root_identity = tuple(current['root_identity']) if current['root_identity'] else None
+            self.items = _snapshot_items(current['items'])
+            self.observed_parts = {part['item_id']: {(group, index): (kind, text) for group, index, kind, text in part['shapes']} for part in current['parts']}
+            self.observed_part_count = sum(map(len, self.observed_parts.values()))
+            self.unverifiable_stream = current.get('unverifiable') is True
+            self.stream_gap = True
+
+    @property
+    def turn_complete(self):
+        """A complete observed turn is an incremental receipt, never a session snapshot."""
+        current = [(key, item) for key, item in self.items.items() if item.get("turn_id") == self.turn_id]
+        output = [(key, item) for key, item in current if _output_item(item)]
+        indices = [self.output_order.get(key) for key, _ in output]
+        return bool(self.root_started and self.terminal_verified and not self.stream_gap
+                    and not self.snapshot_partial_ids and output
+                    and all(key in self.final_items for key, item in current)
+                    and _terminal_snapshot_ready(list(self.items.values()), self.turn_id, self.outcome)
+                    and all(type(index) is int for index in indices)
+                    and sorted(indices) == list(range(len(indices))))
+
+    @staticmethod
+    def _part_groups(item):
+        # Reasoning.content is opaque private data, never a public content array.
+        return ('summary',) if item.get('type') == 'reasoning' else ('content',) if item.get('type') in {'message', 'agent_message'} else ()
+
+    @classmethod
+    def _part_shapes(cls, item):
+        return {(group, index): (part.get('type'), 'text' in part)
+                for group in cls._part_groups(item)
+                for index, part in enumerate(item.get(group, []) or []) if isinstance(part, dict) and isinstance(part.get('type'), str)}
+
+    @staticmethod
+    def _covers_shapes(item, shapes):
+        for (group, index), (kind, text) in shapes.items():
+            parts = item.get(group)
+            if (not isinstance(parts, list) or index >= len(parts) or not isinstance(parts[index], dict)
+                    or kind is not None and parts[index].get('type') != kind
+                    or text and not isinstance(parts[index].get('text'), str)):
+                return False
+        return True
+
+    def _invalidate(self, identifier, *, unknown=False):
+        self.stream_gap = True
+        self.final_items.discard(identifier)
+        self.invalid_final_items.add(identifier)
+        self.unverifiable_stream |= unknown
+
+    def _observe_output_index(self, identifier, index, *, required=False):
+        if index is None and not required: return
+        if type(index) is not int or index < 0:
+            self._invalidate(identifier, unknown=True)
+            return
+        if identifier in self.output_order and self.output_order[identifier] != index:
+            self.position_conflicts.add(identifier)
+            self._invalidate(identifier)
+        self.output_order.setdefault(identifier, index)
+
+    def _observe_piece(self, identifier, group, index, kind, text=True):
+        if not isinstance(identifier, (str, tuple)) or type(index) is not int or index < 0 or not isinstance(kind, str):
+            self._invalidate(identifier, unknown=True)
+            return False
+        shapes = self.observed_parts.setdefault(identifier, {})
+        key = (group, index)
+        if key not in shapes and self.observed_part_count >= MAX_OBSERVED_PARTS:
+            self._invalidate(identifier, unknown=True)
+            return False
+        previous = shapes.get(key)
+        if key not in shapes: self.observed_part_count += 1
+        if previous and previous[0] is not None and previous[0] != kind:
+            self._invalidate(identifier)
+            shapes[key] = (previous[0], text or previous[1])
+            return False
+        shapes[key] = (kind, text or bool(previous and previous[1]))
+        supported = index < PART_LIMITS[group]
+        if not supported:
+            self.limited_items.add(identifier)
+            self._invalidate(identifier)
+        if identifier in self.final_items and not self._covers_shapes(self.items[identifier], shapes):
+            self._invalidate(identifier)
+        return supported
+
+    def _observe_parts(self, identifier, item):
+        self.observed_parts.setdefault(identifier, {})
+        for group in self._part_groups(item):
+            if group not in item: continue
+            parts = item[group]
+            if not isinstance(parts, list):
+                self._invalidate(identifier, unknown=True)
+                continue
+            for index, part in enumerate(parts):
+                if not isinstance(part, dict) or not isinstance(part.get('type'), str):
+                    self._invalidate(identifier, unknown=True)
+                    continue
+                self._observe_piece(identifier, group, index, part['type'], 'text' in part)
+
+    def _observe_segment_event(self, event):
+        # Shared by live events and snapshot-overlap events which cannot append deltas twice.
+        identifier, kind = event.get('item_id'), event.get('type', '')
+        was_final = identifier in self.final_items
+        if event.get('session_id') not in (None, self.session_id): return False
+        turn = event.get('turn_id') or self.items.get(identifier, {}).get('turn_id')
+        if turn != self.turn_id: return False
+        self._observe_output_index(identifier, event.get('output_index'), required=True)
+        group = 'summary' if 'reasoning_summary_' in kind else 'content'
+        existing = self.items.get(identifier)
+        if existing is not None and (existing.get('type') != ('reasoning' if group == 'summary' else 'message')
+                or group == 'content' and existing.get('role') != 'assistant'):
+            self._invalidate(identifier, unknown=True)
+            return False
+        index = event.get('summary_index' if group == 'summary' else 'content_index')
+        part = event.get('part')
+        expected = 'summary_text' if group == 'summary' else 'output_text'
+        if '_part.' in kind:
+            if not isinstance(part, dict) or part.get('type') != expected or not isinstance(part.get('text'), str):
+                self._invalidate(identifier, unknown=True)
+                return False
+        elif not isinstance(event.get('delta' if kind.endswith('.delta') else 'text'), str):
+            self._invalidate(identifier, unknown=True)
+            return False
+        supported = self._observe_piece(identifier, group, index, expected)
+        parts = self.items.get(identifier, {}).get(group, [])
+        if was_final and supported and index < len(parts):
+            # A post-done delta has no offset: it may add new text or repeat a
+            # buffered prefix. Retain the sealed preview and require GET.
+            value = event.get('delta') if kind.endswith('.delta') else part.get('text') if isinstance(part, dict) else event.get('text')
+            if (kind.endswith('.delta') and value or not kind.endswith('.delta') and value != parts[index].get('text')):
+                self._invalidate(identifier)
+                return False
+        return supported
+
+    def _valid_final(self, identifier, item):
+        previous = self.items.get(identifier, {})
+        return (identifier not in self.invalid_final_items and identifier not in self.position_conflicts
+                and identifier not in self.limited_items and _item_payload_complete(item)
+                and item.get('turn_id') == self.turn_id
+                and all(previous.get(key) is None or previous[key] == item.get(key) for key in ('type', 'role'))
+                and self._covers_shapes(item, self.observed_parts.get(identifier, {})))
+
+    def _root_event_identity(self, event, turn):
+        identity = (event.get('session_id'), event.get('turn_id'), turn.get('agent_id'))
+        valid = (all(isinstance(value, str) and value for value in identity)
+                 and turn.get('id') == identity[1] and turn.get('session_id') == identity[0]
+                 and identity[:2] == (self.session_id, self.turn_id))
+        if not valid or self.root_identity is not None and identity != self.root_identity:
+            self.stream_gap = self.root_identity_conflict = True
+            return None
+        return identity
 
     @property
     def text(self):
@@ -100,6 +392,7 @@ class TurnState:
                 'submission_started': self.submission_started, 'items': ordered,
                 'required_actions': deepcopy(self.required_actions), 'settings': deepcopy(self.settings),
                 'sync_complete': self.sync_complete, 'history_authoritative': self.history_authoritative,
+                'turn_complete': self.turn_complete, 'observation': self.observation_snapshot(),
                 'turns': deepcopy(self.turns), 'transcript_artifacts': deepcopy(self.transcript_artifacts),
                 'capture': dict(self.capture, items='complete' if self.sync_complete is True else 'partial'),
                 'activity': self.activity.snapshot(),
@@ -110,7 +403,11 @@ class TurnState:
         kind = event.get('type', '')
         session_id = event.get('session_id') or (event.get('session') or {}).get('id')
         if session_id:
-            if self.session_id and session_id != self.session_id: return
+            if self.session_id and session_id != self.session_id:
+                turn = event.get('turn') or {}
+                if turn.get('subagent_id') is None and self.turn_id and (event.get('turn_id') == self.turn_id or turn.get('id') == self.turn_id):
+                    self.stream_gap = self.root_identity_conflict = True
+                return
             self.session_id = session_id
         event_id = event.get('event_id')
         if event_id:
@@ -126,37 +423,83 @@ class TurnState:
         turn_id = (event.get('turn_id') or turn.get('id') or (event.get('item') or {}).get('turn_id')
                    or self.items.get(event.get('item_id'), {}).get('turn_id'))
         if turn_id in self.ignored_turn_ids: return
-        if kind in ('agent.session.turn.created', 'agent.session.turn.in_progress') and self.turn_id is None:
+        if kind in ('agent.session.turn.created', 'agent.session.turn.in_progress') and (self.turn_id is None or self.turn_id == turn_id):
             self.turn_id = turn_id
+            identity = self._root_event_identity(event, turn)
+            if identity is not None:
+                self.root_identity = identity
+                self.root_started = True
             self.outcome = 'in_progress'
         if kind in ('error', 'agent.session.failed', 'agent.session.environment.failed'):
             self.outcome = 'failed'
             raise AgentError('云端会话或执行环境失败，已保留现有结果；请重新连接查看详情', self)
         if turn_id and self.turn_id and turn_id != self.turn_id: return
+        if turn and turn_id == self.turn_id and self.root_identity is not None:
+            self._root_event_identity(event, turn)
         self.progress = kind
         self.sync_complete = None  # This event is not a new history reconciliation.
+        if kind.startswith('agent.session.turn.') and kind not in TURN_EVENTS:
+            self._invalidate(event.get('item_id'), unknown=True)
         if kind in ('agent.session.turn.item.added', 'agent.session.turn.item.done', 'agent.session.turn.item.updated'):
             item = event.get('item')
-            if isinstance(item, dict) and isinstance(item.get('id'), str):
-                if item['id'] not in self.final_items:
-                    item = deepcopy(item)
-                    if turn_id and not item.get('turn_id'): item['turn_id'] = turn_id
-                    if item.get('role')!='user' and type(event.get('output_index')) is int and event['output_index'] >= 0:
-                        self.output_order.setdefault(item['id'],event['output_index'])
-                        item['output_index']=self.output_order[item['id']]
-                    if item['id'] in self.output_order:item['output_index']=self.output_order[item['id']]
-                    if kind.endswith('.done') and item.get('status') is None:item['status']='completed'
-                    self.items[item['id']] = item
-                    self.activity.observe(item,first=kind.endswith('.added'))
-                    if item.get('type')=='function_call_output' and item.get('call_id'):
-                        calls=[call for call in self.items.values() if call.get('type')=='function_call' and call.get('turn_id')==turn_id and call.get('call_id')==item['call_id']]
-                        if len(calls)==1:self.activity.observe(calls[0],phase='failed' if item.get('error') else 'completed')
-                    if kind.endswith('.done'): self.final_items.add(item['id'])
+            if not isinstance(item, dict):
+                self._invalidate(None, unknown=True)
+                return
+            item = deepcopy(item)
+            identifier = item.get('id')
+            if identifier is None and item.get('role') == 'user' and isinstance(event_id, str):
+                identifier = ('event', event_id)
+                self.occurrence_ids[identifier] = 'event-' + event_id
+            if not isinstance(identifier, (str, tuple)):
+                self._invalidate(None, unknown=True)
+                return
+            if item.get('turn_id') and turn_id and item['turn_id'] != turn_id:
+                self._invalidate(identifier)
+                return
+            if turn_id and not item.get('turn_id'): item['turn_id'] = turn_id
+            previous = self.items.get(identifier, {})
+            was_final = identifier in self.final_items
+            # Observe all facts before a sealed item can take an idempotence shortcut.
+            if any(previous.get(key) is not None and previous[key] != item.get(key) for key in ('type', 'role')):
+                self._invalidate(identifier)
+            if _output_item(item): self._observe_output_index(identifier, event.get('output_index'))
+            self._observe_parts(identifier, item)
+            if identifier in self.output_order: item['output_index'] = self.output_order[identifier]
+            if was_final and not kind.endswith('.done') and not _item_settled(item, 'cancelled'):
+                self._invalidate(identifier)
+            covers = self._covers_shapes(item, self.observed_parts.get(identifier, {}))
+            if not covers: self._invalidate(identifier)
+            if kind.endswith('.done') and not self._valid_final(identifier, item):
+                self._invalidate(identifier)
+                self.items[identifier] = _preview_item(previous, item)
+                return
+            if was_final and identifier in self.final_items and not kind.endswith('.done'):
+                if item == previous: return
+                self._invalidate(identifier)
+            self.items[identifier] = _preview_item(previous, item)
+            phase = 'completed' if kind.endswith('.done') and item.get('type') == 'reasoning' and item.get('status') is None else None
+            self.activity.observe(item, first=kind.endswith('.added'), phase=phase)
+            if item.get('type') == 'function_call_output' and item.get('call_id'):
+                calls = [call for call in self.items.values() if call.get('type') == 'function_call' and call.get('turn_id') == turn_id and call.get('call_id') == item['call_id']]
+                if len(calls) == 1: self.activity.observe(calls[0], phase='failed' if item.get('error') else 'completed')
+            if (kind.endswith('.done') and _item_settled(item, 'cancelled')
+                    or item.get('role') == 'user' and _item_settled(item, 'completed')):
+                self.final_items.add(identifier)
         if not turn_id or turn_id != self.turn_id: return
+        if kind in SEGMENT_EVENTS and not self._observe_segment_event(event): return
+        if kind in ('agent.session.turn.content_part.added', 'agent.session.turn.content_part.done'):
+            identifier, index, part = event.get('item_id'), event.get('content_index'), event.get('part')
+            if isinstance(identifier, str) and type(index) is int and index >= 0 and isinstance(part, dict):
+                if identifier not in self.final_items:
+                    record = self.items.setdefault(identifier, {'id': identifier, 'type': 'message', 'role': 'assistant', 'turn_id': turn_id, 'status': 'in_progress', 'content': []})
+                    content = record.setdefault('content', [])
+                    while len(content) <= index: content.append({'type': 'output_text', 'text': ''})
+                    content[index] = deepcopy(part)
+                    if isinstance(part.get('text'), str): self.parts[(identifier, event.get('output_index'), index)] = part['text']
         if kind in ('agent.session.turn.output_text.delta', 'agent.session.turn.output_text.done'):
             item = event.get('item_id')
             output_index, content_index = event.get('output_index'), event.get('content_index')
-            if not isinstance(item, str) or type(output_index) is not int or type(content_index) is not int: return
+            if not isinstance(item, str) or type(output_index) is not int or type(content_index) is not int or content_index < 0: return
             if item in self.final_items: return
             part = (item, output_index, content_index)
             item_record = self.items.get(item)
@@ -192,6 +535,10 @@ class TurnState:
                 record['output']=str(record.get('output') or '')+event.get('delta','')
         if kind in ('agent.session.turn.completed', 'agent.session.turn.failed', 'agent.session.turn.cancelled'):
             self.outcome = kind.rsplit('.', 1)[-1]
+            identity = self._root_event_identity(event, turn)
+            self.terminal_verified = bool(isinstance(event_id, str) and event_id and identity is not None
+                and self.root_identity is not None and identity == self.root_identity
+                and turn.get('status') == self.outcome)
             self.activity.finish_turn(self.turn_id,self.outcome)
             self.required_actions = []
 
@@ -331,10 +678,15 @@ def inspect_saved(client, session_id, turn_id=None, baseline_turn_ids=None, subm
         if session.get('status') == 'failed': outcome = 'failed'
         cards = pending_action_cards(session, turn_id)
         if cards and outcome not in TERMINAL: outcome = 'requires_action'
+        identity_ok = (session.get('id') == session_id and (turn is None or
+            turn.get('id') == turn_id and turn.get('session_id') == session_id
+            and isinstance(turn.get('agent_id'), str) and bool(turn['agent_id'])))
+        session_settled = outcome not in TERMINAL or session.get('status') in {'idle', 'failed'}
+        ready = identity_ok and session_settled and _terminal_snapshot_ready(list(unique.values()), turn_id, outcome)
         return {'session_id': session_id, 'session_status': session.get('status'), 'turn_id': turn_id,
                 'outcome': outcome, 'text': '\n'.join(message_text(item) for item in unique.values() if item.get('type') == 'message' and item.get('role') == 'assistant' and item.get('turn_id') == turn_id),
                 'items': list(unique.values()), 'artifacts': artifacts, 'artifact_error': artifact_error, 'required_actions': cards,
-                'settings': _public_settings(session), 'sync_complete': True,
+                'settings': _public_settings(session), 'sync_complete': ready, 'read_identity_verified': identity_ok,
                 'turns': [turn] if turn else [],
                 'capture': {'items': 'complete', 'turns': 'partial' if turn else 'not_collected',
                             'artifacts': 'complete' if include_artifacts and not artifact_error else 'partial' if artifact_error else 'not_collected'}}
@@ -376,10 +728,13 @@ def _seed(state, saved):
     state.turns = deepcopy(saved.get('turns', []))
     state.transcript_artifacts = deepcopy(saved.get('artifacts', []))
     state.capture = deepcopy(saved.get('capture', {}))
-    state.final_items = {key for key, item in state.items.items() if item.get('status') in TERMINAL}
+    state.final_items = {key for key, item in state.items.items() if _item_settled(item, state.outcome)}
+    state.output_order = {key: index for key, index in state.output_order.items() if key not in state.position_conflicts}
     state.required_actions, state.settings = saved['required_actions'], saved['settings']
-    state.sync_complete = True
+    state.sync_complete = bool(saved.get('sync_complete', True) and _terminal_snapshot_ready(saved['items'], state.turn_id, state.outcome))
     state.history_authoritative = True
+    # GET status is not a live item.done/root-terminal receipt.
+    state.root_started = state.terminal_verified = False
 
 
 def _process_events(client, events, state, settings, on_progress, *, read_only=False):
@@ -392,10 +747,12 @@ def _process_events(client, events, state, settings, on_progress, *, read_only=F
             # snapshot cannot safely be appended again (or suffix-deduplicated).
             # Refresh these pre-existing incomplete items from saved state;
             # coalesce reads while their complete .done event is still pending.
+            if kind != 'agent.output.command_execution_output.delta': state._observe_segment_event(event)
             if time.monotonic() - state.last_partial_refresh >= 0.25:
                 latest = all_records(client.beta.agents.sessions.items.list(state.session_id, limit=100, order='asc'))
                 for item in latest:
                     if item.get('id') in state.snapshot_partial_ids and item.get('id') not in state.final_items:
+                        state._observe_parts(item['id'], item)
                         state.items[item['id']] = deepcopy(item)
                 state.last_partial_refresh = time.monotonic()
             state.sync_complete = None
@@ -423,22 +780,166 @@ def _process_events(client, events, state, settings, on_progress, *, read_only=F
     raise AgentError('连接已中断，云端任务状态尚待确认；已保留结果，请重新连接，不要重复发送', state)
 
 
+def _remember_observation(client, state):
+    # Client-local continuity also covers callers reconciling/recovering within
+    # one runtime. New workers use the explicit durable command receipt.
+    client._chuanhu_observation = state.observation_snapshot()
+
+
+def _refresh_saved_observations(state, records, provider, roots, current):
+    """Capture every accepted provider fact in its original turn's receipt.
+
+    Receipts retain minimum coverage and the latest valid public preview. They
+    are never used as provider data when proving this GET complete.
+    """
+    records = {record['turn_id']: deepcopy(record) for record in records}
+    owners = {item['id']: turn for turn, record in records.items() for item in record['items']}
+    for turn_id in dict.fromkeys([current, *(item.get('turn_id') for item in provider.values())]):
+        if not isinstance(turn_id, str) or not turn_id: continue
+        record = records.get(turn_id)
+        root = roots.get(turn_id)
+        observer = TurnState(session_id=state.session_id, turn_id=turn_id)
+        if record:
+            observer.restore_observation({'version': 1, 'session_id': state.session_id, 'turns': [record]})
+        if observer.root_identity is None and root:
+            observer.root_identity = (root['session_id'], root['id'], root['agent_id'])
+        observer.outcome = root.get('status') if root else record.get('outcome', 'incomplete') if record else 'incomplete'
+        for identifier, item in provider.items():
+            if (not isinstance(identifier, str) or not identifier or item.get('turn_id') != turn_id
+                    or identifier in owners and owners[identifier] != turn_id): continue
+            previous = observer.items.get(identifier, {})
+            if any(previous.get(key) is not None and previous[key] != item.get(key)
+                   for key in ('type', 'role', 'turn_id')): continue
+            # Malformed or conflicting parts do not establish new constraints.
+            # Accept valid public pieces of a partial GET without erasing known
+            # tails, and allow canonical text rewrites at compatible positions.
+            public = _observation_item(item)
+            for group in observer._part_groups(item):
+                allowed = {'summary_text'} if group == 'summary' else {'input_text', 'text', 'input_image'} if item.get('role') == 'user' else {'output_text', 'text'}
+                parts = item.get(group)
+                if not isinstance(parts, list):
+                    public.pop(group, None)
+                    continue
+                accepted = []
+                for index, part in enumerate(parts):
+                    shape = observer.observed_parts.get(identifier, {}).get((group, index))
+                    valid = (isinstance(part, dict) and part.get('type') in allowed
+                             and (part.get('type') == 'input_image' or isinstance(part.get('text'), str))
+                             and (not shape or shape[0] is None or shape[0] == part['type']))
+                    accepted.append(deepcopy(public[group][index]) if valid else {})
+                    if valid: observer._observe_piece(identifier, group, index, part['type'], 'text' in part)
+                public[group] = accepted
+            observer.items[identifier] = _preview_item(previous, public)
+            owners[identifier] = turn_id
+        refreshed = observer.observation_snapshot()['turns'][-1]
+        # Previously managed turns retain their typed terminal obligation. A
+        # newly discovered historical GET item is captured for continuity, but
+        # its pending status does not gate an unrelated completed current turn.
+        refreshed['terminal_required'] = record.get('terminal_required', True) if record else turn_id == current or observer.outcome not in TERMINAL
+        refreshed['resolved'] = bool(record and record.get('resolved') or observer.outcome in TERMINAL)
+        records[turn_id] = refreshed
+    return list(records.values())
+
+
+def _apply_saved(client, state, saved, *, terminal=False):
+    records = state.observation_snapshot()['turns']
+    raw = _snapshot_items(saved['items'])
+    roots = {root.get('id'): root for root in saved.get('turns', [])}
+    identity_ok = saved.get('read_identity_verified') is True
+    if terminal and (saved['turn_id'] != state.turn_id or saved['outcome'] != state.outcome): identity_ok = False
+    known_turns = {record['turn_id'] for record in records}
+    for record in records:
+        identity = record['root_identity']
+        root = roots.get(record['turn_id'])
+        if root is None and (record['turn_id'] == saved['turn_id'] or not record.get('resolved') or not identity):
+            try:
+                root = as_dict(client.beta.agents.sessions.turns.retrieve(record['turn_id'], session_id=state.session_id))
+                roots[record['turn_id']] = root
+            except Exception: identity_ok = False
+        if root is not None and (root.get('session_id') != state.session_id or root.get('id') != record['turn_id']
+                or not isinstance(root.get('agent_id'), str) or not root['agent_id']):
+            identity_ok = False
+        if identity and root is not None and [root.get('session_id'), root.get('id'), root.get('agent_id')] != identity:
+            identity_ok = False
+        elif root is None and not record.get('resolved'): identity_ok = False
+    # Anchor new historical turns to provider roots before retaining their facts.
+    for turn_id in dict.fromkeys(item.get('turn_id') for item in raw.values()):
+        if not isinstance(turn_id, str) or not turn_id or turn_id in known_turns: continue
+        try:
+            root = roots.get(turn_id)
+            if root is None: root = as_dict(client.beta.agents.sessions.turns.retrieve(turn_id, session_id=state.session_id))
+            if (root.get('session_id') != state.session_id or root.get('id') != turn_id
+                    or not isinstance(root.get('agent_id'), str) or not root['agent_id']): identity_ok = False
+            else: roots[turn_id] = root
+        except Exception: identity_ok = False
+    provider = deepcopy(raw)
+    # Only freshly verified stream finals can supersede a lagging GET. Restored
+    # display receipts deliberately restore no final_items or output positions.
+    if terminal and identity_ok:
+        for identifier, item in state.items.items():
+            previous = provider.get(identifier)
+            if (isinstance(identifier, str) and identifier in state.final_items
+                    and not state.root_identity_conflict and state._valid_final(identifier, item)
+                    and (previous is None or all(previous.get(key) == item.get(key) for key in ('type', 'role', 'turn_id'))
+                         and state._covers_shapes(item, state._part_shapes(previous)))):
+                provider[identifier] = deepcopy(item)
+    if identity_ok:
+        records = _refresh_saved_observations(state, records, provider, roots, saved['turn_id'])
+    merged = deepcopy(provider)
+    proof = identity_ok
+    for record in records:
+        proof &= not record.get('unverifiable', False)
+        root = roots.get(record['turn_id'])
+        outcome = root.get('status') if root else record.get('outcome')
+        if outcome in TERMINAL:
+            if record.get('terminal_required', True) or record['turn_id'] == saved['turn_id']:
+                proof &= _terminal_snapshot_ready(list(provider.values()), record['turn_id'], outcome)
+        elif record['turn_id'] != saved['turn_id']: proof = False
+        known = {item['id']: item for item in record['items']}
+        shapes = {part['item_id']: {(group, index): (kind, text) for group, index, kind, text in part['shapes']} for part in record['parts']}
+        for identifier in known.keys() | shapes.keys():
+            item = provider.get(identifier)
+            previous = known.get(identifier, {})
+            compatible = bool(item and item.get('turn_id') == record['turn_id']
+                and all(previous.get(key) is None or previous[key] == item.get(key) for key in ('type', 'role')))
+            covered = compatible and state._covers_shapes(item, shapes.get(identifier, {}))
+            proof &= covered
+            # Preview preservation runs after proof and cannot turn a union of
+            # old and new parts into a complete provider snapshot.
+            if previous:
+                if item is None or not identity_ok: merged[identifier] = deepcopy(previous)
+                elif not covered: merged[identifier] = _preview_item(previous, item)
+    for key, item in state.items.items():
+        if not isinstance(key, str) and key not in merged: merged[key] = deepcopy(item)
+    if not identity_ok and terminal:
+        state.sync_complete = False
+        _remember_observation(client, state)
+        return
+    if not identity_ok:
+        merged = _snapshot_items([item for record in records for item in record['items']])
+    saved = deepcopy(saved)
+    saved['items'] = list(merged.values())
+    saved['sync_complete'] = bool(proof and saved.get('session_status') in {'idle', 'failed'}
+        and _terminal_snapshot_ready(list(provider.values()), saved['turn_id'], saved['outcome'])) if saved['outcome'] in TERMINAL else bool(proof and saved.get('sync_complete'))
+    # Adopt the refreshed per-turn ledger without restoring any live seals.
+    state.observed_parts, state.observed_part_count = {}, 0
+    state.root_identity = None
+    state.unverifiable_stream = False
+    state.turn_id = saved['turn_id']
+    state.restore_observation({'version': 1, 'session_id': state.session_id, 'turns': records})
+    _seed(state, saved)
+    _remember_observation(client, state)
+
+
 def _reconcile_terminal(client, state):
+    _remember_observation(client, state)
     try:
         saved = inspect_saved(client, state.session_id, state.turn_id, include_artifacts=False)
-        # Stream terminal events are also cloud facts. A lagging read must not
-        # downgrade them or erase newer finalized output.
-        if saved['turn_id'] != state.turn_id or saved['outcome'] != state.outcome:
-            state.sync_complete = False
-            return
-        merged = _snapshot_items(saved['items'])
-        for identifier, item in state.items.items():
-            if isinstance(identifier, str) and identifier in state.final_items: merged[identifier] = item
-        saved['items'] = list(merged.values())
-        if saved['items']: _seed(state, saved)
-        else: state.sync_complete = False
+        _apply_saved(client, state, saved, terminal=True)
     except AgentError:
         state.sync_complete = False
+    finally:
+        _remember_observation(client, state)
 
 
 def format_input_text(prompt, history_reference=None, input_files=None):
@@ -481,7 +982,7 @@ def format_input_text(prompt, history_reference=None, input_files=None):
 
 
 def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, run_id=None, deadline_seconds=None,
-             on_progress=None, instructions=None, reasoning=None, tool_settings=None, history_reference=None, input_files=None, owner=None):
+             on_progress=None, instructions=None, reasoning=None, tool_settings=None, history_reference=None, input_files=None, owner=None, observation=None):
     if not isinstance(prompt, str) or not prompt.strip(): raise AgentError('请输入文字任务')
     if not isinstance(model, str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]+', model): raise AgentError('请选择有效的 Agent 模型')
     if instructions is not None and not isinstance(instructions, str): raise AgentError('系统提示词必须为文字')
@@ -491,6 +992,7 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
     if allow_text_tool and not tool_settings: settings = {'functions': ['text_statistics']}
     phase = None
     try:
+        state.restore_observation(observation)
         reasoning, _ = compatible_reasoning(model, reasoning)
         text = format_input_text(prompt, history_reference, input_files)
         # Revalidate external permissions before every new turn. A revoked
@@ -530,10 +1032,11 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
                     **({'idempotency_key': run_id} if run_id else {}))
             phase = 'run.events'
             _process_events(client, events, state, settings, on_progress)
-        # Retrieve full item identities after terminal output. A snapshot failure
-        # preserves the completed result but marks history as not yet reconciled.
-        phase = 'run.reconcile'
-        _reconcile_terminal(client, state)
+        # Healthy item.done + matching root terminal commits only this turn.
+        # Interrupted/recovered/known-incomplete streams still hydrate from GET.
+        if not state.turn_complete:
+            phase = 'run.reconcile'
+            _reconcile_terminal(client, state)
         return state
     except Exception as error:
         if not state.submission_started: state.outcome = 'not_started'
@@ -542,15 +1045,22 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
         raise _error(error, state, phase=phase) from None
 
 
-def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, submission_started=False, tool_settings=None, on_progress=None, read_only=False):
+def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, submission_started=False, tool_settings=None, on_progress=None, read_only=False, observation=None):
     state = TurnState(session_id, turn_id, ignored_turn_ids=set(baseline_turn_ids or ()),
                       submission_started=submission_started)
+    prior = observation if observation is not None else getattr(client, '_chuanhu_observation', None)
+    if observation is None and isinstance(prior, dict) and prior.get('session_id') != session_id: prior = None
+    state.restore_observation(prior)
     try:
         # The stream must be connected before the first history/status request.
         with client.beta.agents.sessions.events.stream(session_id) as stream:
             events = BufferedEvents(stream)
             saved = inspect_saved(client, session_id, turn_id, baseline_turn_ids, submission_started, include_artifacts=False)
-            _seed(state, saved)
+            _apply_saved(client, state, saved)
+            if turn_id is not None and prior is None:
+                # An ID-only continuation has no prior observation proof. It
+                # may show GET data, but cannot authorize replacement/admission.
+                state.sync_complete = False
             state.snapshot_partial_ids = {identifier for identifier,item in state.items.items()
                 if isinstance(identifier,str) and item.get('turn_id')==state.turn_id and item.get('status') not in TERMINAL
                 and (item.get('type') in ('reasoning','command_execution')
@@ -567,6 +1077,7 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
             _reconcile_terminal(client, state)
             return state
     except Exception as error: raise _error(error, state) from None
+    finally: _remember_observation(client, state)
 
 
 def update_settings(client, session_id, model, reasoning):
@@ -590,20 +1101,36 @@ def update_settings(client, session_id, model, reasoning):
     except Exception as error: raise _error(error, phase=phase) from None
 
 
-def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), on_progress=None, cache_root=None, should_cancel=None, live=False, on_metadata=None):
+def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), on_progress=None, cache_root=None, should_cancel=None, live=False, on_metadata=None, turn_id=None):
     """发布文件进度；缓存按不可变文件身份复用，忙碌下载留给下一次观察。"""
     from contextlib import nullcontext
     from modules.agent.artifact_cache import ArtifactCache, ArtifactBusy
     try: artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100))
     except Exception as error: raise _error(error) from None
-    if on_metadata:
-        on_metadata([{'id':a['id'],'session_id':session_id,'turn_id':a.get('turn_id'), 'remote_path':a.get('path') or a.get('filename')} for a in artifacts])
     artifacts = [artifact for artifact in artifacts if (artifact_ids is None or artifact.get('id') in artifact_ids) and artifact.get('id') not in skip_artifact_ids]
+    unassociated = []
+    if turn_id is not None:
+        proven = []
+        for artifact in artifacts:
+            if artifact.get('session_id') == session_id and artifact.get('turn_id') == turn_id:
+                proven.append(artifact)
+            elif artifact.get('session_id') == session_id and isinstance(artifact.get('turn_id'), str) and artifact['turn_id']:
+                continue
+            elif isinstance(artifact.get('id'), str):
+                unassociated.append(dict(id=artifact['id'], session_id=None, turn_id=None,
+                    name=Path(str(artifact.get('path') or artifact.get('filename') or 'artifact')).name,
+                    size=artifact.get('size_bytes'), status='failed', error='文件归属尚未确认，请重新获取'))
+        artifacts = proven
+    if on_metadata:
+        on_metadata([{'id':a['id'],'session_id':a.get('session_id'), 'turn_id':a.get('turn_id'),
+                      'name':Path(str(a.get('path') or a.get('filename') or 'artifact')).name,
+                      'size':a.get('size_bytes'), 'status':'preparing', 'remote_path':a.get('path') or a.get('filename')} for a in artifacts] + unassociated)
+    if unassociated and on_progress: on_progress(deepcopy(unassociated))
     if not artifacts:
         if cache_root is not None:
             with ArtifactCache(cache_root, session_id):
                 pass
-        return []
+        return unassociated
     records = []
     for artifact in artifacts:
         name = Path(str(artifact.get('path') or artifact.get('filename') or 'artifact')).name
@@ -652,7 +1179,7 @@ def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_i
             if on_progress: on_progress(deepcopy(records))
     if output_dir is not None and not any(record['status'] == 'ready' for record in records):
         output_dir.rmdir()
-    return records
+    return records + unassociated
 
 
 def cancel_session(client, session_id, turn_id=None):

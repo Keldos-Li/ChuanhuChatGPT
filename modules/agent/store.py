@@ -35,6 +35,8 @@ class BindingStore:
             raise ValueError('会话绑定文件不能是符号链接')
         with self._connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS bindings (owner TEXT NOT NULL, history TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner, history))')
+            db.execute('CREATE TABLE IF NOT EXISTS file_jobs (id TEXT PRIMARY KEY, sequence INTEGER UNIQUE NOT NULL, owner TEXT NOT NULL, conversation TEXT NOT NULL, record TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS artifact_receipts (owner TEXT NOT NULL, conversation TEXT NOT NULL, session TEXT NOT NULL, artifact TEXT NOT NULL, sequence INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner, conversation, session, artifact))')
             db.execute('CREATE TABLE IF NOT EXISTS deleted_histories (owner TEXT NOT NULL, history TEXT NOT NULL, conversation TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(owner, history, conversation))')
         os.chmod(self.path, 0o600)
 
@@ -61,6 +63,21 @@ class BindingStore:
         with self._connect() as db:
             db.execute('INSERT OR REPLACE INTO bindings SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM deleted_histories WHERE owner=? AND history=? AND conversation=?)',
                        (owner, history_key(path), json.dumps(record, ensure_ascii=False), owner, local_history_key(path), record.get('conversation_id', '')))
+
+    def settle_task(self, owner, path, conversation, state):
+        """Phase-only completion cannot wait on a background JSON file write."""
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT record FROM bindings WHERE owner=? AND history=?', (owner, history_key(path))).fetchone()
+            if not row: return False
+            record = json.loads(row[0])
+            saved = record.get('state', {})
+            if record.get('conversation_id') != conversation or any(saved.get(key) != state.get(key)
+                    for key in ('generation', 'session_id', 'turn_id', 'outcome')): return False
+            record['local_phase'] = 'settled'
+            db.execute('UPDATE bindings SET record=? WHERE owner=? AND history=?',
+                       (json.dumps(record, ensure_ascii=False), owner, history_key(path)))
+            return True
 
     def copy_binding(self, owner, before, after):
         """Retain source authority until the history file migration completes."""
@@ -102,6 +119,13 @@ class BindingStore:
             for conversation, record in conversations.items():
                 db.execute('INSERT OR IGNORE INTO deleted_histories VALUES (?, ?, ?, ?)',
                            (owner, local_history_key(path), conversation, json.dumps(record, ensure_ascii=False)))
+            jobs = db.execute('SELECT id, conversation, record FROM file_jobs WHERE owner=?', (owner,)).fetchall()
+            for identifier, conversation, raw in jobs:
+                job = json.loads(raw)
+                if local_history_key(job['history']) == local_history_key(path) and conversation in conversations:
+                    job['status'] = 'deleted'
+                    db.execute('UPDATE file_jobs SET record=? WHERE id=?', (json.dumps(job, ensure_ascii=False), identifier))
+                    db.execute('DELETE FROM artifact_receipts WHERE owner=? AND conversation=?', (owner, conversation))
             rows = db.execute('SELECT history FROM bindings WHERE owner=?', (owner,)).fetchall()
             for (key,) in rows:
                 if local_history_key(key) == local_history_key(path):

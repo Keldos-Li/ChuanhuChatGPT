@@ -7,7 +7,7 @@ import gradio as gr
 import pytest
 from modules.agent.ui import AgentPanel, ArtifactPanel, REASONING_CHOICES, split_filename, i18n
 from modules.agent.file_icons import file_type_label
-from agent_fixtures import env, select, send, complete, request
+from agent_fixtures import env, select, send, complete, request, settle_files
 
 
 @pytest.mark.parametrize('name,stem,suffix', [
@@ -191,15 +191,21 @@ async function exercise(queue) {
     assert any(text.startswith('historyIntentBtn.click(') for text in observer_chains)
 
 
-def test_each_user_artifact_retry_reports_its_own_failure_once(env,monkeypatch):
-    model=select(env);model._state=dict(session_id='s',turn_id='t',generation='g',outcome='completed')
-    model._artifacts=[dict(id='file',name='synthetic.txt',status='failed')]
-    monkeypatch.setattr(env.agents,'worker_messages',lambda command:iter([dict(type='error',message='same timeout')]))
+def test_each_user_artifact_retry_persists_its_own_failure(env,monkeypatch):
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    model._artifacts=[dict(id='file',session_id=model._state['session_id'],turn_id=model._state['turn_id'],name='synthetic.txt',status='failed')]
+    model._remember()
+    def worker(command):
+        yield dict(type='progress',artifacts=[dict(model._artifacts[0],status='preparing')])
+        yield dict(type='error',message='same timeout')
+    monkeypatch.setattr(env.agents,'worker_messages',worker)
+    from modules.agent.file_jobs import jobs_for
     for index in range(2):
-        operation=f'retry-{index}'
-        list(model.retry_artifact('file', error_operation=operation))
-        assert model.take_ui_error(operation=operation).count('same timeout')==1
-        assert model.take_ui_error(operation=operation)=='' and not model._active_file_retries
+        list(model.retry_artifact('file', error_operation=f'retry-{index}'))
+        settle_files(model)
+        assert model._artifacts[0]['status']=='failed' and model._artifacts[0]['error']=='same timeout'
+    attempts=[job for job in jobs_for(model._store(),model._owner,model._conversation_id) if job['artifact_ids']==['file']]
+    assert len(attempts)==2 and all(job['error']=='same timeout' for job in attempts)
 
 
 def test_stop_before_snapshot_waits_for_exact_turn_then_submits_cancel(env,monkeypatch):
@@ -517,8 +523,9 @@ def test_download_response_cannot_mutate_same_generation_new_visit(env,monkeypat
         model._choice_epoch='new-visit';model._notice='current notice'
         yield deepcopy(response)
     monkeypatch.setattr(env.agents,'worker_messages',worker)
-    assert list(model._download('g'))==[]
-    assert model._artifacts==before and model._notice=='current notice'
+    list(model._download('g'))
+    settle_files(model)
+    assert model._artifacts==before and not model._needs_sync
 
 
 def test_late_title_does_not_rename_or_consume_new_chat(env,monkeypatch):
@@ -556,17 +563,17 @@ def test_hot_events_exclude_sidebar_and_no_chatbot_change_refresh():
 
 def test_same_chat_rename_during_retry_finishes_instead_of_staying_preparing(env,monkeypatch,tmp_path):
     complete(env,monkeypatch);model=select(env);send(env,model)
-    model._artifacts=[dict(id='file',name='synthetic.txt',status='failed')]
+    model._artifacts=[dict(id='file',name='synthetic.txt',status='failed',session_id=model._state['session_id'],turn_id=model._state['turn_id'])]
     model._remember()
     folder=Path(__import__('tempfile').mkdtemp(prefix='chuanhu-agent-artifacts-'))
     file=folder/'synthetic.txt';file.write_text('synthetic')
     def worker(command):
         assert command['action']=='download'
-        yield dict(type='result',artifacts=[dict(id='file',name='synthetic.txt',status='ready',path=str(file))])
+        yield dict(type='result',artifacts=[dict(id='file',name='synthetic.txt',status='ready',path=str(file),session_id=model._state['session_id'],turn_id=model._state['turn_id'])])
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     retry=model.retry_artifact('file');next(retry)
     model.rename_chat_history('Renamed chat.json')
-    assert list(retry)
+    list(retry);settle_files(model)
     assert model._artifacts[0]['status']=='ready' and not model._active_file_retries
     assert model.history_file_path=='Renamed chat.json'
 

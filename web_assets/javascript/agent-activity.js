@@ -1,8 +1,8 @@
 /* Display elapsed observation time without polling or mutating task state. */
 (() => {
-    if (globalThis.__chuanhuActivityVersion === 8) return;
+    if (globalThis.__chuanhuActivityVersion === 9) return;
     globalThis.__chuanhuActivityCleanup?.();
-    globalThis.__chuanhuActivityVersion = 8;
+    globalThis.__chuanhuActivityVersion = 9;
     const clocks = new WeakMap();
     const expanded = new Map();
     function owned(detail, conversation) {
@@ -109,9 +109,11 @@
             if (!clock || clock.base !== base) {
                 clock = {base, started: performance.now()}; clocks.set(node, clock);
             }
-            const seconds = Math.floor((base + Math.max(0, performance.now() - clock.started)) / 1000);
+            const elapsed = base + Math.max(0, performance.now() - clock.started);
+            const seconds = Math.floor(elapsed / 1000);
+            const displayed = elapsed < 1000 ? (elapsed === 0 ? '0.0' : elapsed < 100 ? '<0.1' : (Math.floor(elapsed / 100) / 10).toFixed(1)) : String(seconds < 60 ? seconds : seconds % 60);
             const format = seconds < 60 ? (node.dataset.secondsFormat || '{seconds}s') : (node.dataset.minutesFormat || '{minutes}m {seconds}s');
-            const text = format.replaceAll('{minutes}', String(Math.floor(seconds / 60))).replaceAll('{seconds}', String(seconds < 60 ? seconds : seconds % 60));
+            const text = format.replaceAll('{minutes}', String(Math.floor(seconds / 60))).replaceAll('{seconds}', displayed);
             if (node.textContent !== text) node.textContent = text;
             running = true;
         }

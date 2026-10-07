@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import re
+from threading import RLock
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -65,6 +66,7 @@ def output_text(value):
 
 class ToolLog:
     def __init__(self):
+        self.lock = RLock()
         self.names = {}
         self.seen = set()
 
@@ -76,6 +78,10 @@ class ToolLog:
             logging.info('%s', text)
 
     def observe(self, model, message, artifacts=()):
+        with self.lock:
+            self._observe(model, message, artifacts)
+
+    def _observe(self, model, message, artifacts=()):
         session, turn = model._state.get('session_id'), model._state.get('turn_id')
         if not session or not turn or message.get('session_id', session) != session:
             return

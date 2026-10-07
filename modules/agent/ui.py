@@ -1,5 +1,6 @@
 """Reusable output-file surface and Agent controls for the main chat."""
 import html
+import hashlib
 import json
 import inspect
 import re
@@ -80,14 +81,27 @@ class ArtifactPanel:
             self.files = gr.File(file_count='multiple', interactive=False, label='[]', elem_id='model-output-native-files')
             self.retry_id = gr.Textbox(elem_id='model-output-retry-id', show_label=False)
             self.retry = gr.Button('重试下载', elem_id='model-output-retry')
+            self.refresh = gr.Button('刷新文件', elem_id='agent-file-refresh')
+            self.refresh_wire = gr.Textbox(visible=False)
 
     @property
     def outputs(self): return [self.group, self.list, self.files, self.retry_id]
 
     @staticmethod
     def values(model):
+        if _agent(model) and hasattr(model, 'refresh_files'): model.refresh_files(resume=False)
         records = getattr(model, '_artifacts', []) if capabilities(model).output_artifacts else []
-        anchors = message_file_projection(model).artifact_anchors if _agent(model) else {}
+        from modules.agent.file_jobs import pending, jobs_for
+        managed = _agent(model) and hasattr(model, '_store')
+        jobs = jobs_for(model._store(), model._owner, model._conversation_id) if managed else []
+        retrying = {identifier for job in jobs if job['status'] in ('pending','running') for identifier in job['artifact_ids'] or []}
+        records = deepcopy(records)
+        for record in records:
+            if record['id'] in retrying and record.get('status') != 'ready':
+                record.update(status='preparing'); record.pop('error', None)
+        projection = message_file_projection(model) if _agent(model) else None
+        anchors = projection.artifact_anchors if projection else {}
+        after_anchors = getattr(projection, 'artifact_after_anchors', {})
         cards, paths, ready_ids = [], [], []
         labels = {'preparing': '准备中', 'ready': '', 'failed': '下载失败'}
         for record in records:
@@ -104,15 +118,22 @@ class ArtifactPanel:
             basename, extension = split_filename(record['name'])
             download_name = re.sub(r'[\\/\x00-\x1f\x7f]', '_', record['name'])
             if download_name in ('', '.', '..'): download_name = 'artifact'
-            cards.append('<button type="button" class="model-file-card agent-file-card" data-download-name="' + escape(download_name) + '" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-remote-path="' + escape(record.get('remote_path', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
+            cards.append('<button type="button" class="model-file-card agent-file-card" data-download-name="' + escape(download_name) + '" data-artifact-id="' + escape(record['id']) + '" data-message-key="' + escape(anchors.get(record['id'], '')) + '" data-file-after-key="' + escape(after_anchors.get(record['id'], '')) + '" data-file-orphan="' + str(bool(managed and anchors.get(record['id']) and not after_anchors.get(record['id']))).lower() + '" data-conversation-id="' + escape(getattr(model, '_conversation_id', '')) + '" data-remote-path="' + escape(record.get('remote_path', '')) + '" data-file-action="' + action + '" aria-label="' + escape(record['name'] + '，' + (status_text or '下载文件')) + '"' + ('' if action else ' disabled="disabled"') + '>'
                          + file_icon(record['name']) + '<span class="model-file-content" data-file-part="content">'
                          + '<span class="model-file-name" data-file-part="name" title="' + escape(record['name']) + '"><span class="model-file-basename" data-file-part="basename">' + escape(basename) + '</span></span>'
                          + '<span class="model-file-meta" data-file-part="meta"><span class="model-file-extension">' + escape(file_type_label(record['name'])) + '</span> · <span class="model-file-size">' + size_text + '</span>' + (' · <span class="model-file-state">' + escape(status_text) + '</span>' if status_text else '') + '</span>'
                          + '<span class="model-file-error">' + escape(error) + '</span><span class="model-file-feedback" aria-live="polite"></span></span></button>')
-        markup = '<div class="model-file-cards" aria-label="生成的文件">' + ''.join(cards) + '</div>' if cards else ''
+        waiting = any(job['status'] in ('pending','running') for job in jobs)
+        latest = {}
+        for job in jobs: latest[(job['session_id'], job['turn_id'], tuple(job['artifact_ids'] or []))] = job
+        failures = [job for job in latest.values() if job['status'] == 'failed']
+        if failures:
+            cards.append('<span class="model-file-error" data-file-notice="true" data-conversation-id="' + html.escape(getattr(model, '_conversation_id', ''), quote=True) + '">回答已保留，文件获取失败；请重新连接后重试</span>')
+        revision = hashlib.sha256(json.dumps([records, [(job['id'],job['status']) for job in latest.values()]], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        markup = '<div class="model-file-cards" aria-label="生成的文件" data-file-pending="' + str(bool(waiting)).lower() + '" data-file-revision="' + revision + '">' + ''.join(cards) + '</div>' if _agent(model) or cards else ''
         # The hidden native label travels with its File value, so the browser
         # maps stable IDs to links from the same render, even with duplicate names.
-        return [gr.update(visible=bool(records)), gr.update(value=markup), gr.update(value=paths, label=json.dumps(ready_ids)), gr.update() if _agent(model) else gr.update(value='')]
+        return [gr.update(visible=bool(records or failures)), gr.update(value=markup), gr.update(value=paths, label=json.dumps(ready_ids)), gr.update() if _agent(model) else gr.update(value='')]
 
 
 def describe_settings(model):
@@ -379,7 +400,7 @@ class AgentPanel:
                         except (TypeError, ValueError, AttributeError): raise gr.Error(i18n('ui.toolbox.agent.invalid_tools')) from None
                         current_model.freeze_agent_configuration(self.user_tool_config(current_model, config), instructions, tool_revision, target)
                     result = list(transfer(inputs, current_model, agent_model, agent_reasoning, agent_choice_revision, agent_files, request=request))
-                    # Keep the draft until the browser sees submission accepted.
+                    # Keep the draft until its first visible bubble supplies a display receipt.
                     # Failed preparation never needs a delayed server writeback.
                     result[1] = gr.update()
                     return tuple(result)
@@ -499,6 +520,9 @@ class AgentPanel:
             updates = FrameUpdates()
             target, owner = (model._conversation_id, model._owner) if operation else (None, None)
             visit = model.agent_choice_target if operation else None
+            if operation:
+                from modules.agent.message_files import decode_rows
+                previous_rows = decode_rows(chatbot, target)
             try:
                 projected = ((self.render_chat(model, chat), status) for chat, status in predict(model, inputs, chatbot, use_websearch, files, reply_language, request=request))
                 try:
@@ -510,11 +534,13 @@ class AgentPanel:
                         if (operation and isinstance(inputs, dict)
                                 and inputs.get('token') == getattr(model, '_draft_token', None)
                                 and getattr(model, '_draft_conversation', None) == target
-                                and len(model._display) > len(chatbot or [])):
+                                and len(model._display) > len(previous_rows or [])):
                             # This response first displays the user's bubble. Its
                             # draft receipt must travel in this same UI frame,
                             # independently of remote submission acknowledgement.
-                            model._draft_presented = True
+                            with model._lock:
+                                model._draft_presented = True
+                                model._remove_input_selection(getattr(model, '_draft_input_ids', ()))
                         yield chat, status, *updates.changes(controls())
                 except gr.Error as error:
                     if operation is None: raise
@@ -707,6 +733,22 @@ class AgentPanel:
                 return
             model.complete_error_operation(epoch)
         self.observe_history = self.status_callback(observe_history, 1)
+        def refresh_files(model, request: gr.Request):
+            if not _agent(model) or model._retired: return ''
+            model.bind_owner(request)
+            with model._lock:
+                model.refresh_files()
+                updates = ArtifactPanel.values(model)
+                target, generation = model.agent_choice_target, model._state.get('generation')
+            from gradio.processing_utils import move_files_to_cache
+            # Cache copies run outside the model lock. A large file cannot
+            # block the next send or terminal persistence. JS checks its scope.
+            updates[2]['value'] = move_files_to_cache(self.artifacts.files.postprocess(updates[2]['value']), self.artifacts.files, postprocess=True)
+            return json.dumps(dict(target=target, generation=generation, updates=updates), ensure_ascii=False)
+        self.artifacts.refresh.click(refresh_files, [current_model], [self.artifacts.refresh_wire],
+            queue=False, show_progress='hidden', concurrency_limit=None).then(None,
+            [self.artifacts.refresh_wire, self.choice_target], self.artifacts.outputs, queue=False,
+            js='(wire, target) => window.chuanhuAcceptFileUpdate?.(wire, target) || Array.from({length:4}, () => ({__type__: "update"}))')
         def retry_file(model, identifier, request: gr.Request):
             operation = uuid4().hex
             try:

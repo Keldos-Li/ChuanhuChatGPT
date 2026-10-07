@@ -420,6 +420,9 @@
     },
     "ui": {
         "agent_activity": {
+            "thinking_active": "Tänker",
+            "thinking_completed": "Tänkt",
+            "thinking_neutral": "Resonemang",
             "elapsed_seconds": "{seconds}s",
             "elapsed_minutes_seconds": "{minutes} min {seconds} s"
         },

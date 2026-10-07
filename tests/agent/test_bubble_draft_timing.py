@@ -44,14 +44,15 @@ def test_first_bubble_frame_contains_draft_receipt_before_attachment_submission(
         release.set();remaining=list(iterator)
         if failure:
             assert not model._draft_submitted and not model.history
-            assert model._pending_upload_paths
+            assert not model._pending_upload_paths
+            assert model._input_context and model._input_stager is not None
             assert model._display==[[text,'']] and model.chatbot==[[text,'']]
             assert text in str(remaining[-1][0])
             # A later manually submitted request uses the kept display signature;
             # this failed text remains outside the provider history reference.
             monkeypatch.setattr(env.agents,'worker_messages',original)
-            second=panel.wrap_transfer(env.wrappers['transfer_input'])('Next manual request',model,agent_files=paths,request=request())[0]
-            list(panel.wrap_predict(env.wrappers['predict'],cap,compact=True)(model,second,model.chatbot,agent_files=paths,request=request()))
+            second=panel.wrap_transfer(env.wrappers['transfer_input'])('Next manual request',model,agent_files=[],request=request())[0]
+            list(panel.wrap_predict(env.wrappers['predict'],cap,compact=True)(model,second,model.chatbot,agent_files=[],request=request()))
             run=next(command for command in calls if command['action']=='run')
             assert text not in str(run.get('history_reference'))
             assert model._draft_token==second['token']

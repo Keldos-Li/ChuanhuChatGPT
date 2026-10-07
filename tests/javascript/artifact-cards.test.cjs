@@ -481,8 +481,6 @@ test('card and body downloads keep full Unicode filename and isolated native URL
     assert.deepEqual(f.hits,['file:owned','file:owned']);
 });
 
-console.log(`Artifact cards: ${passed} passed, ${failed} failed`);
-if (failed) process.exitCode = 1;
 
 test('turn file section following text restores answer spacing without hiding text', () => {
     const f = fixture(), answer = f.row('answer'), files = f.row('files', 'conversation', '');
@@ -494,3 +492,32 @@ test('turn file section following text restores answer spacing without hiding te
     files.replaceChildren(files.querySelector('.agent-message-anchor')); f.dom.flush();
     assert(!files.nextElementSibling.classList.contains('agent-turn-files-after-answer'));
 });
+
+
+test('late turn-only files mount below their exact reply before the canonical file row arrives', () => {
+    const f=fixture({activeConversation:'conversation'}), answer=f.row('answer');
+    const card=f.card('late','files');card.dataset.fileAfterKey='answer';
+    const link=bodyLink(f,answer,'artifact:late');f.chat.append(answer);f.cards.append(card);f.nativeFiles(['late']);f.start();
+    assert.deepEqual(ids(f.owned(answer)),['late']);
+    const holder=answer.nextElementSibling;
+    link.click();assert.deepEqual(f.hits,['file:late']);
+    const canonical=f.row('files','conversation','');f.chat.append(canonical);f.dom.flush();
+    assert.equal(canonical.nextElementSibling,holder);
+    assert.deepEqual(ids(f.owned(canonical)),['late']);
+    assert.equal(f.holders().length,1);
+});
+
+test('proven orphan metadata remains separate without borrowing the latest answer', () => {
+    const f=fixture({activeConversation:'conversation'}), answer=f.row('answer'), card=f.card('orphan','unassigned');
+    card.dataset.fileOrphan='true';card.dataset.fileAction='retry';
+    f.chat.append(answer);f.cards.append(card);f.start();f.dom.flush();
+    assert(!answer.classList.contains('agent-message-has-files'));
+    const holder=f.holders()[0];
+    assert.notEqual(holder.dataset.fileOwner,'conversation:answer');assert(holder.classList.contains('agent-unassociated-files'));
+    assert(holder.textContent.includes('未关联消息的文件'));
+    assert.deepEqual(ids(holder.querySelectorAll('.model-file-card')),['orphan']);
+    f.dom.flush();assert.equal(f.holders().length,1);
+});
+
+console.log(`Artifact cards: ${passed} passed, ${failed} failed`);
+if (failed) process.exitCode=1;

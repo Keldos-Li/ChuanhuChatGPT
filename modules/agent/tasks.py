@@ -75,6 +75,7 @@ class BackgroundTask:
                     self.model._remember()
                     if self.model.history: self.model.auto_save(self.model.chatbot)
                 except Exception:
+                    self.model._state['persistence_failed'] = True
                     import logging
                     logging.exception('后台任务保存失败，原始错误及已有记录保留')
         finally:
@@ -88,10 +89,11 @@ class BackgroundTask:
                 self.model._task_phase = "settled"
                 try:
                     try:
-                        with self.model._lock: self.model._remember()
+                        with self.model._lock: self.model._remember_task_end()
                     except Exception as error:
                         if self.error is None: self.error = error
                         with self.model._lock:
+                            self.model._state['persistence_failed'] = True
                             self.model._notice = getattr(error, 'message', str(error))
                         import logging
                         logging.exception('后台任务最终保存失败，已有记录保留并向观察者报告')
@@ -136,6 +138,7 @@ class BackgroundTask:
                         return
                     if view is not self.model:
                         for name, value in values.items(): setattr(view, name, deepcopy(value))
+                    view.refresh_files(resume=False)
                     chat = deepcopy(values['_display'])
                 yield chat, status
             if done:

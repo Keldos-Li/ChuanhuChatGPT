@@ -133,10 +133,12 @@ def _tool_group(group, *, scope, conversation, **kwargs):
     span = group_span(group, clock=kwargs.get('clock'), active=kwargs.get('active', False))
     timer = ''
     if span:
-        seconds = math.floor(span['elapsed_ms'] / 1000)
+        elapsed = span['elapsed_ms']
+        seconds = (('0.0' if elapsed == 0 else '<0.1' if elapsed < 100 else f'{math.floor(elapsed / 100) / 10:.1f}')
+                   if elapsed < 1000 else math.floor(elapsed / 1000))
         seconds_format = i18n('ui.agent_activity.elapsed_seconds')
         minutes_format = i18n('ui.agent_activity.elapsed_minutes_seconds')
-        text = seconds_format.format(seconds=seconds) if seconds < 60 else minutes_format.format(minutes=seconds//60, seconds=seconds%60)
+        text = seconds_format.format(seconds=seconds) if elapsed < 60000 else minutes_format.format(minutes=seconds//60, seconds=seconds%60)
         timer = ('<span class="agent-activity-elapsed" data-elapsed-ms="'+str(span['elapsed_ms'])
                  +'" data-running="'+('true' if span['running'] else 'false')
                  +'" data-seconds-format="'+html.escape(seconds_format,quote=True)
@@ -182,7 +184,16 @@ def _activity(entries, *, clock=None, conversation='', active=False, calls=None,
         flags=entry.get('capture',{})
         notice=('部分内容未保存' if flags.get('omitted') else '')+(' · 内容已截断' if flags.get('truncated') else '')
         if entry['kind']=='summary':
-            body='<div class="agent-summary-text">'+html.escape('\n'.join(part['text'] for part in entry['content'] if part['type']=='summary_text')).replace('\n','<br>')+'</div>'
+            public = '\n'.join(part['text'] for part in entry['content'] if part['type']=='summary_text')
+            # AgentReasoningItem in the installed SDK exposes no title/name.
+            # Preserve its canonical occurrence, but never invent public content.
+            thinking = active and phase in ('running', 'waiting')
+            title = i18n('ui.agent_activity.thinking_' + ('active' if thinking else 'completed' if phase == 'completed' else 'neutral'))
+            if not public.strip():
+                if thinking: out.append('<span class="agent-thinking-state">'+html.escape(title)+'</span>')
+                if notice: out.append('<small class="agent-activity-notice">'+html.escape(notice)+'</small>')
+                continue
+            body='<div class="agent-summary-text">'+html.escape(public).replace('\n','<br>')+'</div>'
         else:
             body=(_links(details) if kind=='web_search_call' else '')+'<pre>'+html.escape(json.dumps(dict(type=kind,**details),ensure_ascii=False,indent=2))+'</pre>'
         persistent=entry.get('identity') in ('api_id','application_occurrence')
@@ -331,6 +342,7 @@ def project_transcript(model, rows):
             if turn: turn_last_rows[turn] = row
         append(row,1,''.join(markup))
     files_by_turn = {}
+    projection.artifact_after_anchors = {}
     for file in view['turn_files']: files_by_turn.setdefault(file.get('turn_ref'), []).append(file)
     for turn, files in files_by_turn.items():
         key = _anchor(['conversation', model._conversation_id], 'files', turn or 'unassigned')
@@ -339,7 +351,13 @@ def project_transcript(model, rows):
         append(row,1,'<small' + (' class="agent-turn-files-after-answer"' if after_answer else '') + '>' + ('本轮文件' if turn else '未关联消息的文件') + '</small>')
         for file in files:
             record = receipt(file)
-            if record and file['kind'] == 'generated': projection.artifact_anchors[record['id']] = key
+            if record and file['kind'] == 'generated':
+                projection.artifact_anchors[record['id']] = key
+                # Placement below an exact turn reply is view metadata, not an
+                # invented per-message API attachment. It also works when the
+                # new file-only row has not reached the chat component yet.
+                if turn in turn_rows and projection.row_anchors.get(turn_rows[turn]):
+                    projection.artifact_after_anchors[record['id']] = projection.row_anchors[turn_rows[turn]]
             else: append(row,1,_file_card(file))
     # Explicit per-message generated-file receipts can attach without guessing.
     for entry in view['timeline']:

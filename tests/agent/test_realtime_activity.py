@@ -2,11 +2,13 @@
 from copy import deepcopy
 import html
 import json
+import re
 import pytest
 from agent_fixtures import env, select
 from test_runtime import event, turn, message, FakeClient
 from modules.agent import runtime, transcript
 from modules.agent.activity import ActivityClock
+from modules.agent.transcript_view import i18n
 from modules.agent.message_files import decode_rows
 from modules.agent.ui import AgentPanel
 
@@ -47,7 +49,7 @@ def test_public_summary_and_tools_visible_before_final_with_commentary_order_and
     state.accept(item_event(reasoning('completed','Check weather.'),0,'done'))
     model=model_for_stream(env);accept(model,state)
     early=rendered(model);early_html=str(early)
-    assert 'Check weather.' in early_html and '公开思考摘要' in early_html
+    assert 'Check weather.' in early_html and i18n('ui.agent_activity.thinking_completed') in early_html
     assert 'HIDDEN' not in early_html and 'PRIVATE' not in early_html
     state.accept(item_event(dict(message('comment','I will check'),phase='commentary'),1))
     tool=dict(id='web',type='web_search_call',turn_id='t1',status='in_progress',action=dict(type='search',query='weather'))
@@ -61,8 +63,8 @@ def test_public_summary_and_tools_visible_before_final_with_commentary_order_and
     state.accept(turn('completed'));accept(model,state)
     final=rendered(model);body=final[0][1]
     assert body.index('Check weather.')<body.index('md-message">I will check')<body.index('网页搜索')<body.index('md-message">Final weather')
-    assert body.count('class="raw-message hideM"')==1
-    copy=body.split('<div class="raw-message hideM">',1)[1].split('</div>',1)[0]
+    assert body.count('class="raw-message hideM"')==2
+    copy='\n\n'.join(re.findall(r'<div class="raw-message hideM">(.*?)</div>',body,re.S))
     assert html.unescape(copy)=='I will check\n\nFinal weather'
     assert decode_rows(final,model._conversation_id)==model._display
     document=model.history_document(dict(history=model.history,chatbot=model._display))
@@ -260,7 +262,7 @@ def test_late_order_survives_done_reconcile_copy_and_decode(env):
     assert [item['id'] for item in state.snapshot()['items']]==['comment','tool','final']
     model=model_for_stream(env);accept(model,state)
     output=rendered(model);body=output[0][1]
-    raw=body.split('<div class="raw-message hideM">',1)[1].split('</div>',1)[0]
+    raw='\n\n'.join(re.findall(r'<div class="raw-message hideM">(.*?)</div>',body,re.S))
     assert html.unescape(raw)=='COMMENTARY\n\nFINAL'
     visible=body[body.find('</div>')+6:]
     assert visible.index('COMMENTARY')<visible.index('网页搜索')<visible.index('FINAL')

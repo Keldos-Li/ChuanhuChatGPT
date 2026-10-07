@@ -1,6 +1,6 @@
 import logging
 import pytest
-from agent_fixtures import env, select, send
+from agent_fixtures import settle_files, env, select, send
 from test_runtime import message
 
 
@@ -103,6 +103,7 @@ def test_completed_view_restoration_does_not_replay_tools_or_files(env, monkeypa
         view._needs_sync=True
         view._session_settings=view._current_settings()
         list(view.observe_history() if path=='observe' else view.reconnect())
+        settle_files(view)
         assert view.history[-1]['content']=='answer'
         assert view._artifacts[0]['name']=='old.txt'
     assert not records(caplog)

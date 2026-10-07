@@ -203,7 +203,8 @@ def test_render_calls_each_converter_once_and_marker_is_outside_copy_region():
     result = project([['question', 'answer']])
     rendered = render_projection(result, converter('user'), converter('assistant'))
     assert calls == [('user', 'question'), ('assistant', 'answer')]
-    assert rendered[0][1].startswith('<div class="raw-message">answer</div><span class="agent-message-anchor"')
+    assert '<div class="raw-message">answer</div></div><span class="agent-message-anchor"' in rendered[0][1]
+    assert rendered[0][1].startswith('<div class="agent-body-segment"')
     assert rendered[0][0].startswith('<div class="raw-message">question</div><span class="agent-message-raw"')
     assert 'data-message-key="' + result.row_anchors[0] + '"' in rendered[0][1]
 

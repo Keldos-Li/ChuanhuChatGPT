@@ -12,7 +12,7 @@ class ArtifactObserver:
         self.emit = emit
         self.cache_root = cache_root
         self.enabled, self.interval = enabled, interval
-        self.session_id = None
+        self.session_id = self.turn_id = None
         self.ready = set(skip_artifact_ids)
         self.stop = Event()
         self.thread = None
@@ -21,10 +21,10 @@ class ArtifactObserver:
     def __enter__(self):
         return self
 
-    def observe_session(self, session_id):
-        if not self.enabled or not session_id or self.thread is not None:
+    def observe_session(self, session_id, turn_id=None):
+        if not self.enabled or not session_id or not turn_id or self.thread is not None:
             return
-        self.session_id = session_id
+        self.session_id, self.turn_id = session_id, turn_id
         self.thread = Thread(target=self._watch, daemon=True)
         self.thread.start()
 
@@ -35,7 +35,7 @@ class ArtifactObserver:
 
     def _refresh(self):
         try:
-            download_artifacts(self.client, self.session_id,
+            download_artifacts(self.client, self.session_id, turn_id=self.turn_id,
                                skip_artifact_ids=self.ready, on_progress=self._publish, cache_root=self.cache_root, should_cancel=self.stop.is_set, live=True)
             self.error_reported = False
         except Exception:

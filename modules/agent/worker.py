@@ -86,6 +86,7 @@ def _empty_preparation(command):
 
 def main():
     state, action, journal = None, None, None
+    terminal_emitted = False
     command, output_closed = {}, False
     def preparation_emit(kind, **data):
         nonlocal output_closed
@@ -131,10 +132,16 @@ def main():
                 emit('result', sdk_version=openai.__version__, available=hasattr(client.beta, 'agents'))
                 return
             def progress(value):
-                nonlocal state
+                nonlocal state, terminal_emitted
                 state = value
-                emit('progress', **value.snapshot())
-                artifacts.observe_session(value.session_id)
+                if action == 'run' and value.turn_complete:
+                    # Publish before stream/context teardown. The parent transport
+                    # finishes on result and reaps this worker asynchronously.
+                    emit('result', **value.snapshot())
+                    terminal_emitted = True
+                else:
+                    emit('progress', **value.snapshot())
+                    artifacts.observe_session(value.session_id, value.turn_id)
             if action == 'prepare_inputs':
                 def preparation_progress(value):
                     nonlocal state
@@ -158,18 +165,18 @@ def main():
                 state = run_task(client, command.get('prompt'), command.get('model'), session_id=session_id,
                                  run_id=command.get('run_id'), on_progress=progress, instructions=command.get('instructions'),
                                  reasoning=command.get('reasoning'), tool_settings=command.get('tool_settings'),
-                                 history_reference=command.get('history_reference'), input_files=command.get('input_files'), owner=command.get('owner'))
-                emit('result', **state.snapshot())
+                                 history_reference=command.get('history_reference'), input_files=command.get('input_files'), owner=command.get('owner'), observation=command.get('observation'))
+                if not terminal_emitted: emit('result', **state.snapshot())
             elif action in ('recover', 'recover_unknown', 'observe', 'observe_unknown'):
                 turn_id = command.get('turn_id')
                 if action in ('recover_unknown', 'observe_unknown'): session_id, turn_id = find_uncertain_session(client, command.get('run_id'))
                 state = recover_stream(client, session_id, turn_id, baseline_turn_ids=command.get('baseline_turn_ids'),
-                       submission_started=command.get('submission_started') is True, tool_settings=command.get('tool_settings'), on_progress=progress, read_only=action in ('observe', 'observe_unknown'))
+                       submission_started=command.get('submission_started') is True, tool_settings=command.get('tool_settings'), on_progress=progress, read_only=action in ('observe', 'observe_unknown'), observation=command.get('observation'))
                 emit('result', **state.snapshot())
             elif action == 'inspect':
                 emit('result', **inspect_saved(client, session_id, command.get('turn_id'), command.get('baseline_turn_ids'), command.get('submission_started') is True))
             elif action == 'cancel': emit('result', session_id=session_id, turn_id=command.get('turn_id'), **cancel_session(client, session_id, command.get('turn_id')))
-            elif action == 'download': emit('result', session_id=session_id, artifacts=download_artifacts(client, session_id, artifact_ids=command.get('artifact_ids'), skip_artifact_ids=command.get('skip_artifact_ids', ()), cache_root=cache_root, on_metadata=lambda records: emit('progress', session_id=session_id, artifact_metadata=records), on_progress=lambda records: emit('progress', session_id=session_id, artifacts=records)))
+            elif action == 'download': emit('result', session_id=session_id, artifacts=download_artifacts(client, session_id, turn_id=command.get('turn_id'), artifact_ids=command.get('artifact_ids'), skip_artifact_ids=command.get('skip_artifact_ids', ()), cache_root=cache_root, on_metadata=lambda records: emit('progress', session_id=session_id, artifact_metadata=records), on_progress=lambda records: emit('progress', session_id=session_id, artifacts=records)))
             elif action == 'update': emit('result', session_id=session_id, settings=update_settings(client, session_id, command.get('model'), command.get('reasoning')))
             elif action == 'browser_response':
                 # Never echo submitted fields, including in errors or diagnostics.

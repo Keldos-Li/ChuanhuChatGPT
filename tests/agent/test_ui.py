@@ -7,7 +7,7 @@ import gradio as gr
 import pytest
 from gradio.state_holder import SessionState
 from modules.agent.ui import AgentPanel, ArtifactPanel, browser_form
-from agent_fixtures import env, select, send, complete, request
+from agent_fixtures import env, select, send, complete, request, settle_files
 
 
 def artifact_rows(markup):
@@ -97,38 +97,30 @@ def test_dropdown_revision_ignores_late_callback_and_send_freezes_visible_pair(e
 
 
 def test_retry_listing_failure_returns_clickable_failed_card_then_can_retry(env,monkeypatch,tmp_path):
-    import tempfile
     from pathlib import Path
-    model=select(env);model._state={'session_id':'s','turn_id':'t','generation':'g','outcome':'completed'}
-    model._artifacts=[{'id':'file','name':'same.txt','status':'failed','size':1}]
+    import tempfile
+    complete(env,monkeypatch);model=select(env);send(env,model)
+    model._artifacts=[dict(id='file',name='same.txt',status='failed',size=1,session_id=model._state['session_id'],turn_id=model._state['turn_id'])]
+    model._remember()
     path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'same.txt';path.write_text('x')
     calls=[]
     def worker(command):
         calls.append(command)
-        if len(calls)==1:yield {'type':'error','message':'listing unavailable'}
-        else:yield {'type':'result','artifacts':[{'id':'file','name':'same.txt','status':'ready','size':1,'path':str(path)}]}
+        if len(calls)==1:yield dict(type='error',message='listing unavailable')
+        else:yield dict(type='result',artifacts=[dict(model._artifacts[0],status='ready',path=str(path),error=None)])
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     app,panel,state=panel_app(model)
-    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='retry_file')
+    indices={fn.fn.__name__:i for i,fn in enumerate(app.fns) if fn.fn}
     async def retry():
-        result=await app.process_api(index,[None,'file'],state=state,request=gr.Request(session_hash='retry'))
-        frames=[]
-        while True:
-            update=result['data'][1+panel.stream_outputs.index(panel.artifacts.list)]
-            if isinstance(update,dict) and update.get('value'):frames.append(ET.fromstring(update['value']).find('button'))
-            if not result['is_generating']:break
-            result=await app.process_api(index,[None,'file'],state=state,request=gr.Request(session_hash='retry'),iterator=result['iterator'])
-        if len(calls)==1:
-            with pytest.raises(gr.Error,match='listing unavailable'):
-                panel.emit_ui_error(model,gr.Request(session_hash='retry'))
-            assert frames[-1].get('data-file-action')=='retry' and not model._active_file_retries
-        return frames
+        result=await app.process_api(indices['retry_file'],[None,'file'],state=state,request=gr.Request(session_hash='ui'))
+        while result['is_generating']:
+            result=await app.process_api(indices['retry_file'],[None,'file'],state=state,request=gr.Request(session_hash='ui'),iterator=result['iterator'])
     try:
-        failed=asyncio.run(retry())
-        assert failed[0].get('disabled')=='disabled'
-        assert failed[-1].get('disabled') is None and failed[-1].get('data-file-action')=='retry'
-        ready=asyncio.run(retry())
-        assert ready[-1].get('data-file-action')=='download' and len(calls)==2
+        asyncio.run(retry());settle_files(model)
+        markup=ArtifactPanel.values(model)[1]['value']
+        assert 'data-file-action="retry"' in markup and 'listing unavailable' in markup
+        asyncio.run(retry());settle_files(model)
+        assert model._artifacts[0]['status']=='ready' and len(calls)==2
     finally:app.close()
 
 
@@ -330,46 +322,51 @@ def test_history_observer_waiting_permission_exposes_same_main_stop(env,monkeypa
     finally:release.set();app.close()
 
 
-def test_predict_ui_stream_exposes_preparing_then_individual_files(env,monkeypatch):
-    from pathlib import Path
-    import tempfile
-    from modules.model_capabilities import CapabilityUI
+def test_independent_file_refresh_exposes_progress_after_predict_queue_ends(env,monkeypatch):
     from threading import Event
+    from pathlib import Path
+    import tempfile, time
+    from modules.model_capabilities import CapabilityUI
     prepared_seen, first_ready_seen = Event(), Event()
-    model=select(env)
-    path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'one.txt';path.write_text('1')
+    model=select(env);path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'one.txt';path.write_text('1')
     def worker(command):
-        if command['action']=='run':yield {'type':'result','session_id':'sess_test','turn_id':'turn_one','outcome':'completed','text':''}
+        if command['action']=='run':yield dict(type='result',session_id='sess_test',turn_id='turn_one',outcome='completed',text='answer')
         elif command['action']=='download':
-            records=[{'id':'a','name':'one.txt','type':'text/plain','size':1,'status':'preparing'},{'id':'b','name':'two.txt','type':'text/plain','size':2,'status':'preparing'}]
-            yield {'type':'progress','artifacts':records}
-            assert prepared_seen.wait(5)
+            records=[dict(id='a',session_id='sess_test',turn_id='turn_one',name='one.txt',size=1,status='preparing'),dict(id='b',session_id='sess_test',turn_id='turn_one',name='two.txt',size=2,status='preparing')]
+            yield dict(type='progress',artifacts=records);assert prepared_seen.wait(5)
             records=[dict(records[0],status='ready',path=str(path)),records[1]]
-            yield {'type':'progress','artifacts':records}
-            assert first_ready_seen.wait(5)
-            yield {'type':'result','artifacts':[records[0],dict(records[1],status='failed',error='unavailable')]}
+            yield dict(type='progress',artifacts=records);assert first_ready_seen.wait(5)
+            yield dict(type='result',artifacts=[records[0],dict(records[1],status='failed',error='unavailable')])
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     with gr.Blocks(analytics_enabled=False) as app:
         current=gr.State();prompt=gr.Textbox();chat=gr.Chatbot();status=gr.Markdown();send_button=gr.Button();stop=gr.Button();selector=gr.Dropdown();marker=gr.HTML()
         caps=CapabilityUI([],selector,marker,send_button,stop);caps.wire(current,chat)
-        panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components()
+        panel=AgentPanel();panel.selectors();panel.output_components();panel.settings_components();panel.wire(current,chat,status,caps)
         send_button.click(panel.wrap_predict(env.wrappers['predict'],caps),[current,prompt,chat],[chat,status,*panel.outputs,*caps.outputs])
     state=SessionState(app);state[current._id]=model
-    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='predict_with_ui')
+    indices={fn.fn.__name__:i for i,fn in enumerate(app.fns) if fn.fn}
     async def exercise():
-        req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'files',[]],state=state,request=req);rows=[]
-        while True:
-            update=result['data'][2+panel.outputs.index(panel.artifacts.list)]
-            if isinstance(update,dict) and update.get('value'):
-                visible=artifact_rows(update['value']);rows.append(visible)
-                if len(visible)==2 and all(row[3]=='准备中' for row in visible): prepared_seen.set()
-                if len(visible)==2 and visible[0][3]=='' and visible[1][3]=='准备中': first_ready_seen.set()
-            if not result['is_generating']:break
-            result=await app.process_api(index,[None,'files',[]],state=state,request=req,iterator=result['iterator'])
-        assert any(len(r)==2 and all(row[3]=='准备中' for row in r) for r in rows)
-        assert any(len(r)==2 and r[0][3]=='' and r[1][3]=='准备中' for r in rows)
+        req=gr.Request(session_hash='ui');result=await app.process_api(indices['predict_with_ui'],[None,'files',[]],state=state,request=req)
+        while result['is_generating']:
+            result=await app.process_api(indices['predict_with_ui'],[None,'files',[]],state=state,request=req,iterator=result['iterator'])
+        assert not prepared_seen.is_set() and not model._background_busy
+        assert state.blocks_config.blocks[send_button._id].interactive
+        async def read_files(expect):
+            deadline=time.monotonic()+3
+            while True:
+                frame=await app.process_api(indices['refresh_files'],[None],state=state,request=req)
+                wire=json.loads(frame['data'][0]);assert len(wire['updates'])==4
+                rows=artifact_rows(wire['updates'][1]['value'])
+                if expect(rows):return wire,rows
+                assert time.monotonic()<deadline;await asyncio.sleep(.01)
+        wire,rows=await read_files(lambda rows:len(rows)==2 and all(row[3]=='准备中' for row in rows))
+        assert wire['generation']==model._state['generation'];prepared_seen.set()
+        wire,rows=await read_files(lambda rows:len(rows)==2 and rows[0][3]=='' and rows[1][3]=='准备中')
+        assert len(wire['updates'][2]['value'])==1 and wire['updates'][2]['value'][0]['url'].startswith('/file=')
+        first_ready_seen.set()
+        await read_files(lambda rows:len(rows)==2 and rows[1][3].startswith('下载失败'))
     try:asyncio.run(exercise())
-    finally:prepared_seen.set();first_ready_seen.set();app.close()
+    finally:prepared_seen.set();first_ready_seen.set();settle_files(model);app.close()
 
 
 def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypatch):
@@ -400,13 +397,12 @@ def test_completed_wrapped_send_explicitly_unlocks_agent_selectors(env,monkeypat
     async def exercise():
         inputs=[None,'hello',[]];req=gr.Request(session_hash='ui')
         result=await app.process_api(index,inputs,state=state,request=req)
-        # The same conversation remains reserved through file finalization.
-        assert all(state.blocks_config.blocks[c._id].interactive is False for c in (panel.model,panel.reasoning))
-        release.set()
+        # File work no longer reserves the completed main conversation.
         while result['is_generating']:
             result=await app.process_api(index,inputs,state=state,request=req,iterator=result['iterator'])
-        assert downloads and not model._background_busy
+        assert not model._background_busy
         assert all(state.blocks_config.blocks[c._id].interactive is True for c in (panel.model,panel.reasoning))
+        assert not release.is_set(); release.set()
     try:asyncio.run(exercise())
     finally:release.set();app.close()
 
@@ -425,43 +421,41 @@ def test_prompt_change_after_session_is_rejected_and_effective_value_kept(env,mo
 
 
 @pytest.mark.parametrize('final_status',['ready','failed'])
-def test_single_file_retry_streams_preparing_and_result_without_losing_other_files(env,monkeypatch,final_status):
+def test_single_file_retry_finishes_independently_without_losing_other_files(env,monkeypatch,final_status):
     from pathlib import Path
+    from threading import Event
     import tempfile
-    model=select(env);model._state={'session_id':'sess_test','turn_id':'turn_one','generation':'g','outcome':'completed'}
+    complete(env,monkeypatch);model=select(env);send(env,model)
     path=Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'retry.txt';path.write_text('x')
-    existing={'id':'other','name':'other.txt','status':'ready','path':str(path),'size':1,'type':'text/plain'}
-    model._artifacts=[existing,{'id':'retry','name':'retry.txt','status':'failed','error':'unavailable','type':'text/plain'}]
-    calls=[]
+    identity=dict(session_id=model._state['session_id'],turn_id=model._state['turn_id'])
+    existing=dict(id='other',name='other.txt',status='ready',path=str(path),size=1,**identity)
+    model._artifacts=[existing,dict(id='retry',name='retry.txt',status='failed',error='unavailable',**identity)];model._remember()
+    release=Event();calls=[]
     def worker(command):
-        calls.append(command)
-        assert command['action']=='download' and command['artifact_ids']==['retry']
-        record={'id':'retry','name':'retry.txt','status':'preparing','type':'text/plain','size':1}
-        yield {'type':'progress','artifacts':[record]}
+        calls.append(command);assert command['action']=='download' and command['artifact_ids']==['retry']
+        record=dict(id='retry',name='retry.txt',status='preparing',size=1,**identity)
+        yield dict(type='progress',artifacts=[record]);assert release.wait(5)
         final=dict(record,status=final_status)
         if final_status=='ready':final['path']=str(path)
         else:final['error']='still unavailable'
-        yield {'type':'result','artifacts':[final]}
+        yield dict(type='result',artifacts=[final])
     monkeypatch.setattr(env.agents,'worker_messages',worker)
     app,panel,state=panel_app(model)
-    index=next(i for i,fn in enumerate(app.fns) if fn.fn and fn.fn.__name__=='retry_file')
+    indices={fn.fn.__name__:i for i,fn in enumerate(app.fns) if fn.fn}
     async def exercise():
-        req=gr.Request(session_hash='ui');result=await app.process_api(index,[None,'retry'],state=state,request=req);statuses=[]
-        while True:
-            update=result['data'][1+panel.stream_outputs.index(panel.artifacts.list)]
-            if isinstance(update,dict) and update.get('value'):
-                rows=artifact_rows(update['value']);assert rows[0][0]=='other' and rows[0][3]=='';statuses.append(rows[1][3])
-            if not result['is_generating']:break
-            result=await app.process_api(index,[None,'retry'],state=state,request=req,iterator=result['iterator'])
-        if final_status=='failed':
-            with pytest.raises(gr.Error,match='still unavailable'):
-                panel.emit_ui_error(model,req)
-            assert statuses[-1].startswith('下载失败') and not model._active_file_retries
-        assert '准备中' in statuses
-        assert any((status == '' if final_status=='ready' else status.startswith('下载失败')) for status in statuses)
+        req=gr.Request(session_hash='ui');result=await app.process_api(indices['retry_file'],[None,'retry'],state=state,request=req)
+        while result['is_generating']:
+            result=await app.process_api(indices['retry_file'],[None,'retry'],state=state,request=req,iterator=result['iterator'])
+        rows=artifact_rows(ArtifactPanel.values(model)[1]['value'])
+        assert rows[0][0]=='other' and rows[0][3]=='' and rows[1][3]=='准备中'
+        assert not release.is_set();release.set();settle_files(model)
+        frame=await app.process_api(indices['refresh_files'],[None],state=state,request=req)
+        rows=artifact_rows(json.loads(frame['data'][0])['updates'][1]['value'])
+        assert rows[0][0]=='other' and rows[0][3]==''
+        assert rows[1][3]=='' if final_status=='ready' else 'still unavailable' in rows[1][3]
     try:asyncio.run(exercise())
-    finally:app.close()
-    assert len(calls)==1 and model._state['session_id']=='sess_test'
+    finally:release.set();settle_files(model);app.close()
+    assert len(calls)==1 and model._state['session_id']==identity['session_id']
 
 
 def test_predict_final_frame_then_switch_then_eof_is_noop(env):

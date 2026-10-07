@@ -38,6 +38,9 @@ class OfflineLocale:
             if isinstance(value, dict): result.update(OfflineLocale.flatten(value, name))
             else: result[name] = value
         return result
+    def change_language(self, language):
+        self.language = language.replace('-', '_')
+
     def __call__(self, key):
         return self.tables.get(self.language, self.tables['en_US']).get(key, self.tables['en_US'].get(key, key))
 

@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 import pytest
 import gradio as gr
-from agent_fixtures import env, select, request, send
+from agent_fixtures import env, select, request, send, settle_files
 
 
 @pytest.mark.parametrize('name', ['GPT3.5 Turbo', 'OpenAI Agent'])
@@ -85,7 +85,8 @@ def test_terminal_download_detaches_without_saving_into_new_chat(env, monkeypatc
             assert not (env.history_dir / new_path).is_file()
     monkeypatch.setattr(env.agents, 'worker_messages', worker)
     list(model.predict('hello', []))
-    assert download_cancelled == [True]
+    settle_files(model)
+    assert download_cancelled == [False]
     assert model.chatbot == [] and model._state == {'outcome': 'not_started'}
 
 
@@ -140,8 +141,9 @@ def test_real_model_worker_merges_caller_cancel_with_visit_scope(env, monkeypatc
         cancelled.append(command['_observe_cancel']())
         yield dict(type='result', artifacts=[])
     monkeypatch.setattr(env.agents, 'worker_messages', worker)
+    # No file operation is admitted until its exact turn has been captured.
     list(model._download('g'))
-    assert cancelled == [True]
+    assert cancelled == []
     monkeypatch.setattr(env.agents, 'worker_messages', lambda command: iter([{'type':'result', 'cancelled':command['_observe_cancel']()}]))
     result = list(model._worker({'action':'download', 'session_id':'s', '_observe_cancel':lambda:True}))
     assert result[0]['cancelled'] is True

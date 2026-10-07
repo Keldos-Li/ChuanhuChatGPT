@@ -159,5 +159,5 @@ def test_real_projection_preserves_commentary_order_copy_decode_and_group_identi
     assert anchor in body
     assert body.index('pwd</span>')<body.index('md-message">COMMENTARY')<body.index('echo c</span>')<body.index('md-message">FINAL')
     assert decode_rows(output,model._conversation_id)==model._display
-    raw=body.split('<div class="raw-message hideM">',1)[1].split('</div>',1)[0]
+    raw='\n\n'.join(re.findall(r'<div class="raw-message hideM">(.*?)</div>',body,re.S))
     assert html.unescape(raw)=='COMMENTARY\n\nFINAL'

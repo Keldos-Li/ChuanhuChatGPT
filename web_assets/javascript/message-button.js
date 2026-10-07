@@ -61,15 +61,66 @@ function botMessageText(botElement, rawMessage) {
             const payload = JSON.parse(new TextDecoder().decode(bytes));
             if (payload.v === 1 && payload.role === 'assistant' && typeof payload.raw === 'string'
                 && payload.key === anchor.dataset.messageKey && payload.conversation === anchor.dataset.conversationId
-                && anchor.dataset.agentMessageCell === 'assistant') return payload.raw;
+                && anchor.dataset.agentMessageCell === 'assistant')
+                return payload.raw;
         } catch (_) {}
     }
-    const text = document.createElement('div');
-    text.innerHTML = rawMessage.innerHTML.replace(/<br\s*\/?>/gi, '\n');
-    return text.textContent;
+    const bodies = agentBodySources(botElement);
+    if (bodies.length) {
+        const text = [], positions = new Set(); let owner;
+        try {
+            for (const body of bodies) {
+                const bytes = Uint8Array.from(atob(body.dataset.agentBodyRaw), char => char.charCodeAt(0));
+                const payload = JSON.parse(new TextDecoder().decode(bytes));
+                const scope = JSON.stringify([payload.conversation, payload.key]);
+                if (payload.v !== 1 || typeof payload.raw !== 'string' || payload.key !== body.dataset.messageKey
+                    || payload.conversation !== body.dataset.conversationId || !Number.isInteger(payload.position)
+                    || payload.position < 0 || positions.has(payload.position) || owner !== undefined && owner !== scope) throw new Error('Invalid body receipt');
+                owner = scope; positions.add(payload.position); text.push(payload);
+            }
+            return text.sort((a, b) => a.position - b.position).map(part => part.raw).join('\n\n');
+        } catch (_) { return null; } // Never copy truncated or guessed Agent text.
+    }
+    const raw = Array.from(botElement.querySelectorAll('.raw-message'))
+        .filter(node => !node.closest('.agent-history-activity') && !node.closest('.agent-format-receipt')
+            && !node.closest('.md-message') && !node.parentElement?.closest('.raw-message'));
+    return (raw.length ? raw : [rawMessage]).map(node => {
+        const text = document.createElement('div');
+        text.innerHTML = node.innerHTML.replace(/<br\s*\/?>/gi, '\n');
+        return text.textContent;
+    }).join('\n\n');
+
+}
+
+const agentBodyModes = new Map();
+function agentBodyKey(message) {
+    const anchor = Array.from(message.querySelectorAll('.agent-message-anchor')).reverse()
+        .find(node => node.dataset.agentMessageCell === 'assistant');
+    return anchor ? JSON.stringify([anchor.dataset.conversationId, anchor.dataset.messageKey]) : null;
+}
+function agentBodySegments(message) {
+    return Array.from(message.querySelectorAll('.agent-body-segment[data-agent-body-raw]'))
+        .filter(body => !body.parentElement?.closest('.agent-body-segment'));
+}
+function agentBodySources(message) {
+    const hidden = Array.from(message.querySelectorAll('.agent-body-copy-source[data-agent-body-raw]'))
+        .filter(node => !node.closest('.md-message') && !node.closest('.raw-message')
+            && !node.closest('.agent-history-activity') && !node.parentElement?.closest('.agent-body-segment'));
+    return [...agentBodySegments(message), ...hidden];
+}
+function applyAgentBodyMode(message, raw) {
+    const bodies = agentBodySegments(message);
+    if (!bodies.length) return false;
+    for (const body of bodies) {
+        body.querySelector('.raw-message')?.classList.toggle('hideM', !raw);
+        body.querySelector('.md-message')?.classList.toggle('hideM', raw);
+    }
+    return true;
 }
 
 function addChuanhuButton(botElement) {
+    const bodyKey = agentBodyKey(botElement);
+    if (bodyKey) applyAgentBodyMode(botElement, agentBodyModes.get(bodyKey) === 'raw');
 
     // botElement = botRow.querySelector('.message.bot');
     var isLatestMessage = botElement.classList.contains('latest');
@@ -123,6 +174,7 @@ function addChuanhuButton(botElement) {
         if (window.chuanhuSupports?.('message_copy') === false) return;
 
         let textToCopy = botMessageText(botElement, rawMessage);
+        if (textToCopy === null) return;
 
         try {
             if ("clipboard" in navigator) {
@@ -161,11 +213,11 @@ function addChuanhuButton(botElement) {
     toggleButton.type = 'button';
     toggleButton.setAttribute('aria-label', 'Toggle');
     toggleButton.hidden = window.chuanhuSupports?.('message_markdown') === false;
-    var renderMarkdown = mdMessage.classList.contains('hideM');
+    var renderMarkdown = mdMessage?.classList.contains('hideM') || false;
     toggleButton.innerHTML = renderMarkdown ? mdIcon : rawIcon;
     toggleButton.addEventListener('click', () => {
         if (window.chuanhuSupports?.('message_markdown') === false) return;
-        renderMarkdown = mdMessage.classList.contains('hideM');
+        renderMarkdown = botElement.querySelector('.md-message')?.classList.contains('hideM') || false;
         if (renderMarkdown) {
             renderMarkdownText(botElement);
             toggleButton.innerHTML=rawIcon;
@@ -184,12 +236,14 @@ function addChuanhuButton(botElement) {
     botElement.appendChild(messageBtnColumn);
 
     function renderMarkdownText(message) {
+        if (applyAgentBodyMode(message, false)) { if (bodyKey) agentBodyModes.set(bodyKey, 'rendered'); return; }
         var mdDiv = message.querySelector('.md-message');
         if (mdDiv) mdDiv.classList.remove('hideM');
         var rawDiv = message.querySelector('.raw-message');
         if (rawDiv) rawDiv.classList.add('hideM');
     }
     function removeMarkdownText(message) {
+        if (applyAgentBodyMode(message, true)) { if (bodyKey) agentBodyModes.set(bodyKey, 'raw'); return; }
         var rawDiv = message.querySelector('.raw-message');
         if (rawDiv) {
             // 判断pre是否存在fake-pre类，如果不存在，则为20231118之前的历史记录格式，需要转换，增加fake-pre类用于适配

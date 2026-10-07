@@ -13,6 +13,8 @@ def finish(task):
     task.thread.join(5)
     assert not task.thread.is_alive()
     assert task.error is None
+    from agent_fixtures import settle_files
+    settle_files(task.model)
 
 
 def new_chat(env, model):
@@ -116,14 +118,14 @@ def test_duplicate_before_session_exists_is_atomic_and_owner_scoped(env, monkeyp
         release.set(); finish(model._background_task); stream.close()
 
 
-def test_terminal_download_keeps_task_reserved_after_ui_detach(env, monkeypatch, tmp_path):
+def test_terminal_download_releases_task_and_follows_rename_after_ui_detach(env, monkeypatch, tmp_path):
     ready, release = Event(), Event()
     import tempfile
     from pathlib import Path
     file = Path(tempfile.mkdtemp(prefix='chuanhu-agent-artifacts-'))/'result.txt'; file.write_text('saved')
     def worker(command):
         if command['action'] == 'run':
-            yield dict(type='result', session_id='s', turn_id='t', outcome='completed', text='answer', sync_complete=True)
+            yield dict(type='result', session_id='s', turn_id='t', outcome='completed', text='answer', sync_complete=True, items=[dict(id='u',type='message',role='user',turn_id='t',status='completed',content=[dict(type='input_text',text='file task')]), dict(id='a',type='message',role='assistant',turn_id='t',status='completed',content=[dict(type='output_text',text='answer')])])
         elif command['action'] == 'download':
             ready.set(); assert release.wait(5)
             yield dict(type='result', artifacts=[dict(id='file', session_id='s', turn_id='t', name='result.txt', type='text/plain', status='ready', path=str(file), size=5)])
@@ -131,12 +133,16 @@ def test_terminal_download_keeps_task_reserved_after_ui_detach(env, monkeypatch,
     model = select(env); stream = env.wrappers['predict'](model, 'file task', [], request=request()); next(stream)
     assert ready.wait(3)
     try:
+        model._background_task.thread.join(3)
+        assert model._background_task.done
+        model._assert_idle()
         fresh = new_chat(env, model)
-        with pytest.raises(gr.Error): send(env, model, 'too early')
-        with pytest.raises(gr.Error): model.rename_chat_history('renamed')
+        old = model.history_file_path
+        model.rename_chat_history('renamed')
         stream.close(); release.set(); finish(model._background_task)
         binding = model._store().get(model._owner, model.history_file_path)
         assert binding['artifacts'][0]['path'] == str(file)
+        assert not (env.history_dir/old).exists()
         assert fresh._artifacts == [] and fresh.chatbot == []
         from modules.agent.tasks import TASKS
         assert TASKS.find(model) is None

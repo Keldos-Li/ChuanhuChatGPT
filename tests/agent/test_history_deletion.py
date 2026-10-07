@@ -73,9 +73,15 @@ def test_active_task_delete_retires_readers_and_late_output_cannot_restore_histo
     try:
         result=env.wrappers['delete_chat_history'](fresh,model.history_file_path,request=request())
         receipt=deleted(env,model)
-        assert task.deleted and TASKS.find(model) is None and task in TASKS.retiring
-        assert task.stop()=='本地历史已删除，云端任务停止未确认' and 'cancel' not in commands
-        assert model._retired and not fresh._retired and fresh.chatbot==[]
+        assert TASKS.find(model) is None
+        if phase == 'completed_download':
+            task.thread.join(3)
+            assert task.done
+        else:
+            assert task.deleted and task in TASKS.retiring
+        expected = '该轮任务已结束，未停止后续任务' if phase == 'completed_download' else '本地历史已删除，云端任务停止未确认'
+        assert task.stop()==expected and 'cancel' not in commands
+        assert model._local_history_deleted() and not fresh._retired and fresh.chatbot==[]
         assert list(task.subscribe(fresh))==[]
         assert receipt['remote_stop_confirmed'] is False
         release.set();finish(task);assert task not in TASKS.retiring

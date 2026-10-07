@@ -76,6 +76,7 @@ def reserve_submission(model, text, files=None):
             model._draft_acknowledged = False
             model._draft_presented = False
             model._draft_text, model._draft_conversation = text, model._conversation_id
+            model._draft_input_ids = tuple(record.input_id for record in model._reserved_inputs)
         return {'text': text, 'target': id(model), 'token': token}
 
 
@@ -115,7 +116,7 @@ class CapabilityUI:
             if not supported and clear is not None: update['value']=clear
             results.append(gr.update(**update))
         read_only = bool(getattr(model, '_read_only_observation', False)) and getattr(model, '_state', {}).get('outcome') in ('completed','cancelled','failed')
-        payload=dict(asdict(caps), busy=is_busy(model) or bool(getattr(model, '_needs_sync', False)), turn_terminal=caps.agent_tools and getattr(model, '_state', {}).get('outcome') in ('completed', 'cancelled', 'failed') and (read_only or not is_busy(model)))
+        payload=dict(asdict(caps), busy=is_busy(model) or bool(getattr(model, '_needs_sync', False)) or bool(getattr(model, '_state', {}).get('persistence_failed')), turn_terminal=caps.agent_tools and getattr(model, '_state', {}).get('outcome') in ('completed', 'cancelled', 'failed') and (read_only or not is_busy(model)))
         payload['history_filename'] = Path(getattr(model, 'history_file_path', '')).name.removesuffix('.json')
         payload['history_visit'] = model.agent_choice_target if caps.agent_tools else getattr(model, '_history_visit', '')
         payload['task_generation'] = getattr(model, '_state', {}).get('generation') if caps.agent_tools else None
@@ -132,7 +133,7 @@ class CapabilityUI:
         if self.submit is not None and self.cancel is not None:
             remote_running = getattr(model, '_state', {}).get('outcome') in ('starting','in_progress','requires_action','cancel_requested','incomplete','uncertain')
             running = (is_busy(model) and not read_only) or remote_running
-            results.extend([gr.update(visible=not running, interactive=not is_busy(model) and not getattr(model, '_needs_sync', False)), gr.update(visible=running)])
+            results.extend([gr.update(visible=not running, interactive=not is_busy(model) and not getattr(model, '_needs_sync', False) and not getattr(model, '_state', {}).get('persistence_failed')), gr.update(visible=running)])
         return results
 
     def wire(self, current_model, chatbot):

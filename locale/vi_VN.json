@@ -420,6 +420,9 @@
     },
     "ui": {
         "agent_activity": {
+            "thinking_active": "Đang suy nghĩ",
+            "thinking_completed": "Đã suy nghĩ",
+            "thinking_neutral": "Suy nghĩ",
             "elapsed_seconds": "{seconds}s",
             "elapsed_minutes_seconds": "{minutes} phút {seconds} giây"
         },

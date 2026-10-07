@@ -50,16 +50,23 @@
             const key = card.dataset.messageKey, conversation = card.dataset.conversationId;
             if (!key || !conversation || (activeConversation !== undefined && conversation !== activeConversation)) continue;
             const identity = conversation + ':' + key;
-            if (!groups.has(identity)) groups.set(identity, {key, conversation, cards: []});
+            if (!groups.has(identity)) groups.set(identity, {key, conversation, cards: [], afterKeys: new Set(), orphan: false});
             groups.get(identity).cards.push(card);
+            if (card.dataset.fileAfterKey) groups.get(identity).afterKeys.add(card.dataset.fileAfterKey);
+            if (card.dataset.fileOrphan === 'true') groups.get(identity).orphan = true;
         }
         const used = new Set();
         for (const [identity, group] of groups) {
-            const anchors = Array.from(chat.querySelectorAll('.agent-message-anchor')).filter(anchor =>
-                anchor.dataset.messageKey === group.key && anchor.dataset.conversationId === group.conversation && !anchor.closest('.history-message'));
-            if (anchors.length !== 1) continue;
-            const row = anchors[0].closest('.message-row.bot-row');
-            if (!row) continue;
+            const candidates = Array.from(chat.querySelectorAll('.agent-message-anchor')).filter(anchor =>
+                anchor.dataset.conversationId === group.conversation && !anchor.closest('.history-message'));
+            let anchors = candidates.filter(anchor => anchor.dataset.messageKey === group.key);
+            if (!anchors.length && group.afterKeys.size === 1) {
+                const afterKey = [...group.afterKeys][0];
+                anchors = candidates.filter(anchor => anchor.dataset.messageKey === afterKey);
+            }
+            if (anchors.length > 1) continue;
+            const row = anchors[0]?.closest('.message-row.bot-row');
+            if (!row && !group.orphan) continue;
             let holder = Array.from(chat.querySelectorAll('.agent-message-files')).find(node => node.dataset.fileOwner === identity);
             if (!holder) {
                 holder = document.createElement('div');
@@ -68,8 +75,15 @@
                 holder.setAttribute('role', 'group');
                 holder.setAttribute('aria-label', '此回复生成的文件');
             }
-            const markup = group.cards.map(card => card.outerHTML).join('');
+            const markup = (!row ? '<small>未关联消息的文件</small>' : '') + group.cards.map(card => card.outerHTML).join('');
             if (holder._sourceMarkup !== markup) { holder.innerHTML = markup; holder._sourceMarkup = markup; }
+            holder.classList.toggle('agent-unassociated-files', !row);
+            if (!row) {
+                const parent = chat.querySelector('.bubble-wrap') || chat;
+                if (holder.parentElement !== parent) parent.append(holder);
+                used.add(holder);
+                continue;
+            }
             if (row.nextElementSibling !== holder) row.after(holder);
             row.classList.add('agent-message-has-files');
             holder.classList.toggle('agent-files-with-avatar', !!row.querySelector('.avatar-container'));
@@ -86,7 +100,21 @@
                 row.classList.remove('agent-message-has-files');
             }
         }
-        mountLinks(chat, groups);
+        const linkGroups = new Map(groups);
+        for (const group of groups.values()) {
+            if (group.afterKeys.size !== 1) continue;
+            const alias = group.conversation + ':' + [...group.afterKeys][0];
+            const existing = linkGroups.get(alias);
+            if (existing !== group) linkGroups.set(alias, {cards: [...(existing?.cards || []), ...group.cards]});
+        }
+        mountLinks(chat, linkGroups);
+        let notice = chat.querySelector('.agent-file-notice');
+        const incomingNotice = source?.querySelector('[data-file-notice]');
+        if (incomingNotice && incomingNotice.dataset.conversationId === activeConversation) {
+            if (!notice) { notice = document.createElement('div'); notice.className = 'agent-file-notice'; }
+            if (notice.innerHTML !== incomingNotice.outerHTML) notice.innerHTML = incomingNotice.outerHTML;
+            if (!notice.parentElement) (chat.querySelector('.bubble-wrap') || chat).append(notice);
+        } else notice?.remove();
     }
     function scheduleMount() {
         if (!scheduled) { scheduled = true; queueMicrotask(mountCards); }
@@ -102,7 +130,7 @@
             event.preventDefault();
             const cards = Array.from(root().querySelectorAll('#model-output-cards .model-file-card'));
             const card = cards.find(node => node.dataset.artifactId === link.dataset.artifactId
-                && node.dataset.messageKey === link.dataset.messageKey && node.dataset.conversationId === link.dataset.conversationId
+                && (node.dataset.messageKey === link.dataset.messageKey || node.dataset.fileAfterKey === link.dataset.messageKey) && node.dataset.conversationId === link.dataset.conversationId
                 && node.dataset.conversationId === globalThis.chuanhuInputConversation?.());
             if (card && !card.disabled) card.click();
             else {
