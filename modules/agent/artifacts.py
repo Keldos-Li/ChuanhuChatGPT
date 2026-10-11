@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 import re
 from threading import Event, Lock, Thread
 
-from modules.agent.runtime import download_artifacts
+from modules.agent.runtime import download_artifacts, list_artifact_metadata
 
 
 def preparing_artifacts(records, *, session_id, turn_id):
@@ -41,9 +41,12 @@ class ArtifactObserver:
         self.ready = set(skip_artifact_ids)
         self.stop = Event()
         self.thread = None
+        self.download_thread = None
+        self.download_wake = Event()
         self.error_reported = False
         self._records = {}
         self._records_lock = Lock()
+        self._publish_lock = Lock()
 
     def snapshot(self, session_id, turn_id):
         # Short in-memory handoff only: never wait on list/content or emit.
@@ -58,27 +61,73 @@ class ArtifactObserver:
         if not self.enabled or not session_id or not turn_id or self.thread is not None:
             return
         self.session_id, self.turn_id = session_id, turn_id
+        self.download_thread = Thread(target=self._download, daemon=True)
+        self.download_thread.start()
         self.thread = Thread(target=self._watch, daemon=True)
         self.thread.start()
 
     def _publish(self, records):
-        if self.stop.is_set(): return
-        with self._records_lock:
-            for record in records:
-                if isinstance(record.get('id'), str): self._records[record['id']] = deepcopy(record)
-            self.ready.update(record['id'] for record in records if record.get('status') in ('ready', 'failed'))
-        self.emit('progress', session_id=self.session_id, artifacts=records)
+        # Keep progress emissions ordered without making snapshots wait on I/O.
+        with self._publish_lock:
+            if self.stop.is_set(): return
+            changed = []
+            discovered = False
+            with self._records_lock:
+                for record in records:
+                    key = record.get('id')
+                    if not isinstance(key, str): continue
+                    previous = self._records.get(key)
+                    # Metadata may race a completed byte transfer. Immutable file
+                    # receipts never regress to preparing on a later list response.
+                    if record.get('status') == 'preparing' and key in self.ready: continue
+                    if previous and record.get('status') == 'preparing':
+                        record = dict(previous, **record)
+                    if previous == record: continue
+                    discovered |= previous is None and record.get('status') == 'preparing'
+                    self._records[key] = deepcopy(record)
+                    if record.get('status') in ('ready', 'failed'): self.ready.add(key)
+                    changed.append(record)
+            if changed and not self.stop.is_set():
+                self.emit('progress', session_id=self.session_id, artifacts=changed)
+                if discovered: self.download_wake.set()
+
 
     def _refresh(self):
         try:
-            download_artifacts(self.client, self.session_id, turn_id=self.turn_id,
-                               skip_artifact_ids=self.ready, on_progress=self._publish, cache_root=self.cache_root, should_cancel=self.stop.is_set, live=True)
+            with self._records_lock: skip = tuple(self.ready)
+            records = list_artifact_metadata(self.client, self.session_id,
+                turn_id=self.turn_id, skip_artifact_ids=skip)
+            self._publish(records)
             self.error_reported = False
         except Exception:
             if not self.error_reported and not self.stop.is_set():
                 self.emit('progress', session_id=self.session_id,
                           artifact_error='文件列表暂时无法读取；回答不受影响，可稍后重试')
                 self.error_reported = True
+
+    def _download(self):
+        # One byte worker and a coalesced identity map, never a thread per file.
+        # A slow content stream cannot prevent subsequent metadata discovery.
+        error_reported = False
+        while not self.stop.is_set():
+            self.download_wake.wait(self.interval)
+            self.download_wake.clear()
+            if self.stop.is_set(): break
+            with self._records_lock:
+                pending = [key for key, record in self._records.items()
+                           if record.get('status') == 'preparing' and key not in self.ready][:32]
+                skip = tuple(self.ready)
+            if not pending: continue
+            try:
+                download_artifacts(self.client, self.session_id, turn_id=self.turn_id,
+                    artifact_ids=pending, skip_artifact_ids=skip, on_progress=self._publish,
+                    cache_root=self.cache_root, should_cancel=self.stop.is_set, live=True)
+                error_reported = False
+            except Exception:
+                if not error_reported and not self.stop.is_set():
+                    self.emit('progress', session_id=self.session_id,
+                              artifact_error='文件暂时无法下载；回答不受影响，可稍后重试')
+                    error_reported = True
 
     def _watch(self):
         while not self.stop.is_set():
@@ -87,5 +136,6 @@ class ArtifactObserver:
 
     def __exit__(self, *args):
         self.stop.set()
+        self.download_wake.set()
         if self.thread is not None:
             self.thread.join(timeout=0.5)

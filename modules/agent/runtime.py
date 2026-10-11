@@ -141,6 +141,8 @@ class TurnState:
     turn_id: str | None = None
     outcome: str = 'starting'
     parts: dict = field(default_factory=dict)
+    # View-only public output activity; never evidence of final item/turn completeness.
+    streaming_text_parts: set = field(default_factory=set)
     seen: set = field(default_factory=set)
     progress: str = ''
     ignored_turn_ids: set = field(default_factory=set)
@@ -389,6 +391,7 @@ class TurnState:
         keys_by_object={id(value):key for key,value in self.items.items()}
         return {'session_id': self.session_id, 'turn_id': self.turn_id, 'outcome': self.outcome,
                 'text': self.text, 'progress': self.progress, 'baseline_turn_ids': sorted(self.ignored_turn_ids),
+                'public_text_streaming': bool(self.streaming_text_parts) and self.outcome not in TERMINAL,
                 'submission_started': self.submission_started, 'items': ordered,
                 'required_actions': deepcopy(self.required_actions), 'settings': deepcopy(self.settings),
                 'sync_complete': self.sync_complete, 'history_authoritative': self.history_authoritative,
@@ -477,6 +480,17 @@ class TurnState:
                 if item == previous: return
                 self._invalidate(identifier)
             self.items[identifier] = _preview_item(previous, item)
+            if item.get('type') == 'message' and item.get('role') == 'assistant':
+                if kind.endswith('.done') or item.get('status') in ('completed','failed','cancelled','incomplete'):
+                    self.streaming_text_parts = {key for key in self.streaming_text_parts if key[0] != identifier}
+                elif item.get('status') == 'in_progress':
+                    old_parts = previous.get('content') or []
+                    if not isinstance(old_parts, list): old_parts = []
+                    for index, part in enumerate(item.get('content') or []):
+                        if (isinstance(part, dict) and part.get('type') in ('output_text','text') and part.get('text')
+                                and (index >= len(old_parts) or not isinstance(old_parts[index], dict)
+                                     or old_parts[index].get('text') != part['text'])):
+                            self.streaming_text_parts.add((identifier, index))
             phase = 'completed' if kind.endswith('.done') and item.get('type') == 'reasoning' and item.get('status') is None else None
             self.activity.observe(item, first=kind.endswith('.added'), phase=phase)
             if item.get('type') == 'function_call_output' and item.get('call_id'):
@@ -496,6 +510,9 @@ class TurnState:
                     while len(content) <= index: content.append({'type': 'output_text', 'text': ''})
                     content[index] = deepcopy(part)
                     if isinstance(part.get('text'), str): self.parts[(identifier, event.get('output_index'), index)] = part['text']
+                    if part.get('type') in ('output_text', 'text'):
+                        if kind.endswith('.done'): self.streaming_text_parts.discard((identifier, index))
+                        elif part.get('text'): self.streaming_text_parts.add((identifier, index))
         if kind in ('agent.session.turn.output_text.delta', 'agent.session.turn.output_text.done'):
             item = event.get('item_id')
             output_index, content_index = event.get('output_index'), event.get('content_index')
@@ -510,6 +527,8 @@ class TurnState:
             item_record = self.items.setdefault(item, {'id': item, 'type': 'message', 'role': 'assistant', 'turn_id': turn_id, 'status': 'in_progress', 'content': []})
             while len(item_record['content']) <= content_index: item_record['content'].append({'type': 'output_text', 'text': ''})
             item_record['content'][content_index] = {'type': 'output_text', 'text': self.parts[part]}
+            if kind.endswith('.done'): self.streaming_text_parts.discard((item, content_index))
+            elif event.get('delta'): self.streaming_text_parts.add((item, content_index))
         if kind in ('agent.session.turn.reasoning_summary_part.added','agent.session.turn.reasoning_summary_part.done'):
             identifier,index,part=event.get('item_id'),event.get('summary_index'),event.get('part')
             record=self.items.get(identifier)
@@ -720,6 +739,7 @@ def _snapshot_items(items):
 
 def _seed(state, saved):
     state.parts = {}
+    state.streaming_text_parts.clear()
     state.turn_id, state.outcome = saved['turn_id'], saved['outcome']
     state.items = _snapshot_items(saved['items'])
     occurrences = saved.get('item_occurrences', {})
@@ -747,13 +767,19 @@ def _process_events(client, events, state, settings, on_progress, *, read_only=F
             # snapshot cannot safely be appended again (or suffix-deduplicated).
             # Refresh these pre-existing incomplete items from saved state;
             # coalesce reads while their complete .done event is still pending.
-            if kind != 'agent.output.command_execution_output.delta': state._observe_segment_event(event)
+            if kind != 'agent.output.command_execution_output.delta':
+                observed = state._observe_segment_event(event)
+                if (observed and kind == 'agent.session.turn.output_text.delta' and event.get('delta')
+                        and state.items.get(item_id, {}).get('status') not in ('completed','failed','cancelled','incomplete')):
+                    state.streaming_text_parts.add((item_id, event['content_index']))
             if time.monotonic() - state.last_partial_refresh >= 0.25:
                 latest = all_records(client.beta.agents.sessions.items.list(state.session_id, limit=100, order='asc'))
                 for item in latest:
                     if item.get('id') in state.snapshot_partial_ids and item.get('id') not in state.final_items:
                         state._observe_parts(item['id'], item)
                         state.items[item['id']] = deepcopy(item)
+                        if item.get('status') in ('completed','failed','cancelled','incomplete'):
+                            state.streaming_text_parts = {key for key in state.streaming_text_parts if key[0] != item['id']}
                 state.last_partial_refresh = time.monotonic()
             state.sync_complete = None
             if on_progress: on_progress(state)
@@ -1101,10 +1127,7 @@ def update_settings(client, session_id, model, reasoning):
     except Exception as error: raise _error(error, phase=phase) from None
 
 
-def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), on_progress=None, cache_root=None, should_cancel=None, live=False, on_metadata=None, turn_id=None):
-    """发布文件进度；缓存按不可变文件身份复用，忙碌下载留给下一次观察。"""
-    from contextlib import nullcontext
-    from modules.agent.artifact_cache import ArtifactCache, ArtifactBusy
+def _listed_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), turn_id=None):
     try: artifacts = all_records(client.beta.agents.sessions.artifacts.list(session_id, limit=100))
     except Exception as error: raise _error(error) from None
     artifacts = [artifact for artifact in artifacts if (artifact_ids is None or artifact.get('id') in artifact_ids) and artifact.get('id') not in skip_artifact_ids]
@@ -1121,6 +1144,25 @@ def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_i
                     name=Path(str(artifact.get('path') or artifact.get('filename') or 'artifact')).name,
                     size=artifact.get('size_bytes'), status='failed', error='文件归属尚未确认，请重新获取'))
         artifacts = proven
+    return artifacts, unassociated
+
+
+def list_artifact_metadata(client, session_id, *, skip_artifact_ids=(), turn_id=None):
+    """Read published identity/ownership without touching content or cache locks."""
+    artifacts, unassociated = _listed_artifacts(client, session_id,
+        skip_artifact_ids=skip_artifact_ids, turn_id=turn_id)
+    return [{'id':a['id'], 'session_id':a.get('session_id'), 'turn_id':a.get('turn_id'),
+             'name':Path(str(a.get('path') or a.get('filename') or 'artifact')).name,
+             'size':a.get('size_bytes'), 'status':'preparing',
+             'remote_path':a.get('path') or a.get('filename')} for a in artifacts] + unassociated
+
+
+def download_artifacts(client, session_id, *, artifact_ids=None, skip_artifact_ids=(), on_progress=None, cache_root=None, should_cancel=None, live=False, on_metadata=None, turn_id=None):
+    """发布文件进度；缓存按不可变文件身份复用，忙碌下载留给下一次观察。"""
+    from contextlib import nullcontext
+    from modules.agent.artifact_cache import ArtifactCache, ArtifactBusy
+    artifacts, unassociated = _listed_artifacts(client, session_id,
+        artifact_ids=artifact_ids, skip_artifact_ids=skip_artifact_ids, turn_id=turn_id)
     if on_metadata:
         on_metadata([{'id':a['id'],'session_id':a.get('session_id'), 'turn_id':a.get('turn_id'),
                       'name':Path(str(a.get('path') or a.get('filename') or 'artifact')).name,

@@ -423,16 +423,37 @@ def test_existing_snapshot_is_idempotent_and_still_allows_next_model(env, monkey
     model.freeze_agent_configuration(snapshot['tools'], snapshot['instructions'], 1, model._conversation_id)
     model._needs_sync = False
     model.set_agent_model('gpt-6-sol', 'high')
+    model._state['public_text_streaming'] = True  # A prior generation must not suppress new waiting state.
     with model._lock:
         model.freeze_agent_configuration(snapshot['tools'], snapshot['instructions'], 1, model._conversation_id)
         envelope = reserve_submission(model, 'Next model')
-    list(env.wrappers['predict'](model, envelope, model.chatbot, request=request()))
-    assert model._state['session_id'] == session
-    assert model._session_settings['tools'] == snapshot['tools']
-    assert model._session_settings['instructions'] == snapshot['instructions']
-    assert model.agent_model_choice == ('gpt-6-sol', 'high')
-    assert [call['action'] for call in calls][-3:] == ['update', 'run', 'download']
-
+    from threading import Event
+    entered, release, finished = Event(), Event(), Event()
+    worker = env.agents.worker_messages
+    def hold_download(command):
+        try:
+            for frame in worker(command):
+                if command['action'] == 'download':
+                    entered.set()
+                    assert release.wait(5), 'Test did not release independent download'
+                yield frame
+        finally:
+            if command['action'] == 'download': finished.set()
+    monkeypatch.setattr(env.agents, 'worker_messages', hold_download)
+    try:
+        list(env.wrappers['predict'](model, envelope, model.chatbot, request=request()))
+        assert entered.wait(3), 'Independent download job did not start'
+        assert not finished.is_set() and not release.is_set()
+        model._assert_idle()  # UI completion must not wait for the held file job.
+        assert model._state['public_text_streaming'] is False
+        assert model._state['session_id'] == session
+        assert model._session_settings['tools'] == snapshot['tools']
+        assert model._session_settings['instructions'] == snapshot['instructions']
+        assert model.agent_model_choice == ('gpt-6-sol', 'high')
+        assert [call['action'] for call in calls][-3:] == ['update', 'run', 'download']
+    finally:
+        release.set()
+        settle_files(model)
 
 def test_attachment_selection_keeps_configuration_editable_until_first_send(env,tmp_path,monkeypatch):
     model,paths,service,calls=staged(env,tmp_path,monkeypatch)

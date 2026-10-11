@@ -60,12 +60,14 @@
         const waiting = snapshot.agent_tools && snapshot.busy && !snapshot.turn_terminal && state &&
             state.dataset.conversationId === snapshot.input_target && state.dataset.turnId === snapshot.agent_turn_id &&
             state.dataset.waiting === 'true';
+        const empty = !!(waiting && state.dataset.empty === 'true');
+        if (bot.classList.contains('agent-loading-only') !== empty) bot.classList.toggle('agent-loading-only', empty);
         let loader = bot.querySelector('.generating-loader');
         if (waiting && !loader) {
             loader = document.createElement('div');
             loader.className = 'generating-loader';
             loader.setAttribute('aria-label', '等待回答');
-            bot.prepend(loader);
+            bot.appendChild(loader);
         }
         if (!waiting) loader?.remove();
     };

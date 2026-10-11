@@ -814,3 +814,9 @@ img.avatar-image {
 
 #chuanhu-chatbot .agent-unassociated-files,
 #chuanhu-chatbot .agent-file-notice { margin-block: 12px; align-self: center; max-width: 300px; }
+
+/* An empty Gradio message button still has a line box. The scoped receipt
+   proves that this cell has no visible body/activity before collapsing it. */
+#chuanhu-chatbot .message.bot.agent-loading-only > button[data-testid="bot"] {
+    display: none !important;
+}

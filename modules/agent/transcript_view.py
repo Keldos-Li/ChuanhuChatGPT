@@ -149,6 +149,20 @@ def _tool_group(group, *, scope, conversation, **kwargs):
             +'</span>'+timer+_CHEVRON+'</summary><div class="agent-tool-list">'+children+'</div></details></div>')
 
 
+def _activity_phase(entry, clock=None, outputs=None):
+    kind=entry['source_type'];details=entry.get('details',{})
+    observed=(clock or {}).get(entry.get('source_id'),{})
+    phase=observed.get('phase') or entry.get('activity_phase') or entry.get('status') or 'incomplete'
+    if kind=='function_call' and phase=='completed' and not observed and 'activity_phase' not in entry:
+        result=(outputs or {}).get((entry.get('turn_ref'),details.get('call_id')))
+        phase=('failed' if result.get('details',{}).get('error') else 'completed') if result else 'waiting'
+    if kind=='function_call_output' and phase=='incomplete' and not observed:
+        phase='failed' if details.get('error') else 'completed'
+    phase={'in_progress':'running','requires_action':'waiting'}.get(phase,phase)
+    if phase not in ('running','waiting','completed','failed','incomplete','cancelled','turn_cancelled','turn_failed','unknown'):phase='unknown'
+    return phase
+
+
 def _activity(entries, *, clock=None, conversation='', active=False, calls=None, outputs=None, mcp_ambiguous=None, scope='', wrap=True):
     out=[]
     if mcp_ambiguous is None:mcp_ambiguous=_mcp_collisions(entries)
@@ -172,14 +186,7 @@ def _activity(entries, *, clock=None, conversation='', active=False, calls=None,
             action=details.get('action')
             title={'search':'网页搜索','open_page':'打开网页','find_in_page':'页内查找'}.get(action.get('type') if isinstance(action,dict) else None,'网页工具')
         observed=(clock or {}).get(entry.get('source_id'),{})
-        phase=observed.get('phase') or entry.get('activity_phase') or entry.get('status') or 'incomplete'
-        if kind=='function_call' and phase=='completed' and not observed and 'activity_phase' not in entry:
-            result=(outputs or {}).get((entry.get('turn_ref'),details.get('call_id')))
-            phase=('failed' if result.get('details',{}).get('error') else 'completed') if result else 'waiting'
-        if kind=='function_call_output' and phase=='incomplete' and not observed:
-            phase='failed' if details.get('error') else 'completed'
-        phase={'in_progress':'running','requires_action':'waiting'}.get(phase,phase)
-        if phase not in labels:phase='unknown'
+        phase=_activity_phase(entry,clock,outputs)
         running=bool(active and observed.get('running') and phase in ('running','waiting'))
         status=labels[phase]
         flags=entry.get('capture',{})
@@ -276,7 +283,7 @@ def project_transcript(model, rows):
     waiting_row = turn_rows.get(current_ref)
     if waiting_row is not None:
         if projection.rows[waiting_row][1] is None: projection.rows[waiting_row][1] = ''
-        projection.reply_state = (waiting_row, current_source_turn, not bool((rows[waiting_row][1] or '').strip()))
+        projection.reply_state = (waiting_row, current_source_turn, False)
     clocks={record.get('item_id'):record for record in getattr(model,'_activity_records',[])
             if isinstance(record,dict) and record.get('turn_id')==model._state.get('turn_id')}
     active=bool((getattr(model,'_running',False) or getattr(model,'_background_busy',False))
@@ -291,6 +298,20 @@ def project_transcript(model, rows):
         else:mapping[key]=entry['details'].get('name','') if entry['source_type']=='function_call' else entry
     for key in ambiguous_calls:calls.pop(key,None);outputs.pop(key,None)
     for key in ambiguous_outputs:outputs.pop(key,None)
+    if waiting_row is not None:
+        # A sentence is not a turn completion signal. Dots indicate waiting,
+        # while visible text streaming and active tools supply their own state.
+        tool_active = any(entry['kind'] == 'tool' and entry.get('turn_ref') == current_ref
+                          and _activity_phase(entry, clocks, outputs) in ('running', 'waiting')
+                          for entry in view['timeline'])
+        public_text_streaming = model._state.get('public_text_streaming')
+        if type(public_text_streaming) is not bool:
+            # Compatibility for saved/older snapshots without segment receipts.
+            messages = [entry for entry in view['timeline'] if entry['kind'] == 'message'
+                        and entry.get('role') == 'assistant' and entry.get('turn_ref') == current_ref]
+            public_text_streaming = bool(messages and messages[-1].get('status') == 'in_progress'
+                and any(part.get('text', '').strip() for part in messages[-1].get('content', [])))
+        projection.reply_state = (waiting_row, current_source_turn, active and not tool_active and not public_text_streaming)
     projection.cell_details = {}
     projection.cell_segments = {}
     def append(row, column, markup):
@@ -344,6 +365,12 @@ def project_transcript(model, rows):
             # Do not rewrite a raw body whose identity/alignment is ambiguous.
             markup=''.join(segment['markup'] for segment in segments if 'markup' in segment)
             if markup:projection.cell_segments[(row,1)]=[{'markup':markup},{'text':rows[row][1] or ''}]
+    if waiting_row is not None and not (rows[waiting_row][1] or '').strip():
+        # User-only snapshots have no assistant occurrence to create segments.
+        # Use the same hidden formatter receipt as tool-only responses instead
+        # of rendering an empty Markdown body beside the loader.
+        projection.cell_segments.setdefault((waiting_row, 1), [] if not rows[waiting_row][1]
+                                             else [{'text': rows[waiting_row][1]}])
     for turn, markup in activity.items():
         row = turn_rows.get(turn)
         if row is None:
@@ -403,6 +430,8 @@ def project_transcript(model, rows):
             projection.reply_state = (positions[row], turn, waiting)
     if hasattr(projection, 'reply_state'):
         row, turn, waiting = projection.reply_state
+        empty = not (projection.rows[row][1] or '').strip() and not projection.cell_details.get((row, 1)) and not any(
+            segment.get('markup') for segment in projection.cell_segments.get((row, 1), []))
         append(row, 1, '<span hidden class="agent-reply-state" data-conversation-id="' + html.escape(model._conversation_id, quote=True)
-               + '" data-turn-id="' + html.escape(turn, quote=True) + '" data-waiting="' + ('true' if waiting else 'false') + '"></span>')
+               + '" data-empty="' + ('true' if empty else 'false') + '" data-turn-id="' + html.escape(turn, quote=True) + '" data-waiting="' + ('true' if waiting else 'false') + '"></span>')
     return projection

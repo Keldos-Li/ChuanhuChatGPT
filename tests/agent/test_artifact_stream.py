@@ -10,7 +10,7 @@ def test_live_poll_publishes_file_before_turn_finishes(monkeypatch):
     published = Event()
     calls, frames = [], []
 
-    def download(client, session_id, *, skip_artifact_ids, on_progress, cache_root, should_cancel, live, turn_id):
+    def download(client, session_id, *, skip_artifact_ids, on_progress, cache_root, should_cancel, live, turn_id, artifact_ids):
         calls.append(set(skip_artifact_ids))
         if 'file-one' not in skip_artifact_ids:
             on_progress([{'id': 'file-one', 'status': 'ready', 'path': '/synthetic'}])
@@ -18,13 +18,14 @@ def test_live_poll_publishes_file_before_turn_finishes(monkeypatch):
 
     def emit(kind, **frame):
         frames.append(frame)
-        published.set()
+        if frame.get('artifacts', [{}])[0].get('status') == 'ready': published.set()
 
+    monkeypatch.setattr(artifacts, 'list_artifact_metadata', lambda *args, **kwargs: [{'id':'file-one','status':'preparing'}])
     monkeypatch.setattr(artifacts, 'download_artifacts', download)
     with ArtifactObserver(object(), emit, interval=0.01) as observer:
         observer.observe_session('sess_one', 'turn_one')
         assert published.wait(1)
-        assert frames[0]['artifacts'][0]['status'] == 'ready'
+        assert frames[-1]['artifacts'][0]['status'] == 'ready'
         assert not observer.stop.is_set()
     assert observer.ready == {'file-one'}
 

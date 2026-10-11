@@ -384,11 +384,11 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self._pending_model_settings = (self._pending_model_settings[0], normalize_reasoning(self._pending_model_settings[1]))
             if binding.get('connection_ref') != self._connection_reference():
                 self._notice = '当前连接配置与原会话不同，未连接云端；可恢复原配置，或明确按现配置新建并继续'
-                self._state = dict(binding['state'], outcome='incomplete')
+                self._state = dict(binding['state'], outcome='incomplete', public_text_streaming=False)
                 self._needs_sync = True
                 self._connection_mismatch = True
             else:
-                self._state = binding['state']
+                self._state = dict(binding['state'], public_text_streaming=False)
                 if not self._state.get('session_id') and self._state.get('outcome') not in TERMINAL:
                     self._state['outcome'] = 'uncertain'
                 self._needs_sync = True
@@ -954,6 +954,12 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self.chatbot = deepcopy(self._display)
             self.auto_save(self.chatbot)
             self._history_submission_saved_generation = generation
+        # Ephemeral public output activity, scoped by the generation/session/turn
+        # guards above. File-only progress does not change the text stream phase.
+        if type(message.get('public_text_streaming')) is bool:
+            self._state['public_text_streaming'] = message['public_text_streaming']
+        elif isinstance(message.get('items'), list):
+            self._state.pop('public_text_streaming', None)
         outcome = message.get('outcome')
         if outcome and (not self._cancel_requested or outcome in TERMINAL): self._state['outcome'] = outcome
         # Publish already-known file metadata in the same snapshot as body.
@@ -1211,7 +1217,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             reference = deepcopy(self._input_seed_reference) if self._input_seed_reference is not None else _text_history(self.history) if not self._state.get('session_id') else None
             if not self._state.get('session_id') or self._input_seed_reference is not None: self._first_prompt = display_input
             generation = uuid4().hex
-            self._state = dict(self._state, generation=generation, turn_id=None, outcome='starting', baseline_turn_ids=None, submission_started=False)
+            self._state = dict(self._state, generation=generation, turn_id=None, outcome='starting', baseline_turn_ids=None, submission_started=False, public_text_streaming=False)
             self._display = [list(row) for row in chatbot or []] + [[display_input, '']]
             self.history.extend([{'role': 'user', 'content': display_input}, {'role': 'assistant', 'content': ''}])
             self._answer_index, self._answer_row = len(self.history) - 1, len(self._display) - 1

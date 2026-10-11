@@ -57,9 +57,9 @@ def test_waiting_authoritative_first_tool_append_body_and_terminal_stay_one_repl
     assert m._display==[['question',None]] and m._answer_index==1 and m._answer_row==0
     assert_single(m)
     update(m,[user,command()],history_authoritative=True)
-    assert_single(m,tool=True)
+    assert_single(m,tool=True,waiting=False)
     update(m,[user,command(),command('cmd2')],history_authoritative=True)
-    assert_single(m,tool=True)
+    assert_single(m,tool=True,waiting=False)
     # A text-only event after the authoritative user-only snapshot is retained.
     assert m._accept(dict(type='progress',session_id='sess_test',turn_id='t1',text='Body',outcome='in_progress'),'g')
     assert m._display==[['question','Body']]
@@ -74,7 +74,7 @@ def test_partial_current_user_replaces_preview_without_splitting_tools(env):
     m=model(env)
     update(m,[message('u','question',role='user'),command()])
     assert not m._transcript_preview
-    assert_single(m,tool=True)
+    assert_single(m,tool=True,waiting=False)
 
 
 @pytest.mark.parametrize('outcome',['completed','cancelled','failed'])
@@ -84,7 +84,7 @@ def test_terminal_user_only_history_tools_have_same_reply_without_fake_message(e
     m._state['outcome']=outcome;m._running=False
     m._sync_items(m._cloud_items)
     assert m.history==[{'role':'user','content':'question'}]
-    assert_single(m,tool=True)
+    assert_single(m,tool=True,waiting=False)
     assert len([x for x in m.history_document({})['agent_transcript']['timeline'] if x['kind']=='message'])==1
 
 
@@ -121,7 +121,7 @@ def test_stale_generation_cannot_change_current_reply(env):
     before=deepcopy(m._display)
     assert not m._accept(dict(type='progress',items=[message('other','wrong',role='user')],turn_id='other',session_id='sess_test'),'stale')
     assert m._display==before
-    assert_single(m,tool=True)
+    assert_single(m,tool=True,waiting=False)
 
 
 def test_turn_files_remain_explicit_separate_section(env):

@@ -65,3 +65,36 @@ context.window.chuanhuClearHistoryIntent();
 marker.dataset.modelCapabilities=JSON.stringify({history_visit:'visit-cleared',history_filename:'draft'});observer();
 assert.strictEqual(submits,3);
 console.log('Latest history intent passed: queued acknowledgment, bounded resubmit, nested actions, clear');
+
+// The server's scoped state drives one loader below the body, including gaps
+// after text. No timer, DOM text heuristic or last-bubble guessing is involved.
+const classes = new Set();
+const state = {dataset:{conversationId:'chat',turnId:'turn',waiting:'true',empty:'true'}};
+const body = {name:'body'}, controls = {name:'controls'};
+const children = [body, controls];
+const bot = {
+ classList:{contains:key=>classes.has(key),toggle:(key,on)=>on?classes.add(key):classes.delete(key)},
+ querySelector:selector=>selector==='.agent-reply-state'?state:children.find(n=>n.className==='generating-loader'),
+ appendChild:node=>children.push(node)
+};
+document.createElement=()=>({setAttribute(){},remove(){children.splice(children.indexOf(this),1);}});
+selectors['#chuanhu-chatbot .message-wrap .message.bot']=[bot];
+function capabilities(extra={}) {
+ marker.dataset.modelCapabilities=JSON.stringify({agent_tools:true,busy:true,turn_terminal:false,input_target:'chat',agent_turn_id:'turn',...extra});observer();
+}
+capabilities();assert.strictEqual(children.length,3);assert(classes.has('agent-loading-only'));
+assert.strictEqual(children.at(-1).className,'generating-loader');
+observer();assert.strictEqual(children.length,3,'repeated refresh cannot duplicate loader');
+state.dataset.empty='false';observer();assert(!classes.has('agent-loading-only'));
+assert.strictEqual(children.at(-1).className,'generating-loader','a completed sentence keeps waiting dots below it');
+state.dataset.waiting='false';observer();assert.strictEqual(children.length,2,'active text stream hides waiting dots');
+observer();assert.strictEqual(children.length,2,'repeated chunks do not flash dots');
+state.dataset.waiting='true';observer();assert.strictEqual(children.length,3,'explicit text-done resumes waiting');
+state.dataset.waiting='false';observer();assert.strictEqual(children.length,2,'visible running tool replaces loader');
+state.dataset.waiting='true';observer();assert.strictEqual(children.length,3,'between tools the loader returns');
+for (const extra of [{turn_terminal:true},{busy:false},{agent_turn_id:'other'},{input_target:'other'}]) {
+ capabilities(extra);assert.strictEqual(children.length,2);assert(!classes.has('agent-loading-only'));
+ capabilities();assert.strictEqual(children.length,3);
+}
+capabilities({turn_terminal:true});
+console.log('Agent loader passed: compact empty, text streaming, below completed text, tool gaps, terminal/error/cancel, scoped identity');
