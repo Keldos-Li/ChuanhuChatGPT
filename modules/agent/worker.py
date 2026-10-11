@@ -13,7 +13,7 @@ from modules.agent.tools import ToolConfigurationError
 from modules.agent.inputs import prepare_inputs
 from modules.agent.runtime import (AgentError, create_client, run_task, inspect_saved, recover_stream,
                      cancel_session, download_artifacts, find_uncertain_session, update_settings,
-                     submit_browser_response, safe_request_error)
+                     submit_browser_response, safe_request_error, TERMINAL)
 
 
 _output_lock = Lock()
@@ -138,8 +138,10 @@ def main():
                 return snapshot
             def progress(value):
                 nonlocal state, terminal_emitted
+                if terminal_emitted: return
                 state = value
-                if action == 'run' and value.turn_complete:
+                if (value.outcome in TERMINAL
+                        and (action == 'run' and value.turn_complete or value.sync_complete is True)):
                     # Publish before stream/context teardown. The parent transport
                     # finishes on result and reaps this worker asynchronously.
                     emit('result', **terminal_snapshot(value))
@@ -177,7 +179,7 @@ def main():
                 if action in ('recover_unknown', 'observe_unknown'): session_id, turn_id = find_uncertain_session(client, command.get('run_id'))
                 state = recover_stream(client, session_id, turn_id, baseline_turn_ids=command.get('baseline_turn_ids'),
                        submission_started=command.get('submission_started') is True, tool_settings=command.get('tool_settings'), on_progress=progress, read_only=action in ('observe', 'observe_unknown'), observation=command.get('observation'))
-                emit('result', **terminal_snapshot(state))
+                if not terminal_emitted: emit('result', **terminal_snapshot(state))
             elif action == 'inspect':
                 emit('result', **inspect_saved(client, session_id, command.get('turn_id'), command.get('baseline_turn_ids'), command.get('submission_started') is True))
             elif action == 'cancel': emit('result', session_id=session_id, turn_id=command.get('turn_id'), **cancel_session(client, session_id, command.get('turn_id')))
@@ -189,6 +191,9 @@ def main():
                 emit('result', session_id=session_id, **result)
                 command.pop('response', None)
     except Exception as error:
+        # A verified final receipt was already delivered. Teardown cannot
+        # revoke it or append a contradictory error/progress message.
+        if terminal_emitted: return
         snapshot = getattr(error, 'state', None) or state
         sanitized = error if isinstance(error, (AgentError, AgentConnectionError, ToolConfigurationError)) else safe_request_error(error)
         if action == 'prepare_inputs':

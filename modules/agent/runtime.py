@@ -13,6 +13,7 @@ import time
 from threading import Thread
 from uuid import uuid4
 from modules.agent.activity import ActivityClock
+from modules.agent.completion_timing import new_timing, safe_timing, mark
 from modules.agent.reasoning import compatible_reasoning, ReasoningConfigurationError
 
 try:
@@ -169,11 +170,13 @@ class TurnState:
     root_identity_conflict: bool = False
     observed_parts: dict = field(default_factory=dict)
     invalid_final_items: set = field(default_factory=set)
+    incomplete_final_items: set = field(default_factory=set)
     position_conflicts: set = field(default_factory=set)
     limited_items: set = field(default_factory=set)
     unverifiable_stream: bool = False
     observed_part_count: int = 0
     prior_observations: dict = field(default_factory=dict)
+    completion_timing: dict = field(default_factory=new_timing)
 
     def observation_snapshot(self):
         """Private, versioned receipts survive worker replacement and history load."""
@@ -233,15 +236,25 @@ class TurnState:
     @property
     def turn_complete(self):
         """A complete observed turn is an incremental receipt, never a session snapshot."""
+        return not self.completion_gate_reasons()
+
+    def completion_gate_reasons(self):
         current = [(key, item) for key, item in self.items.items() if item.get("turn_id") == self.turn_id]
         output = [(key, item) for key, item in current if _output_item(item)]
         indices = [self.output_order.get(key) for key, _ in output]
-        return bool(self.root_started and self.terminal_verified and not self.stream_gap
-                    and not self.snapshot_partial_ids and output
-                    and all(key in self.final_items for key, item in current)
-                    and _terminal_snapshot_ready(list(self.items.values()), self.turn_id, self.outcome)
-                    and all(type(index) is int for index in indices)
-                    and sorted(indices) == list(range(len(indices))))
+        checks = (
+            ('root_not_started', self.root_started),
+            ('terminal_unverified', self.terminal_verified),
+            ('stream_gap', not self.stream_gap),
+            ('snapshot_overlap', not self.snapshot_partial_ids),
+            ('incomplete_coverage', not self.incomplete_final_items),
+            ('missing_output', bool(output)),
+            ('unfinished_items', all(key in self.final_items for key, _ in current)),
+            ('unsettled_items', _terminal_snapshot_ready(list(self.items.values()), self.turn_id, self.outcome)),
+            ('output_positions', all(type(index) is int for index in indices)
+                and sorted(indices) == list(range(len(indices)))),
+        )
+        return [reason for reason, valid in checks if not valid]
 
     @staticmethod
     def _part_groups(item):
@@ -264,10 +277,15 @@ class TurnState:
                 return False
         return True
 
-    def _invalidate(self, identifier, *, unknown=False):
-        self.stream_gap = True
+    def _invalidate(self, identifier, *, unknown=False, coverage_only=False):
+        # Missing known parts may be superseded by a full authoritative done.
+        # Integrity failures remain sticky and can only be resolved by GET.
+        if coverage_only:
+            self.incomplete_final_items.add(identifier)
+        else:
+            self.stream_gap = True
+            self.invalid_final_items.add(identifier)
         self.final_items.discard(identifier)
-        self.invalid_final_items.add(identifier)
         self.unverifiable_stream |= unknown
 
     def _observe_output_index(self, identifier, index, *, required=False):
@@ -301,7 +319,7 @@ class TurnState:
             self.limited_items.add(identifier)
             self._invalidate(identifier)
         if identifier in self.final_items and not self._covers_shapes(self.items[identifier], shapes):
-            self._invalidate(identifier)
+            self._invalidate(identifier, coverage_only=True)
         return supported
 
     def _observe_parts(self, identifier, item):
@@ -399,6 +417,7 @@ class TurnState:
                 'turns': deepcopy(self.turns), 'transcript_artifacts': deepcopy(self.transcript_artifacts),
                 'capture': dict(self.capture, items='complete' if self.sync_complete is True else 'partial'),
                 'activity': self.activity.snapshot(),
+                'completion_timing': safe_timing(self.completion_timing),
                 'item_occurrences': {index: self.occurrence_ids[key] for index, item in enumerate(ordered) for key in [keys_by_object[id(item)]] if key in self.occurrence_ids}}
 
     def accept(self, event):
@@ -471,9 +490,9 @@ class TurnState:
             if was_final and not kind.endswith('.done') and not _item_settled(item, 'cancelled'):
                 self._invalidate(identifier)
             covers = self._covers_shapes(item, self.observed_parts.get(identifier, {}))
-            if not covers: self._invalidate(identifier)
+            if not covers: self._invalidate(identifier, coverage_only=True)
             if kind.endswith('.done') and not self._valid_final(identifier, item):
-                self._invalidate(identifier)
+                self._invalidate(identifier, coverage_only=not covers and _item_payload_complete(item))
                 self.items[identifier] = _preview_item(previous, item)
                 return
             if was_final and identifier in self.final_items and not kind.endswith('.done'):
@@ -482,6 +501,7 @@ class TurnState:
             self.items[identifier] = _preview_item(previous, item)
             if item.get('type') == 'message' and item.get('role') == 'assistant':
                 if kind.endswith('.done') or item.get('status') in ('completed','failed','cancelled','incomplete'):
+                    mark(self.completion_timing, 'public_segment_done')
                     self.streaming_text_parts = {key for key in self.streaming_text_parts if key[0] != identifier}
                 elif item.get('status') == 'in_progress':
                     old_parts = previous.get('content') or []
@@ -499,8 +519,11 @@ class TurnState:
             if (kind.endswith('.done') and _item_settled(item, 'cancelled')
                     or item.get('role') == 'user' and _item_settled(item, 'completed')):
                 self.final_items.add(identifier)
+                self.incomplete_final_items.discard(identifier)
         if not turn_id or turn_id != self.turn_id: return
         if kind in SEGMENT_EVENTS and not self._observe_segment_event(event): return
+        if kind in ('agent.session.turn.output_text.done', 'agent.session.turn.content_part.done'):
+            mark(self.completion_timing, 'public_segment_done')
         if kind in ('agent.session.turn.content_part.added', 'agent.session.turn.content_part.done'):
             identifier, index, part = event.get('item_id'), event.get('content_index'), event.get('part')
             if isinstance(identifier, str) and type(index) is int and index >= 0 and isinstance(part, dict):
@@ -553,6 +576,7 @@ class TurnState:
             if record and record.get('type')=='command_execution' and record.get('turn_id')==turn_id and record['id'] not in self.final_items:
                 record['output']=str(record.get('output') or '')+event.get('delta','')
         if kind in ('agent.session.turn.completed', 'agent.session.turn.failed', 'agent.session.turn.cancelled'):
+            mark(self.completion_timing, 'root_terminal')
             self.outcome = kind.rsplit('.', 1)[-1]
             identity = self._root_event_identity(event, turn)
             self.terminal_verified = bool(isinstance(event_id, str) and event_id and identity is not None
@@ -560,6 +584,8 @@ class TurnState:
                 and turn.get('status') == self.outcome)
             self.activity.finish_turn(self.turn_id,self.outcome)
             self.required_actions = []
+            self.completion_timing['gate_reasons'] = self.completion_gate_reasons()
+            mark(self.completion_timing, 'gate_checked')
 
 ERROR_CODES = frozenset({'invalid_request_error', 'invalid_value', 'invalid_type',
     'missing_required_parameter', 'unknown_parameter', 'unsupported_parameter',
@@ -958,6 +984,7 @@ def _apply_saved(client, state, saved, *, terminal=False):
 
 
 def _reconcile_terminal(client, state):
+    mark(state.completion_timing, 'reconcile_start')
     _remember_observation(client, state)
     try:
         saved = inspect_saved(client, state.session_id, state.turn_id, include_artifacts=False)
@@ -965,6 +992,7 @@ def _reconcile_terminal(client, state):
     except AgentError:
         state.sync_complete = False
     finally:
+        mark(state.completion_timing, 'reconcile_end')
         _remember_observation(client, state)
 
 
@@ -1058,11 +1086,12 @@ def run_task(client, prompt, model, *, session_id=None, allow_text_tool=False, r
                     **({'idempotency_key': run_id} if run_id else {}))
             phase = 'run.events'
             _process_events(client, events, state, settings, on_progress)
-        # Healthy item.done + matching root terminal commits only this turn.
-        # Interrupted/recovered/known-incomplete streams still hydrate from GET.
-        if not state.turn_complete:
-            phase = 'run.reconcile'
-            _reconcile_terminal(client, state)
+            # Reconcile before potentially slow stream teardown, then publish
+            # the verified receipt while the transport is still open.
+            if not state.turn_complete:
+                phase = 'run.reconcile'
+                _reconcile_terminal(client, state)
+                if on_progress: on_progress(state)
         return state
     except Exception as error:
         if not state.submission_started: state.outcome = 'not_started'
@@ -1101,6 +1130,7 @@ def recover_stream(client, session_id, turn_id=None, *, baseline_turn_ids=None, 
             if on_progress: on_progress(state)
             _process_events(client, events, state, tool_settings, on_progress, read_only=read_only)
             _reconcile_terminal(client, state)
+            if on_progress: on_progress(state)
             return state
     except Exception as error: raise _error(error, state) from None
     finally: _remember_observation(client, state)

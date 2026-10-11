@@ -9,6 +9,7 @@ from threading import Condition, RLock, Thread
 import time
 
 import gradio as gr
+from modules.agent.completion_timing import mark as mark_completion, report as report_completion, safe_timing
 
 # Only conversation data crosses into a new UI view. Credentials, upload stager,
 # locks, pending submission tokens and UI epochs never cross this boundary.
@@ -37,6 +38,8 @@ class BackgroundTask:
         self.done = False
         self.deleted = False
         self.error = None
+        self.completion_timing = None
+        self._initial_completion_timing = getattr(model, '_completion_timing', None)
         self.thread = Thread(target=self._run, name='agent-background', daemon=True)
 
     def publish(self):
@@ -100,8 +103,13 @@ class BackgroundTask:
                     self.publish()
                 finally:
                     if self.deleted: self.model.release_deleted_task_reservations(self)
+                    current_timing = getattr(self.model, '_completion_timing', None)
+                    if current_timing is not self._initial_completion_timing:
+                        self.completion_timing = safe_timing(current_timing)
                     self.registry.finish(self)
+                    mark_completion(self.completion_timing, 'task_unlocked')
                     self.condition.notify_all()
+            report_completion(self.completion_timing)
 
     def project(self, view):
         if self.deleted: return
@@ -140,6 +148,10 @@ class BackgroundTask:
                         for name, value in values.items(): setattr(view, name, deepcopy(value))
                     view.refresh_files(resume=False)
                     chat = deepcopy(values['_display'])
+                if done:
+                    timing = safe_timing(self.completion_timing)
+                    mark_completion(timing, 'ui_final_frame')
+                    report_completion(timing)
                 yield chat, status
             if done:
                 if error is not None: raise error

@@ -47,7 +47,7 @@ def test_turn_receipt_is_partial_session_and_requires_complete_items():
     state=complete_state();state.items['unfinished']=dict(item('unfinished'),status='in_progress');assert not state.turn_complete
     state=complete_state();state.stream_gap=True;assert not state.turn_complete
 
-@pytest.mark.parametrize('case',['healthy','slow_close','slow_list','slow_content','incomplete'])
+@pytest.mark.parametrize('case',['healthy','slow_close','slow_list','slow_content','incomplete','repaired_receipt','repaired_slow_close','reconcile_slow_close'])
 def test_real_worker_sdk_ipc_main_queue_boundary(env,monkeypatch,tmp_path,case):
     from modules.agent import transport
     trace=tmp_path/'trace.jsonl'
@@ -63,11 +63,21 @@ def test_real_worker_sdk_ipc_main_queue_boundary(env,monkeypatch,tmp_path,case):
     next(stream); task=wait_main(model); completed=time.monotonic()
     assert not model._running and not model._needs_sync and not model._background_busy
     model._assert_idle()
-    assert model.history==[dict(role='user',content='Synthetic prompt'),dict(role='assistant',content='Canonical answer')]
+    expected = 'Canonical answer\nSecond canonical part' if case.startswith('repaired_') else 'Canonical answer'
+    assert model.history==[dict(role='user',content='Synthetic prompt'),dict(role='assistant',content=expected)]
+    timing = task.completion_timing
+    assert set(timing) == {'trace', 'stages', 'gate_reasons'}
+    stages = timing['stages']
+    assert stages['root_terminal'] <= stages['result_received'] <= stages['persistence_start'] <= stages['persistence_end'] <= stages['task_unlocked']
+    if case not in ('incomplete', 'reconcile_slow_close'):
+        assert timing['gate_reasons'] == [] and 'reconcile_start' not in stages
+    else:
+        assert 'unfinished_items' in timing['gate_reasons']
+        assert stages['root_terminal'] <= stages['reconcile_start'] <= stages['reconcile_end'] <= stages['result_received']
     binding=model._store().get(model._owner,model.history_file_path)
     assert binding['state']['outcome']=='completed'
     events=[json.loads(line) for line in trace.read_text().splitlines()]
-    if case!='incomplete':
+    if case not in ('incomplete', 'reconcile_slow_close'):
         assert not any(e['event'].startswith('GET_') for e in events)
         result=next(e['time'] for e in events if e['event']=='result')
         assert completed-result<1.0
@@ -75,7 +85,8 @@ def test_real_worker_sdk_ipc_main_queue_boundary(env,monkeypatch,tmp_path,case):
         assert model._transcript['capture']['items']=='partial'
     else:
         assert any(e['event']=='GET_items' for e in events)
-        assert completed-next(e['time'] for e in events if e['event']=='terminal')>=1.8
+        if case == 'incomplete': assert completed-next(e['time'] for e in events if e['event']=='terminal')>=1.8
+        else: assert completed-next(e['time'] for e in events if e['event']=='terminal')<1.8
         assert model._transcript['capture']['items']=='complete'
     if case=='slow_content': assert not any(e['event']=='content_done' for e in events)
     wait_files(model);stream.close()
@@ -196,3 +207,43 @@ def test_slow_main_terminal_save_still_blocks_send(env,monkeypatch):
         assert not model._background_task.done
         with pytest.raises(gr.Error):model._assert_idle()
     finally:release.set();wait_main(model);wait_files(model);stream.close()
+
+
+@pytest.mark.parametrize('action', ['recover', 'observe'])
+def test_recovered_complete_get_publishes_before_slow_stream_close(env, monkeypatch, tmp_path, action):
+    from modules.agent import transport
+    trace = tmp_path / 'recover-trace.jsonl'
+    real_popen = subprocess.Popen
+    processes = []
+    terminate = []
+    def popen(args, **kwargs):
+        process = real_popen([sys.executable, str(Path(__file__).with_name('offline_finalization_worker.py')),
+            str(ROOT), 'reconcile_slow_close', str(trace), str(tmp_path)], **kwargs)
+        processes.append(process)
+        terminate.append(process.terminate)
+        # Keep the real worker alive just long enough to observe entry into
+        # slow teardown; production transport is otherwise free to reap it.
+        process.terminate = lambda: None
+        return process
+    monkeypatch.setattr(transport.subprocess, 'Popen', popen)
+    observation = dict(version=1, session_id='sess_complete', turns=[dict(turn_id='turn_complete',
+        root_identity=['sess_complete', 'turn_complete', 'agent_complete'], items=[], parts=[],
+        unverifiable=False, outcome='in_progress', resolved=False, terminal_required=True)])
+    try:
+        messages = list(transport.worker_messages(dict(action=action, session_id='sess_complete',
+            turn_id='turn_complete', observation=observation), connection=dict(api_key='offline-only', base_url='https://offline.invalid/v1', organization='', project='')))
+        result = [message for message in messages if message['type'] == 'result']
+        assert len(result) == 1 and result[0]['sync_complete'] is True
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            if any(e['event'] == 'recovery_close' for e in events): break
+            time.sleep(.01)
+        assert next(e['time'] for e in events if e['event'] == 'result') <= next(e['time'] for e in events if e['event'] == 'recovery_close')
+        assert not any(e['event'] == 'recovery_close_done' for e in events)
+        assert next(e['time'] for e in events if e['event'] == 'result') - next(e['time'] for e in events if e['event'] == 'GET_items') < 1
+        # Startup is intentionally excluded; only the result-to-parent boundary matters.
+        assert time.monotonic() - next(e['time'] for e in events if e['event'] == 'result') < 1
+    finally:
+        for process, stop in zip(processes, terminate):
+            if process.poll() is None: stop()

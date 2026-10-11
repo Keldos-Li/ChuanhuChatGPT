@@ -23,14 +23,17 @@ class Events(httpx2.SyncByteStream):
         turn = dict(id='turn_complete', agent_id='agent_complete', session_id='sess_complete', status='in_progress', created_at=1, subagent_id=None)
         position = 1 if case=='normal_reasoning' else 0
         values = [event('created', turn=turn), event('output_text.delta', item_id='msg_complete', output_index=position, content_index=0, delta='Canonical answer')]
-        if case in ('normal_multi','get_pending_reconnect') or case.startswith('receipt_'):
+        if case in ('normal_multi','get_pending_reconnect','repaired_receipt','repaired_slow_close') or case.startswith('receipt_'):
             values.append(dict(event('output_text.delta',item_id='msg_complete',output_index=position,content_index=1,delta='Second canonical part'),event_id='evt_second_part'))
         if case=='normal_reasoning':
             values.append(dict(event('item.done',output_index=0,item=dict(id='reason_complete',type='reasoning',turn_id='turn_complete',status=None,summary=[dict(type='summary_text',text='Public summary')])),event_id='evt_reason_done'))
         answer=message('msg_complete','Canonical answer')
         if case=='normal_multi':answer['content'].append(dict(type='output_text',text='Second canonical part'))
         if case in ('cancelled_incomplete','failed_incomplete'):answer['status']='incomplete'
-        if case != 'incomplete': values.append(event('item.done', output_index=position, item=answer))
+        if case not in ('incomplete', 'reconcile_slow_close'): values.append(event('item.done', output_index=position, item=answer))
+        if case in ('repaired_receipt','repaired_slow_close'):
+            answer = dict(answer, content=answer['content'] + [dict(type='output_text', text='Second canonical part')])
+            values.append(dict(event('item.done', output_index=position, item=answer), event_id='evt_repaired_done'))
         ending='cancelled' if case=='cancelled_incomplete' else 'failed' if case=='failed_incomplete' else 'completed'
         values.append(event(ending, turn=dict(turn, status=ending, completed_at=2)))
         for value in values:
@@ -40,13 +43,23 @@ class Events(httpx2.SyncByteStream):
         time.sleep(2)
     def close(self):
         mark('close')
-        if case == 'slow_close': time.sleep(2)
+        if case in ('slow_close', 'repaired_slow_close', 'reconcile_slow_close'): time.sleep(2)
+class IdleEvents(httpx2.SyncByteStream):
+    def __iter__(self):
+        yield b': offline keepalive\n\n'
+        time.sleep(5)
+    def close(self):
+        mark('recovery_close')
+        time.sleep(2)
+        mark('recovery_close_done')
 class Content(httpx2.SyncByteStream):
     def __iter__(self):
         mark('content_start'); time.sleep(2); yield b'synthetic'; mark('content_done')
 def route(request):
     path=request.url.path
     if path.endswith('/agents/sessions/sess_complete/events'):
+        if case == 'reconcile_slow_close':
+            return httpx2.Response(200, headers={'Content-Type':'text/event-stream'}, stream=IdleEvents())
         return httpx2.Response(200,headers={'Content-Type':'text/event-stream'},content=b'')
     if request.method=='POST' and path.endswith('/agents/sessions'):
         return httpx2.Response(200, headers={'Content-Type':'text/event-stream'}, stream=Events())

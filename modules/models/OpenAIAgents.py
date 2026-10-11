@@ -12,6 +12,7 @@ from uuid import uuid4
 import gradio as gr
 from modules import shared
 from modules.agent.transport import worker_messages, connection_for_model
+from modules.agent.completion_timing import safe_timing, mark as mark_completion
 from modules.agent.store import BindingStore, owner_identity
 from modules.model_capabilities import AGENT_CAPABILITIES, require_capability
 from modules.agent.settings import load_settings
@@ -960,6 +961,10 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._state['public_text_streaming'] = message['public_text_streaming']
         elif isinstance(message.get('items'), list):
             self._state.pop('public_text_streaming', None)
+        timing = safe_timing(message.get('completion_timing'))
+        if timing is not None:
+            self._completion_timing = timing
+            if message.get('type') == 'result': mark_completion(timing, 'result_received')
         outcome = message.get('outcome')
         if outcome and (not self._cancel_requested or outcome in TERMINAL): self._state['outcome'] = outcome
         # Publish already-known file metadata in the same snapshot as body.
@@ -1029,6 +1034,8 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             # Persist alongside run state so a new view/process can distinguish
             # a historical final snapshot from the first reconciled result.
             self._state['log_reconciled'] = {'session_id': self._state['session_id'], 'turn_id': self._state['turn_id']}
+        timing = getattr(self, '_completion_timing', None)
+        if message.get('type') == 'result': mark_completion(timing, 'persistence_start')
         self._remember()
         if getattr(self, '_task_backend', False):
             import time
@@ -1039,6 +1046,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
                 self.chatbot = deepcopy(self._display)
                 self.auto_save(self.chatbot)
                 self._last_stream_save, self._last_persist_identity = now, identity
+        if message.get('type') == 'result': mark_completion(timing, 'persistence_end')
         return True
 
     def _merge_artifacts(self, records):
