@@ -4,7 +4,7 @@ import html
 import json
 import math
 from modules.agent import transcript
-from modules.agent.activity import contiguous_tool_runs, group_span
+from modules.agent.activity import contiguous_tool_runs, group_span, visible_activity_boundary
 from modules.agent.file_icons import file_icon, file_size_label, file_type_label
 from modules.agent.message_files import project_message_files, _cloud_rows, _align_rows, _anchor
 from modules.presets import i18n
@@ -46,9 +46,10 @@ def _mcp_collisions(entries):
 _CHEVRON = '<svg class="agent-activity-chevron" aria-hidden="true" focusable="false" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 2 L8 6 L4 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 
-def _tool_runs(timeline, scope):
+def _tool_runs(timeline, scope, *, active_turn=None, clock=None):
     """Contiguous display runs, anchored to canonical non-tool occurrences."""
-    result = contiguous_tool_runs(timeline)
+    result = contiguous_tool_runs(timeline, is_boundary=lambda entry: visible_activity_boundary(
+        entry, active=bool(active_turn and entry.get('turn_ref') == active_turn), clock=clock))
     for group in result:
         if group['kind'] == 'tool_group':
             group['id'] = _anchor(['scope',scope,'turn',group['turn_ref'],'layer','group'],'activity-group',group['boundary']) if group['boundary_stable'] else ''
@@ -134,7 +135,7 @@ def _tool_group(group, *, scope, conversation, **kwargs):
     timer = ''
     if span:
         elapsed = span['elapsed_ms']
-        seconds = (('0.0' if elapsed == 0 else '<0.1' if elapsed < 100 else f'{math.floor(elapsed / 100) / 10:.1f}')
+        seconds = (('0.0' if elapsed == 0 else '0.1' if elapsed < 100 else f'{math.floor(elapsed / 100) / 10:.1f}')
                    if elapsed < 1000 else math.floor(elapsed / 1000))
         seconds_format = i18n('ui.agent_activity.elapsed_seconds')
         minutes_format = i18n('ui.agent_activity.elapsed_minutes_seconds')
@@ -303,12 +304,13 @@ def project_transcript(model, rows):
         return index
     activity = {}
     ordered_segments={}
-    for entry in _tool_runs(view['timeline'],view['scope_id']):
+    for entry in _tool_runs(view['timeline'],view['scope_id'],active_turn=current_ref if active else None,clock=clocks):
         if entry['kind'] in ('tool_group','summary'):
             turn=entry.get('turn_ref')
             options=dict(clock=clocks if turn==current_ref else None,conversation=model._conversation_id,
                          active=active and turn==current_ref,calls=calls,outputs=outputs,mcp_ambiguous=mcp_ambiguous,scope=view['scope_id'])
             markup=_tool_group(entry,**options) if entry['kind']=='tool_group' else _activity([entry],**options)
+            if not markup: continue
             row=turn_rows.get(turn)
             if row is None:activity.setdefault(turn,[]).append(markup)
             else:ordered_segments.setdefault(row,[]).append({'markup':markup})
@@ -329,8 +331,15 @@ def project_transcript(model, rows):
                     append(row,column,'<small>图像或其他媒体未包含在此历史记录中。</small>')
     for row,segments in ordered_segments.items():
         if projection.rows[row][1] is None: projection.rows[row][1] = ''
-        text='\n\n'.join(segment['text'] for segment in segments if segment.get('text'))
-        if text==(rows[row][1] or ''):projection.cell_segments[(row,1)]=segments
+        text='\n\n'.join(segment['text'] for segment in segments if 'text' in segment)
+        compact='\n\n'.join(segment['text'] for segment in segments if segment.get('text'))
+        if text==(rows[row][1] or ''):
+            projection.cell_segments[(row,1)]=segments
+        elif compact==(rows[row][1] or ''):
+            # Saved grouped messages omit empty occurrences; streaming text may
+            # retain their separators. Match either exactly, never reorder tools.
+            projection.cell_segments[(row,1)]=[segment for segment in segments
+                                              if 'text' not in segment or segment['text']]
         else:
             # Do not rewrite a raw body whose identity/alignment is ambiguous.
             markup=''.join(segment['markup'] for segment in segments if 'markup' in segment)

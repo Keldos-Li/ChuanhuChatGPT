@@ -19,7 +19,7 @@ def observation(elapsed, running=False):
         ended_ms=None if running else elapsed, sampled_ms=elapsed))}
 
 
-@pytest.mark.parametrize('elapsed,expected',[(0,'0.0s'),(.1,'&lt;0.1s'),(10,'&lt;0.1s'),(100,'0.1s'),(999,'0.9s'),(999.75,'0.9s'),(1000,'1s'),(1000.1,'1s'),(1999.9,'1s'),(2000,'2s'),(59999.9,'59s'),(60000,'1分0秒'),(67999.9,'1分7秒')])
+@pytest.mark.parametrize('elapsed,expected',[(0,'0.0s'),(.1,'0.1s'),(10,'0.1s'),(100,'0.1s'),(999,'0.9s'),(999.75,'0.9s'),(1000,'1s'),(1000.1,'1s'),(1999.9,'1s'),(2000,'2s'),(59999.9,'59s'),(60000,'1分0秒'),(67999.9,'1分7秒')])
 def test_group_floors_seconds_keeps_precision_and_child_has_no_timer(elapsed,expected):
     previous=i18n.language
     i18n.change_language('zh_CN')

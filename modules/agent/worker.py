@@ -131,13 +131,18 @@ def main():
                 import openai
                 emit('result', sdk_version=openai.__version__, available=hasattr(client.beta, 'agents'))
                 return
+            def terminal_snapshot(value):
+                snapshot = value.snapshot()
+                known = artifacts.snapshot(value.session_id, value.turn_id)
+                if known: snapshot['artifacts'] = known
+                return snapshot
             def progress(value):
                 nonlocal state, terminal_emitted
                 state = value
                 if action == 'run' and value.turn_complete:
                     # Publish before stream/context teardown. The parent transport
                     # finishes on result and reaps this worker asynchronously.
-                    emit('result', **value.snapshot())
+                    emit('result', **terminal_snapshot(value))
                     terminal_emitted = True
                 else:
                     emit('progress', **value.snapshot())
@@ -166,13 +171,13 @@ def main():
                                  run_id=command.get('run_id'), on_progress=progress, instructions=command.get('instructions'),
                                  reasoning=command.get('reasoning'), tool_settings=command.get('tool_settings'),
                                  history_reference=command.get('history_reference'), input_files=command.get('input_files'), owner=command.get('owner'), observation=command.get('observation'))
-                if not terminal_emitted: emit('result', **state.snapshot())
+                if not terminal_emitted: emit('result', **terminal_snapshot(state))
             elif action in ('recover', 'recover_unknown', 'observe', 'observe_unknown'):
                 turn_id = command.get('turn_id')
                 if action in ('recover_unknown', 'observe_unknown'): session_id, turn_id = find_uncertain_session(client, command.get('run_id'))
                 state = recover_stream(client, session_id, turn_id, baseline_turn_ids=command.get('baseline_turn_ids'),
                        submission_started=command.get('submission_started') is True, tool_settings=command.get('tool_settings'), on_progress=progress, read_only=action in ('observe', 'observe_unknown'), observation=command.get('observation'))
-                emit('result', **state.snapshot())
+                emit('result', **terminal_snapshot(state))
             elif action == 'inspect':
                 emit('result', **inspect_saved(client, session_id, command.get('turn_id'), command.get('baseline_turn_ids'), command.get('submission_started') is True))
             elif action == 'cancel': emit('result', session_id=session_id, turn_id=command.get('turn_id'), **cancel_session(client, session_id, command.get('turn_id')))

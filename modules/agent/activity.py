@@ -70,18 +70,43 @@ def safe_interval(value):
     return dict(clock_id=value['clock_id'], started_ms=start, ended_ms=end, sampled_ms=sample)
 
 
-def contiguous_tool_runs(timeline):
-    """Share display boundaries with durable group duration calculation."""
+def visible_activity_boundary(entry, *, active=False, clock=None):
+    """Only invisible assistant/reasoning occurrences may bridge a tool run.
+
+    Canonical entries stay in the timeline. Missing identity, files, capture
+    notices and unknown kinds are not evidence that visible content is absent.
+    """
+    if entry.get('capture', {}).get('omitted') or entry.get('capture', {}).get('truncated'):
+        return True
+    if entry.get('files') or entry.get('file_refs'):
+        return True
+    if entry['kind'] == 'message' and entry.get('role') == 'assistant':
+        return any(part.get('type') != 'text' or part.get('text', '').strip()
+                   for part in entry.get('content', []))
+    if entry['kind'] == 'summary':
+        phase = ((clock or {}).get(entry.get('source_id'), {}).get('phase')
+                 or entry.get('activity_phase') or entry.get('status'))
+        return (any(part.get('type') != 'summary_text' or part.get('text', '').strip()
+                    for part in entry.get('content', []))
+                or active and phase in ('running', 'waiting', 'in_progress', 'requires_action'))
+    return True
+
+
+def contiguous_tool_runs(timeline, *, is_boundary=visible_activity_boundary):
+    """Share visible display boundaries with durable group duration calculation."""
     result, boundaries, groups = [], {}, {}
     current = None
     for entry in timeline:
         turn = entry.get('turn_ref')
         if entry['kind'] != 'tool':
-            current = None
-            boundaries[turn] = (entry['id'], entry.get('identity') in ('api_id', 'application_occurrence'))
+            if is_boundary(entry):
+                current = None
+                boundaries[turn] = (entry['id'], entry.get('identity') in ('api_id', 'application_occurrence'))
+            elif current is not None and current['turn_ref'] != turn:
+                current = None
             result.append(entry)
             continue
-        if current is None or current['turn_ref'] != turn:
+        if current is None or not turn or current['turn_ref'] != turn:
             boundary, stable = boundaries.get(turn, ('turn-start', True))
             current = dict(kind='tool_group', turn_ref=turn, entries=[], boundary=boundary, boundary_stable=stable, persist_open=stable)
             result.append(current)

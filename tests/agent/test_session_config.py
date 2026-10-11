@@ -7,7 +7,7 @@ import pytest
 from modules.agent.settings import load_settings, save_settings
 from modules.agent.store import owner_identity
 from modules.model_capabilities import reserve_submission
-from agent_fixtures import complete, env, request, select, send
+from agent_fixtures import complete, env, request, select, send, settle_files
 from test_input_model import staged, submit
 
 
@@ -443,6 +443,7 @@ def test_attachment_selection_keeps_configuration_editable_until_first_send(env,
     model.set_system_prompt('Instructions chosen after selecting attachments')
     assert model.freeze_input_files(paths)==records and not calls
     submit(env,model,'First send after configuration change',paths)
+    settle_files(model)  # Verify download calls only after their independent job settles.
     assert [call['action'] for call in calls]==['prepare_inputs','run','download']
     for call in calls[:2]:
         assert call['tool_settings']==chosen

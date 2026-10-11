@@ -1,7 +1,32 @@
 """在流式执行期间独立读取已发布文件，不阻塞文字事件。"""
-from threading import Event, Thread
+from copy import deepcopy
+from pathlib import PurePosixPath
+import re
+from threading import Event, Lock, Thread
 
 from modules.agent.runtime import download_artifacts
+
+
+def preparing_artifacts(records, *, session_id, turn_id):
+    """Published metadata is a disabled card, never evidence of local bytes."""
+    if not session_id or not turn_id or not isinstance(records, list): return []
+    result = {}
+    for record in records:
+        if (not isinstance(record, dict) or not isinstance(record.get('id'), str) or not record['id']
+                or record.get('session_id') != session_id or record.get('turn_id') != turn_id):
+            continue
+        source = record.get('name') or record.get('filename') or record.get('path')
+        if not isinstance(source, str) or not source: continue
+        name = PurePosixPath(source.replace('\\', '/')).name
+        name = re.sub(r'[\x00-\x1f\x7f]', '_', name).lstrip('.') or 'artifact'
+        size = record.get('size_bytes', record.get('size'))
+        pending = dict(id=record['id'], session_id=session_id, turn_id=turn_id, name=name,
+                       size=size if type(size) is int and size >= 0 else None, status='preparing')
+        remote = record.get('remote_path') or record.get('path') or record.get('filename')
+        if isinstance(remote, str): pending['remote_path'] = remote
+        if isinstance(record.get('message_item_id'), str): pending['message_item_id'] = record['message_item_id']
+        result[pending['id']] = pending
+    return list(result.values())
 
 
 class ArtifactObserver:
@@ -17,6 +42,14 @@ class ArtifactObserver:
         self.stop = Event()
         self.thread = None
         self.error_reported = False
+        self._records = {}
+        self._records_lock = Lock()
+
+    def snapshot(self, session_id, turn_id):
+        # Short in-memory handoff only: never wait on list/content or emit.
+        with self._records_lock:
+            return deepcopy([record for record in self._records.values()
+                             if record.get('session_id') == session_id and record.get('turn_id') == turn_id])
 
     def __enter__(self):
         return self
@@ -30,7 +63,10 @@ class ArtifactObserver:
 
     def _publish(self, records):
         if self.stop.is_set(): return
-        self.ready.update(record['id'] for record in records if record.get('status') in ('ready', 'failed'))
+        with self._records_lock:
+            for record in records:
+                if isinstance(record.get('id'), str): self._records[record['id']] = deepcopy(record)
+            self.ready.update(record['id'] for record in records if record.get('status') in ('ready', 'failed'))
         self.emit('progress', session_id=self.session_id, artifacts=records)
 
     def _refresh(self):

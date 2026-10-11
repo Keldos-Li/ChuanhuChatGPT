@@ -398,6 +398,9 @@ hr.append-display {
 .message .raw-message p {
     margin:0 !important;
 }
+/* Ordinary body text keeps the same rhythm in Markdown and raw views. */
+#chuanhu-chatbot .message .md-message > p,
+#chuanhu-chatbot .message .raw-message pre.fake-pre { line-height: var(--line-md) !important; }
 .message .raw-message pre.fake-pre {
     color: inherit;
     background: unset !important;
@@ -753,11 +756,12 @@ img.avatar-image {
     min-width: 0;
     list-style: none;
 }
+#chuanhu-chatbot .agent-history-detail > summary,
+#chuanhu-chatbot .agent-history-detail > summary * { user-select: none; -webkit-user-select: none; }
 #chuanhu-chatbot .agent-history-detail > summary::marker { content: ""; }
 #chuanhu-chatbot .agent-history-detail > summary::-webkit-details-marker { display: none; }
 #chuanhu-chatbot .agent-tool-title { min-width: 0; overflow-wrap: anywhere; }
-#chuanhu-chatbot .agent-history-group > summary > .agent-tool-title,
-#chuanhu-chatbot .agent-command-preview { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#chuanhu-chatbot .agent-history-detail > summary > .agent-tool-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #chuanhu-chatbot .agent-activity-elapsed { flex: 0 0 auto; }
 #chuanhu-chatbot .agent-activity-chevron {
     flex: 0 0 12px;
@@ -780,6 +784,7 @@ img.avatar-image {
     #chuanhu-chatbot .agent-history-detail[data-layer="tool"] { interpolate-size: allow-keywords; }
     #chuanhu-chatbot .agent-history-detail[data-layer="group"]::details-content,
     #chuanhu-chatbot .agent-history-detail[data-layer="tool"]::details-content {
+        display: flow-root;
         height: 0;
         overflow: clip;
         transition: height 180ms ease, content-visibility 180ms allow-discrete;

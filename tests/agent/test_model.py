@@ -76,6 +76,7 @@ def test_uncertain_send_blocks_duplicates_and_reconnect_never_resubmits(env,monk
     with pytest.raises(gr.Error):send(env,model,'duplicate')
     with pytest.raises(gr.Error):list(model.retry(model.chatbot))
     list(model.reconnect())
+    settle_files(model)  # File discovery is asynchronous after the main result.
     assert [c['action'] for c in calls]==['run','recover' if known else 'recover_unknown','download']
     assert model._state['outcome']=='cancelled'
 

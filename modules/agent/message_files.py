@@ -406,7 +406,7 @@ def render_projection(projection, format_user: Callable[[str], str], format_assi
                 # Keep its copy sources outside the activity adjacency chain.
                 copy_only_sources=[_body_segment('', segment['text'], projection.conversation_id, key, position, copy_only=True)
                                    for position, segment in enumerate(segments)
-                                   if segment.get('text') and not segment['text'].strip()]
+                                   if 'text' in segment and not segment['text'].strip()]
                 prefix=''.join(rendered_parts)+''.join(copy_only_sources)
                 if role == 'assistant' and '<div class="md-message">' not in prefix:
                     # Keep the original formatter's structural idempotence

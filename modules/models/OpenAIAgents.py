@@ -747,7 +747,7 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
         from modules.agent.activity import safe_records
         observed=safe_records(message.get('activity',self._activity_records))
         incoming = transcript.normalize(items, scope_id=self._conversation_id,
-            turns=message.get('turns', []), artifacts=message.get('transcript_artifacts', message.get('artifacts', [])),
+            turns=message.get('turns', []), artifacts=list(message.get('transcript_artifacts') or []) + list(message.get('artifacts') or []),
             input_mappings=mappings, capture=message.get('capture', {'items': 'complete' if message.get('sync_complete') is True and isinstance(message.get('items'), list) else 'partial' if items else 'not_collected'}),
             occurrence_ids=occurrences,
             session_id=self._state.get('session_id'), secrets=known_secrets(self),activity=observed)
@@ -956,6 +956,16 @@ class OpenAIAgentsClient(AgentInputState, BaseLLMModel):
             self._history_submission_saved_generation = generation
         outcome = message.get('outcome')
         if outcome and (not self._cancel_requested or outcome in TERMINAL): self._state['outcome'] = outcome
+        # Publish already-known file metadata in the same snapshot as body.
+        # Provider paths never become download paths; byte work stays separate.
+        # Nonterminal history metadata retains its existing inert-card path.
+        from modules.agent.artifacts import preparing_artifacts
+        metadata = list(message.get('artifact_metadata') or [])
+        if message.get('type') == 'result' and self._state.get('outcome') in TERMINAL:
+            metadata += list(message.get('transcript_artifacts') or [])
+        known = preparing_artifacts(metadata, session_id=self._state.get('session_id'), turn_id=self._state.get('turn_id'))
+        if known:
+            message = dict(message, artifacts=known + list(message.get('artifacts') or []))
         items_complete = False
         if any(isinstance(message.get(key), list) for key in ('items', 'artifacts', 'transcript_artifacts')):
             try: items_complete = self._capture_transcript(message)

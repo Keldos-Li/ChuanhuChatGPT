@@ -1,9 +1,9 @@
 // Execute actual elapsed UI script with deterministic clock and owned DOM nodes.
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('web_assets/javascript/agent-activity.js','utf8');
-function fixture({ready='complete',conversation='chat',nodes=[],details=[]}={}) {
+function fixture({ready='complete',conversation='chat',nodes=[],details=[],scroller=null}={}) {
     let now=0,active=conversation,next=0;const intervals=new Map(),observers=[],listeners=new Map();
-    const app={querySelectorAll:selector=>selector.endsWith('.agent-history-detail')?details:nodes};
+    const app={querySelector:()=>typeof scroller==='function'?scroller():scroller,querySelectorAll:selector=>selector.endsWith('.agent-history-detail')?details:nodes};
     const document={readyState:ready,documentElement:{},addEventListener:(event,fn)=>listeners.set(event,fn),removeEventListener:(event,fn)=>{if(listeners.get(event)===fn)listeners.delete(event);}};
     const context={document,gradioApp:()=>app,performance:{now:()=>now},chuanhuInputConversation:()=>active,
         setInterval:fn=>{intervals.set(++next,fn);return next;},clearInterval:key=>intervals.delete(key),
@@ -139,7 +139,7 @@ for(const value of [100,500,999]){precise.setTime(value);precise.notify();precis
 assert.equal(boundary.writes,2,'unchanged integer second does not rewrite text');
 boundary.dataset.elapsedMs='1999.9';precise.notify();assert.equal(boundary.textContent,'1s');assert.equal(boundary.writes,2);
 precise.setTime(999.1);precise.tick();assert.equal(boundary.textContent,'2s');assert.equal(boundary.writes,3);
-for(const [base,expected] of [[0,'0.0s'],[10,'<0.1s'],[100,'0.1s'],[999,'0.9s'],[1000,'1s'],[60000,'1m 0s']]){
+for(const [base,expected] of [[0,'0.0s'],[.1,'0.1s'],[10,'0.1s'],[100,'0.1s'],[999,'0.9s'],[1000,'1s'],[60000,'1m 0s']]){
  const live=node(base),test=fixture({nodes:[live]});test.start();assert.equal(live.textContent,expected);
  live.dataset.running='false';test.notify();test.setTime(100000);test.tick();
  assert.equal(live.textContent,expected);assert.equal(test.intervals.size,0,'terminal value stays frozen');
@@ -170,3 +170,164 @@ for(const [format,expected] of [['{minutes}m {seconds}s','1m 7s'],['{minutes}분
  assert.equal(localized.textContent,expected);
 }
 console.log('Outer group only, localized 60s rollover, same-second suppression and terminal minute freeze passed');
+
+// Model Gradio's exact beforeUpdate/afterUpdate sequence without claiming pixels.
+// Its scrollHeight argument can force a collapsed layout before our hook starts.
+function scrollingFixture({reader=false,top}={}) {
+ const list=[ownedDetail('scroll-group','group'),ownedDetail('scroll-child')];
+ list.forEach(detail=>detail.open=true);
+ let heightBase=1000,scrollTop=top??(reader?900:1217),wrapper;
+ const calls=[],layouts=[],scrollListeners=new Set(),inputListeners=new Map();
+ function height(){return heightBase+(list[0]?.open?217:0)+(list[1]?.open?200:0);}
+ const prototype={scrollTo(...args){
+  calls.push({receiver:this,args:[...args],open:list.map(detail=>detail.open),height:height()});
+  if(this===wrapper)scrollTop=Math.max(0,Math.min(typeof args[0]==='object'?args[0].top:args[1],height()-200));
+  return 'native-result';
+ }};
+ wrapper=Object.assign(Object.create(prototype),{
+  offsetHeight:200,
+  addEventListener:(name,fn)=>{if(name==='scroll')scrollListeners.add(fn);else inputListeners.set(name,fn);},
+  removeEventListener:(name,fn)=>{if(name==='scroll')scrollListeners.delete(fn);else if(inputListeners.get(name)===fn)inputListeners.delete(name);}
+ });
+ Object.defineProperties(wrapper,{
+  scrollTop:{get:()=>scrollTop,set:value=>{scrollTop=value;}},
+  scrollHeight:{get:()=>{scrollTop=Math.min(scrollTop,height()-200);return height();}}
+ });
+ const test=fixture({details:list,scroller:()=>wrapper});
+ test.context.getComputedStyle=()=>{layouts.push(list.map(detail=>detail.open));return {height:'417px'};};
+ test.start();
+ return {test,list,wrapper,calls,layouts,prototype,scrollListeners,inputListeners,
+  input:(type,fields={})=>inputListeners.get(type)?.({type,isTrusted:true,...fields}),
+  setTop:value=>{scrollTop=value;scrollListeners.forEach(fn=>fn());},
+  grow:()=>heightBase+=27,
+  shrink:amount=>heightBase-=amount,
+  replace:()=>{list[0]=ownedDetail('scroll-group','group');list[1]=ownedDetail('scroll-child');},
+  height};
+}
+const following=scrollingFixture();
+for(let index=0;index<12;index++){
+ following.grow();following.replace();
+ const collapsed=following.wrapper.scrollHeight;
+ assert.equal(following.wrapper.scrollTo(0,collapsed),'native-result');
+ assert.equal(following.calls.length,index+1,'one native scroll per streamed replacement');
+ const call=following.calls.at(-1);
+ assert.deepEqual(call.open,[true,true],'all nested choices restored before native scroll');
+ assert.equal(call.args[1],following.height(),'native target is final expanded height');
+ assert(call.args[1]>collapsed);
+ following.test.notify();assert.equal(following.calls.length,index+1,'observer does not scroll twice');
+}
+assert(following.layouts.every(open=>open.every(Boolean)),'layout forced only after nested states restored');
+const reader=scrollingFixture({reader:true});reader.replace();
+const collapsed=reader.wrapper.scrollHeight;assert.equal(reader.wrapper.scrollTop,800,'synthetic collapsed layout clamps');
+reader.wrapper.scrollTo(0,collapsed);assert.equal(reader.wrapper.scrollTop,900,'reading position restored after temporary clamp');
+assert.equal(reader.calls[0].args[1],900,'reader is not sent to bottom');
+const anchored=scrollingFixture({reader:true,top:300});anchored.replace();
+anchored.wrapper.scrollTop=280; // ordinary native anchoring below the collapsed max
+anchored.wrapper.scrollTo(0,anchored.wrapper.scrollHeight);
+assert.equal(anchored.wrapper.scrollTop,280,'legitimate anchoring is not overwritten by an old absolute position');
+const passiveReader=scrollingFixture({reader:true});passiveReader.replace();
+passiveReader.wrapper.scrollHeight;passiveReader.test.notify();
+assert.equal(passiveReader.wrapper.scrollTop,900,'observer-only restoration also repairs a demonstrated clamp');
+const unshifted=scrollingFixture({reader:true,top:300});unshifted.replace();unshifted.test.notify();
+assert.equal(unshifted.calls.length,0,'reader without clamp gets no compensation scroll');
+// Ordinary methods/options and other receivers remain exact pass-through.
+const passthrough=scrollingFixture();const options={top:100,behavior:'smooth'};
+passthrough.wrapper.scrollTo(options);assert.equal(passthrough.calls.at(-1).args[0],options);
+passthrough.wrapper.scrollTo(7,40);assert.deepEqual(passthrough.calls.at(-1).args,[7,40]);
+const borrowed={};passthrough.wrapper.scrollTo.call(borrowed,0,12);assert.equal(passthrough.calls.at(-1).receiver,borrowed);
+passthrough.test.context.__chuanhuActivityCleanup();
+assert.equal(passthrough.wrapper.scrollTo,passthrough.prototype.scrollTo);
+assert(!Object.hasOwn(passthrough.wrapper,'scrollTo'));assert.equal(passthrough.scrollListeners.size,0);
+// Explicit new-node choice wins; a stale predecessor toggle cannot reopen it.
+const intent=scrollingFixture();intent.replace();
+intent.test.observers[0].pending=[{type:'attributes',attributeName:'open',target:intent.list[0]}];
+intent.wrapper.scrollTo(0,intent.wrapper.scrollHeight);assert(!intent.list[0].open);
+assert(intent.list[1].open,'independent child state still restores');
+// The detached predecessor's synchronous click is sampled before restoring.
+const early=scrollingFixture();early.list[1].open=false;early.replace();
+early.wrapper.scrollTo(0,early.wrapper.scrollHeight);assert(!early.list[1].open);
+// Normal model / navigation releases only our own instance hook.
+const exiting=scrollingFixture();exiting.list.length=0;exiting.test.notify();
+assert.equal(exiting.wrapper.scrollTo,exiting.prototype.scrollTo);assert.equal(exiting.scrollListeners.size,0);
+const otherHook=scrollingFixture(),newOwner=()=>{};otherHook.wrapper.scrollTo=newOwner;
+otherHook.test.context.__chuanhuActivityCleanup();assert.equal(otherHook.wrapper.scrollTo,newOwner);
+console.log('Gradio bottom-call integration: 12 replacements, nested restore, reader clamp/anchoring, intent, overloads and cleanup passed');
+// Restore exact own descriptors and remove bindings on wrapper replacement.
+const ownList=[ownedDetail('own-method')];ownList[0].open=true;
+let activeScroller;const ownListeners=new Set(),ownCalls=[];
+const ownNative=function(...args){ownCalls.push([this,args]);};
+const ownWrapper={scrollTop:600,scrollHeight:800,offsetHeight:200,
+ addEventListener:(_,fn)=>ownListeners.add(fn),removeEventListener:(_,fn)=>ownListeners.delete(fn)};
+Object.defineProperty(ownWrapper,'scrollTo',{value:ownNative,writable:true,enumerable:true,configurable:true});
+const beforeDescriptor=Object.getOwnPropertyDescriptor(ownWrapper,'scrollTo');activeScroller=ownWrapper;
+const ownTest=fixture({details:ownList,scroller:()=>activeScroller});ownTest.start();
+activeScroller={...ownWrapper,scrollTo:ownNative};ownTest.notify();
+assert.deepEqual(Object.getOwnPropertyDescriptor(ownWrapper,'scrollTo'),beforeDescriptor);
+ownTest.context.__chuanhuActivityCleanup();assert.equal(activeScroller.scrollTo,ownNative);
+const switched=scrollingFixture();switched.test.setConversation('other');switched.test.notify();
+assert.equal(switched.wrapper.scrollTo,switched.prototype.scrollTo,'conversation exit releases the hook');
+console.log('Scroll wrapper replacement, exact own descriptor restoration and conversation exit passed');
+
+// User scroll changes are synchronous; the scroll event can still be queued.
+for(const hook of [false,true]){
+ const pending=scrollingFixture();pending.wrapper.scrollTop=300;pending.replace();
+ if(hook)pending.wrapper.scrollTo(0,pending.wrapper.scrollHeight);
+ else pending.test.notify();
+ assert.equal(pending.wrapper.scrollTop,300,'pending user scroll overrides old bottom-follow');
+ assert(!pending.calls.some(call=>call.args[1]===pending.height()));
+}
+const pendingNearClamp=scrollingFixture();pendingNearClamp.wrapper.scrollTop=900;
+pendingNearClamp.replace();pendingNearClamp.test.notify();
+assert.equal(pendingNearClamp.wrapper.scrollTop,900,'live reader position is sampled before a new collapsed-height measurement');
+for(const hook of [false,true]){
+ const shrinking=scrollingFixture();shrinking.shrink(150);shrinking.replace();
+ shrinking.wrapper.scrollHeight; // actual content shrink, no human scroll
+ if(hook)shrinking.wrapper.scrollTo(0,shrinking.wrapper.scrollHeight);
+ else shrinking.test.notify();
+ assert.equal(shrinking.wrapper.scrollTop,shrinking.height()-200,'real resize clamp retains bottom following');
+}
+console.log('Queued user scroll wins over cached follow state; genuine content shrink still follows');
+
+// A wheel/key gesture can lose its exact pre-clamp top before scroll delivery.
+// Do not mistake that ambiguous frame for permission to restore an old bottom.
+for(const type of ['wheel','keydown','touchmove','pointerdown']){
+ for(const hook of [false,true]){
+  const gesture=scrollingFixture();
+  Object.assign(gesture.wrapper,{offsetWidth:400,clientWidth:385});
+  gesture.input(type,{deltaY:-317,key:'PageUp',target:gesture.wrapper,button:0,offsetX:390});
+  gesture.wrapper.scrollTop=900;gesture.replace();gesture.wrapper.scrollHeight;
+  assert.equal(gesture.wrapper.scrollTop,800);
+  if(hook)gesture.wrapper.scrollTo(0,gesture.wrapper.scrollHeight);
+  else gesture.test.notify();
+  assert.equal(gesture.calls.length,0,'trusted pending scroll intent suppresses automatic compensation');
+  assert.equal(gesture.wrapper.scrollTop,800,'do not restore the pre-gesture bottom after a clamp');
+  gesture.test.context.__chuanhuActivityCleanup();assert.equal(gesture.inputListeners.size,0);
+ }
+}
+const summaryKey=scrollingFixture();
+summaryKey.input('keydown',{key:' ',target:{closest:()=>({})}});
+summaryKey.replace();summaryKey.wrapper.scrollHeight;summaryKey.test.notify();
+assert.equal(summaryKey.wrapper.scrollTop,summaryKey.height()-200,'native summary key is not a scroll gesture');
+const bounded=scrollingFixture(),intentFrames=new Map();let intentFrameId=0;
+bounded.test.context.requestAnimationFrame=fn=>{intentFrames.set(++intentFrameId,fn);return intentFrameId;};
+bounded.test.context.cancelAnimationFrame=id=>intentFrames.delete(id);
+bounded.input('wheel',{deltaY:-1});bounded.input('wheel',{deltaY:-1});assert.equal(intentFrames.size,1);
+intentFrames.values().next().value();intentFrames.clear();
+bounded.replace();bounded.wrapper.scrollHeight;bounded.test.notify();
+assert.equal(bounded.wrapper.scrollTop,bounded.height()-200,'no-scroll gesture expires instead of disabling follow permanently');
+bounded.input('wheel',{deltaY:-1});bounded.test.context.__chuanhuActivityCleanup();
+assert.equal(intentFrames.size,0,'cleanup cancels both intent and restoration frames');
+console.log('Bounded trusted wheel/key/touch/scrollbar intent prevents stale-follow compensation through a clamp');
+
+for(const key of ['PageUp','Home','ArrowUp']){
+ const focused=scrollingFixture();
+ focused.input('keydown',{key,target:{closest:selector=>selector==='summary'?{}:null}});
+ focused.wrapper.scrollTop=900;focused.replace();focused.wrapper.scrollHeight;focused.test.notify();
+ assert.equal(focused.calls.length,0,'summary navigation keys retain native scrolling intent');
+}
+for(const [type,fields] of [['wheel',{deltaY:120}],['keydown',{key:'End'}],['keydown',{key:'PageDown'}]]){
+ const downward=scrollingFixture();downward.input(type,fields);downward.replace();
+ downward.wrapper.scrollHeight;downward.test.notify();
+ assert.equal(downward.wrapper.scrollTop,downward.height()-200,'downward input at bottom does not abandon following');
+}
+console.log('Summary scroll keys are respected; ineffective downward input keeps bottom following');
